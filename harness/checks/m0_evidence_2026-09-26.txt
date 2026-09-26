@@ -72,3 +72,25 @@ adb settings put secure enabled_accessibility_services <完整列表>（保留�
 [FINDING] 八原语调试面板（按钮 + JSON 日志回显）已上线：
 android/app/src/main/java/com/hachimi/app/MainActivity.kt
 
+---
+
+## M1' DoD① 达成：八原语真机 E2E 验证（2026-09-26，调试桥驱动）
+
+驱动方式：PC 调试桥（DebugBridgeReceiver，仅 debug 构建生效）→ adb 显式广播 → Logcat 收结果。
+完整链路：launch_app(便签) → tap_by_id(text_note_view) → type_text(37字符，含真实换行，
+**用户原内容 REDACTED_NOTE_CONTENT 完整保留** + 追加证据行) → observe 自校验 evidence_verified=True
+→ screenshot 1080×2400。八原语 observe/tap_by_id/tap_xy/type_text/gesture/screenshot/
+launch_app/press 全部 ok:true。
+
+真机踩坑记录（每条都已修复并验证）：
+1. targetSdk 26+ 清单接收器收不到隐式广播 → adb 发送必须带 -n 显式组件；
+2. Android 11+ 包可见性：launch_app 需 manifest <queries> 声明（已加，查询全部 LAUNCHER）；
+3. Flyme 跨应用启动确认弹窗（"Hachimi 正在尝试打开笔记"）→ tap_xy 命中「打开」通过，
+   该 ROM 级门控必须进 M4' harness 自动化处理；
+4. AccessibilityService 截图需 config 声明 canTakeScreenshot="true"（javap 核实 ScreenshotResult
+   无宽高方法，尺寸在 HardwareBuffer 上）；
+5. adb --es 值含空格/换行会被设备端 sh 拆碎 → 长文本用引号包裹整条远程命令或改 JSON args；
+6. extras 类型不匹配（--es 传数字）会静默回退默认值 → 接收器已兼容字符串数字解析。
+
+M1' 剩余：时延基准 P50/P95、u2/Accessibility 双后端对拍（≥90% DoD）、前台服务/GateUI 联调。
+
