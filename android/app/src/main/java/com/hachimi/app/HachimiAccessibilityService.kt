@@ -132,19 +132,24 @@ class HachimiAccessibilityService : AccessibilityService() {
             callback(err("screenshot", "takeScreenshot requires API 30+ (架构 A6)"))
             return
         }
-        takeScreenshot(
-            mainExecutor,
-            object : TakeScreenshotCallback {
-                override fun onSuccess(screenshot: ScreenshotResult) {
-                    // M1' 后续：HardwareBuffer → Bitmap → JPEG bytes → Base64 交内核。
-                    callback(ok("screenshot").put("width", screenshot.width).put("height", screenshot.height))
-                }
-
-                override fun onFailure(errorCode: Int) {
-                    callback(err("screenshot", "takeScreenshot failed: $errorCode"))
-                }
+        // SDK 35+ 为三参重载（多显示支持）：displayId, executor, callback
+        // ScreenshotResult 本身无宽高（javap 核实），尺寸在 HardwareBuffer 上
+        val cb = object : AccessibilityService.TakeScreenshotCallback {
+            override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                val buffer = screenshot.hardwareBuffer
+                callback(
+                    ok("screenshot")
+                        .put("width", buffer.width)
+                        .put("height", buffer.height)
+                )
+                buffer.close()
             }
-        )
+
+            override fun onFailure(errorCode: Int) {
+                callback(err("screenshot", "takeScreenshot failed: $errorCode"))
+            }
+        }
+        takeScreenshot(android.view.Display.DEFAULT_DISPLAY, mainExecutor, cb)
     }
 
     // ---------- 原语 7: launch_app(package) ----------
