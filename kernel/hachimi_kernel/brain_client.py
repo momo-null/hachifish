@@ -15,7 +15,7 @@ class BrainError(Exception):
 
 
 class BrainClient:
-    def __init__(self, base_url, api_key, model, timeout=120):
+    def __init__(self, base_url, api_key, model, timeout=60):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
@@ -33,8 +33,11 @@ class BrainClient:
                                     "parameters": t.get("parameters", {"type": "object"})}}
                       for t in tools],
         }
+        url = self.base_url + "/chat/completions"
+        print("[brain] POST %s (%d msgs, %d tools, timeout=%ds)"
+              % (url, len(messages), len(tools), self.timeout), flush=True)
         req = urllib.request.Request(
-            self.base_url + "/chat/completions",
+            url,
             data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json",
                      "Authorization": "Bearer " + self.api_key},
@@ -42,7 +45,9 @@ class BrainClient:
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                raw = resp.read()
+                print("[brain] response %s, %d bytes" % (getattr(resp, "status", "?"), len(raw)), flush=True)
+                data = json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as e:
             raise BrainError("HTTP %d: %s" % (e.code, e.read().decode("utf-8", "ignore")[:200]))
         except Exception as e:

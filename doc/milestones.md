@@ -101,7 +101,7 @@
 | CP0 预注册冻结 | ✅ | 2026-09-26 | `preregistration_v1.2.md` + tag `prereg-v1.2`（commit 3e241b3） |
 | M0' | ✅ 条件通过 | 2026-09-26 | `harness/checks/m0_evidence_2026-09-26.txt`（PASS 8/0/2，两项豁免有据；开口：重启保持子项待验）。测试 App= Fossify 套件 5 件（notes/math/clock/gallery/filemanager），实验后卸载 |
 | M1' | ✅ 通过 | 2026-09-26 | DoD① 八原语真机 E2E ✓；DoD② 对拍 L1/L2/L3 全 100%（树级，`m1_parity_report.txt`；任务级累计口径随 M4' 验证）✓；DoD③ MediaProjection 授权流 ✓（Flyme 通知式授权 + rowStride 修复 + 帧捕获 1080×2400@173ms）；DoD④ 时延基准 p50≤17ms ✓；DoD⑤ 前台服务(mediaProjection 类型)+停止动作 ✓；DoD⑥ GateUI 弹出+allow_always 落盘 ✓。全部证据与真机发现见 `harness/checks/m0_evidence_2026-09-26.txt` M1' 段 |
-| M2' | ☐ | — | — |
+| M2' | 🔄 进行中 ~90% | 2026-09-26 起 | Chaquopy 17.0.0 构建集成 ✅（APK 23.4MB）· 真机 Python 桥 ✅（Python 3.10.19，kernel_info）· 知识层六模块移植 ✅（桌面测试 63/63 对拍绿，R6）· brain_client(urllib) ✅ · 回环 HTTP 六端点 ✅（loopback 8071）· 剧本任务 E2E ✅ · R7 检查 ✅。**开口**：BrainError NameError 已修待重装验证；真实 LLM 任务闭环（DeepSeek 配置已入 Keystore） |
 | M3' | ☐ | — | — |
 | M4' | ☐ | — | — |
 | M5' / CP2 | ☐ | — | — |

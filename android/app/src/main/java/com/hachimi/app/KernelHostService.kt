@@ -114,8 +114,14 @@ class KernelHostService : Service() {
                             """"projection":${ProjectionHolder.isRunning},"python":${com.chaquo.python.Python.isStarted()},""" +
                             """"loopback":true}"""
                 }
-                method == "POST" && path == "/task" ->
+                method == "POST" && path == "/task" -> {
+                    // BYOK 注入：Keystore 解密配置以独立参数传给 Python（无 JSON 拼接转义问题）
+                    val cfg = BrainConfigStore.load(this)
+                    if (cfg != null) {
+                        bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
+                    }
                     200 to bridge.callAttr("start_task", body).toString()
+                }
                 method == "POST" && path == "/stop" ->
                     200 to bridge.callAttr("request_stop").toString()
                 method == "GET" && path == "/status" ->

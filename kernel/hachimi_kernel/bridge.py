@@ -12,6 +12,7 @@ import json
 import threading
 import time
 
+from hachimi_kernel.brain_client import BrainClient, BrainError
 from hachimi_kernel.mini_loop import MiniLoop
 
 _bridge = None            # Kotlin 注入的原语派发器（.call(name, args_json) -> result_json）
@@ -119,8 +120,21 @@ def _make_brain(body):
     if body.get("script"):
         return ScriptedBrain(body["script"])
     from hachimi_kernel.brain_client import BrainClient
-    cfg = body.get("brain") or {}
-    return BrainClient(cfg.get("base_url", ""), cfg.get("api_key", ""), cfg.get("model", ""))
+    cfg = body.get("brain") or _brain_cfg
+    if not cfg or not cfg.get("base_url"):
+        raise BrainError("no brain configured (BYOK 未设置)")
+    print("[task] brain: %s model=%s" % (cfg["base_url"], cfg["model"]), flush=True)
+    return BrainClient(cfg["base_url"], cfg.get("api_key", ""), cfg.get("model", ""))
+
+
+_brain_cfg = None
+
+
+def set_brain(base_url, api_key=None, model=None):
+    """Kotlin 注入 BYOK 配置（Keystore 解密后以独立参数传入，避免 JSON 转义）。"""
+    global _brain_cfg
+    _brain_cfg = {"base_url": base_url, "api_key": api_key, "model": model}
+    return {"ok": True}
 
 
 # ---------------- 任务执行（回环 /task 数据面） ----------------
@@ -151,22 +165,25 @@ def request_stop():
 
 
 def _run(body, stop_flag=_stop_flag):
-    tools = _tools_with_verify()
-    brain = _make_brain(body)
     steps = []
-
-    def on_step(step):
-        steps.append(step)
-        if stop_flag["stop"]:
-            raise RuntimeError("stopped by request")
-
-    def on_finish(out, _steps):
-        with _lock:
-            _state["phase"] = "done" if out["status"] == "done" else "error"
-            _state["summary"] = out
-            _state["trajectory"] = steps
-
     try:
+        tools = _tools_with_verify()
+        brain = _make_brain(body)
+
+        def on_step(step):
+            steps.append(step)
+            a = step.get("action", {})
+            print("[task] step %d: %s -> ok=%s" % (step.get("step"), a.get("tool"),
+                  step.get("result", {}).get("ok")), flush=True)
+            if stop_flag["stop"]:
+                raise RuntimeError("stopped by request")
+
+        def on_finish(out, _steps):
+            with _lock:
+                _state["phase"] = "done" if out["status"] == "done" else "error"
+                _state["summary"] = out
+                _state["trajectory"] = steps
+
         loop = MiniLoop(objective=body.get("objective", ""),
                         done_when=body.get("done_when", ""),
                         tools=tools, brain=brain,

@@ -69,6 +69,16 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                     )
                     JSONObject().put("ok", true).put("note", "gate shown, 用户选择后写 gate_result.json")
                 }
+                "set_brain" -> {
+                    // BYOK 配置（debug 通道限定）：key 进 Keystore 加密文件，明文不落盘
+                    val ok = BrainConfigStore.save(
+                        context,
+                        args.optString("base_url"),
+                        args.optString("api_key"),
+                        args.optString("model")
+                    )
+                    JSONObject().put("ok", ok).put("note", "brain config stored (Keystore-encrypted)")
+                }
                 "screenshot" -> run {
                     // 异步：立即回执，真实结果随回调追加（latency 含等待截图完成）
                     svc.screenshot { r ->
