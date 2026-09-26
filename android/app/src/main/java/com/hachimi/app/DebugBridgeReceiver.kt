@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.util.Log
+import com.hachimi.app.gate.GateActivity
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -57,6 +58,17 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                 )
                 "launch_app" -> svc.launchApp(args.optString("package"))
                 "press" -> svc.press(args.optString("key", "back"))
+                "projection_frame" -> ProjectionHolder.captureFrameJson(context)
+                "gate_show" -> {
+                    context.startActivity(
+                        Intent(context, GateActivity::class.java)
+                            .putExtra(GateActivity.EXTRA_PACKAGE, args.optString("package", "org.fossify.notes"))
+                            .putExtra(GateActivity.EXTRA_OP, args.optString("op", "type_text"))
+                            .putExtra(GateActivity.EXTRA_PREVIEW, args.optString("preview", "Hachimi M1' gate 测试"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                    JSONObject().put("ok", true).put("note", "gate shown, 用户选择后写 gate_result.json")
+                }
                 "screenshot" -> run {
                     // 异步：立即回执，真实结果随回调追加（latency 含等待截图完成）
                     svc.screenshot { r ->

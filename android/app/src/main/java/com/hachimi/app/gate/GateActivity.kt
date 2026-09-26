@@ -43,6 +43,19 @@ class GateActivity : Activity() {
     }
 
     private fun finishWith(code: Int) {
+        // 结果落盘（调试桥/harness 经 run-as 读取）——M1' DoD⑥ 白名单记忆的前置
+        try {
+            val choice = when (code) {
+                RESULT_ALLOW_ONCE -> "allow_once"
+                RESULT_ALLOW_ALWAYS -> "allow_always"
+                else -> "deny"
+            }
+            val pkg = intent.getStringExtra(EXTRA_PACKAGE) ?: "?"
+            openFileOutput("gate_result.json", MODE_PRIVATE).use {
+                it.write("""{"package":"$pkg","op":"${intent.getStringExtra(EXTRA_OP)}","choice":"$choice"}"""
+                    .toByteArray())
+            }
+        } catch (_: Exception) {}
         setResult(code)
         finish()
     }

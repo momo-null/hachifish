@@ -162,6 +162,15 @@ class MainActivity : Activity() {
         logView.text = logBuf.toString()
     }
 
+    /** MediaProjection 授权结果：交给前台服务（mediaProjection 类型先进前台）启动观察通道。 */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PROJECTION && resultCode == RESULT_OK && data != null) {
+            KernelHostService.startProjection(this, resultCode, data)
+            refresh()
+        }
+    }
+
     private fun refresh() {
         val connected = HachimiAccessibilityService.instance != null
         status.text = "无障碍通道: ${if (connected) "已连接 ✓" else "未开启"}\n" +

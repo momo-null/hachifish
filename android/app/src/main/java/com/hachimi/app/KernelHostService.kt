@@ -19,9 +19,21 @@ class KernelHostService : Service() {
         const val CHANNEL_ID = "hachimi_kernel"
         const val NOTIFICATION_ID = 1
         const val ACTION_STOP = "com.hachimi.app.action.STOP"
+        const val ACTION_PROJECTION = "com.hachimi.app.action.PROJECTION"
+        const val EXTRA_RC = "resultCode"
+        const val EXTRA_DATA = "data"
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, KernelHostService::class.java))
+        }
+
+        /** 授权成功后调用：先以 mediaProjection 类型进前台（API 29+ 硬性要求），再取 projection。 */
+        fun startProjection(context: Context, resultCode: Int, data: Intent) {
+            val i = Intent(context, KernelHostService::class.java)
+                .setAction(ACTION_PROJECTION)
+                .putExtra(EXTRA_RC, resultCode)
+                .putExtra(EXTRA_DATA, data)
+            context.startForegroundService(i)
         }
 
         fun stop(context: Context) {
@@ -51,12 +63,36 @@ class KernelHostService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                ProjectionHolder.stop()
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_PROJECTION -> {
+                // mediaProjection 类型前台必须先于 getMediaProjection（API 29+）
+                startForeground(NOTIFICATION_ID, buildNotification(),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                val rc = intent.getIntExtra(EXTRA_RC, -1)
+                val data = intent.getParcelableExtra<Intent>(EXTRA_DATA)
+                if (data != null) ProjectionHolder.start(this, rc, data)
+            }
+            else -> startForeground(NOTIFICATION_ID, buildNotification())
         }
         return START_STICKY
     }
+
+    private fun buildNotification(): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.notif_kernel_title))
+            .setSmallIcon(android.R.drawable.ic_menu_manage)
+            .setOngoing(true)
+            .addAction(0, "停止", android.app.PendingIntent.getService(
+                this, 0,
+                Intent(this, KernelHostService::class.java).setAction(ACTION_STOP),
+                android.app.PendingIntent.FLAG_IMMUTABLE
+            ))
+            .build()
 
     override fun onBind(intent: Intent?): IBinder? = null
 }
