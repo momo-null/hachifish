@@ -1,9 +1,10 @@
 // Hachimi · app 模块
 // M1'：Kotlin 壳（AccessibilityService + MediaProjection + 前台服务 + GateUI）
-// M2'：接入 Chaquopy（com.chaquo.python 插件 + kernel/ 源集）——红线 R7 依赖白名单管 kernel/，android/ 依赖走评审
+// M2'：Chaquopy 接入（内核源集 = ../../kernel，红线 R7 依赖白名单管 kernel/，android/ 依赖走评审）
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.chaquo.python")
 }
 
 android {
@@ -16,6 +17,10 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1"
+        ndk {
+            // 研究真机为 arm64；x86_64（模拟器）体积翻倍，M3' 需要时再加
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -35,5 +40,18 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    // TODO(M2'): 回环 HTTP 服务端选型（NanoHTTPD vs 手写 ServerSocket），走 android/ 依赖评审
+    // TODO(M2' 后续): 回环 HTTP 服务端选型（NanoHTTPD vs 手写 ServerSocket），走 android/ 依赖评审
+}
+
+// Chaquopy：Python 内核源集（hachimi_kernel 包）+ 构建解释器（便携版 3.12）
+// 内核仅标准库（红线 R7），无 pip requirements。
+chaquopy {
+    defaultConfig {
+        buildPython("D:/code/hachimi/.tools/python312/python.exe")
+    }
+    sourceSets {
+        getByName("main") {
+            srcDir("../../kernel")
+        }
+    }
 }
