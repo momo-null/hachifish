@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hachimi 交互原型 · 手机版 OmniAgent</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#F4F3EE; color:#1A1B1C; font-family:'Roboto','PingFang SC','Segoe UI',Arial,sans-serif; line-height:1.6; padding:24px 20px 80px; }
+  h1 { font-size:22px; font-weight:700; }
+  h2 { font-size:17px; font-weight:600; margin:40px 0 6px; padding-left:10px; border-left:4px solid #8BC8EA; }
+  .sub { color:#6B7280; font-size:13px; margin-bottom:14px; }
+  .meta { color:#6B7280; font-size:12.5px; }
+  .board { display:flex; flex-wrap:wrap; gap:26px; }
+  .cell { width:330px; }
+  .phone { width:330px; height:660px; background:#FFFFFF; border:9px solid #1E2026; border-radius:40px; overflow:hidden; position:relative; box-shadow:0 12px 30px rgba(30,32,38,.14); display:flex; flex-direction:column; }
+  .notch { position:absolute; top:0; left:50%; transform:translateX(-50%); width:110px; height:20px; background:#1E2026; border-radius:0 0 14px 14px; z-index:30; }
+  .sbar { height:34px; background:transparent; display:flex; justify-content:space-between; align-items:flex-end; padding:0 18px 3px; font-size:11px; color:#1A1B1C; font-weight:600; flex:none; }
+  .screen { flex:1; display:flex; flex-direction:column; overflow:hidden; position:relative; }
+  .cap { margin-top:10px; }
+  .cap b { font-size:14px; }
+  .cap .d { font-size:12.5px; color:#6B7280; }
+  .cap .m { display:inline-block; font-size:11px; background:rgba(139,200,234,.18); color:#235F7E; border-radius:20px; padding:1px 8px; margin:4px 4px 0 0; }
+  .card { background:#FFFFFF; border:1px solid #E4E3DD; border-radius:14px; padding:12px 14px; margin:10px 0; }
+  .tag { display:inline-block; font-size:11px; padding:2px 8px; border-radius:20px; }
+  .t-blue { background:rgba(139,200,234,.18); color:#235F7E; }
+  .t-green { background:rgba(82,196,26,.12); color:#3D8B13; }
+  .t-red { background:rgba(234,102,104,.12); color:#A04042; }
+  .t-orange { background:rgba(244,179,147,.22); color:#8C4A2B; }
+  .t-purple { background:rgba(158,172,234,.2); color:#4A55A0; }
+  .t-gray { background:#EEF0F3; color:#6B7280; }
+  .btn { display:inline-block; text-align:center; border-radius:22px; padding:9px 0; font-size:13.5px; font-weight:600; cursor:pointer; border:none; }
+  .btn-p { background:#235F7E; color:#fff; width:100%; }
+  .btn-s { background:#EEF0F3; color:#235F7E; width:100%; margin-top:8px; }
+  .small { font-size:11.5px; color:#6B7280; }
+  /* bottom nav */
+  .nav { flex:none; height:52px; border-top:1px solid #E4E3DD; display:flex; background:#fff; }
+  .nav div { flex:1; text-align:center; font-size:11px; color:#9AA0A6; padding-top:8px; }
+  .nav div b { display:block; font-size:17px; font-weight:400; }
+  .nav .on { color:#235F7E; font-weight:600; }
+  /* app bar */
+  .appbar { flex:none; padding:8px 16px 6px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #F0EFEA; }
+  .appbar .logo { font-weight:700; font-size:15px; }
+  .chips { display:flex; gap:5px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:#52C41A; display:inline-block; margin-right:3px; }
+  /* segmented */
+  .seg { display:flex; background:#EEF0F3; border-radius:12px; padding:3px; margin:10px 14px 4px; }
+  .seg div { flex:1; text-align:center; font-size:12.5px; padding:6px 0; border-radius:9px; color:#6B7280; cursor:pointer; }
+  .seg .on { background:#fff; color:#235F7E; font-weight:600; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  /* fake target app */
+  .fake { flex:1; background:#FAFAF7; padding:14px; overflow:hidden; position:relative; }
+  .fake h4 { font-size:14px; margin-bottom:10px; }
+  .note { background:#fff; border:1px solid #ECEBE5; border-radius:10px; padding:9px 11px; font-size:12px; margin-bottom:8px; }
+  .note b { font-size:12.5px; display:block; }
+  .fab { position:absolute; right:18px; bottom:18px; width:48px; height:48px; border-radius:50%; background:#235F7E; color:#fff; font-size:26px; text-align:center; line-height:46px; box-shadow:0 4px 12px rgba(35,95,126,.35); }
+  .ground { position:absolute; right:10px; bottom:10px; width:64px; height:64px; border:2.5px dashed #EA6668; border-radius:20px; animation:gp 1.2s infinite; }
+  @keyframes gp { 0%,100%{opacity:.9} 50%{opacity:.35} }
+  /* floating agent panel */
+  .panel { position:absolute; left:10px; right:10px; bottom:10px; background:#FFFFFF; border-radius:16px; box-shadow:0 8px 24px rgba(30,32,38,.22); padding:11px 13px; z-index:20; }
+  .panel .ph { display:flex; justify-content:space-between; align-items:center; font-size:12px; font-weight:600; color:#235F7E; }
+  .log { background:#1E2026; color:#E6E9F0; border-radius:10px; padding:8px 10px; font-size:11px; font-family:ui-monospace,Menlo,Consolas,monospace; height:64px; overflow:hidden; margin:8px 0 7px; }
+  .log div { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .log .ok { color:#7BD88F; } .log .act { color:#8BC8EA; }
+  .ctrl { display:flex; gap:8px; }
+  .ctrl .btn { flex:1; padding:7px 0; font-size:12.5px; }
+  .ctrl .stop { background:rgba(234,102,104,.1); color:#A04042; }
+  /* gate modal */
+  .gate { position:absolute; inset:0; background:rgba(30,32,38,.30); z-index:25; display:flex; align-items:flex-end; }
+  .gate .box { background:#fff; border-radius:18px 18px 0 0; width:100%; padding:14px 16px 16px; }
+  .gate .btn { margin-top:7px; }
+  .g1 { background:#235F7E; color:#fff; } .g2 { background:#EEF0F3; color:#235F7E; } .g3 { background:rgba(234,102,104,.08); color:#A04042; }
+  /* split screen */
+  .split-top { flex:1.15; background:#FAFAF7; border-bottom:2px solid #8BC8EA; position:relative; overflow:hidden; }
+  .split-bot { flex:1; background:#1E2026; color:#E6E9F0; padding:10px 12px; font-size:11.5px; overflow:hidden; }
+  .split-bot .t { color:#8BC8EA; font-weight:600; font-size:11.5px; margin-bottom:4px; }
+  .timeline { display:flex; gap:4px; margin-top:8px; align-items:center; }
+  .tl { flex:1; height:5px; border-radius:3px; background:#3A3D45; }
+  .tl.done { background:#52C41A; } .tl.cur { background:#8BC8EA; animation:gp 1s infinite; }
+  .kbd { background:#EEF0F3; border-radius:4px; padding:1px 5px; font-size:11px; font-family:ui-monospace,Menlo,Consolas,monospace; display:inline-block; color:#1E2026; }
+  .split-bot .kbd { background:#3A3D45; color:#E6E9F0; }
+  /* steps list */
+  .step { display:flex; gap:9px; align-items:flex-start; padding:7px 0; border-bottom:1px dashed #F0EFEA; font-size:12.5px; }
+  .step:last-child { border-bottom:none; }
+  .ic { flex:none; width:20px; height:20px; border-radius:50%; text-align:center; line-height:20px; font-size:11px; font-weight:700; }
+  .ic.ok { background:rgba(82,196,26,.14); color:#3D8B13; }
+  .ic.go { background:rgba(139,200,234,.25); color:#235F7E; }
+  .ic.wt { background:#EEF0F3; color:#9AA0A6; }
+  .ic.wn { background:rgba(244,179,147,.3); color:#8C4A2B; }
+  .bar { height:6px; background:#EEF0F3; border-radius:3px; overflow:hidden; margin-top:5px; }
+  .bar i { display:block; height:100%; background:#8BC8EA; border-radius:3px; }
+  .banner { background:rgba(82,196,26,.08); border:1px solid rgba(82,196,26,.35); border-radius:12px; padding:10px 12px; font-size:12px; color:#2E6B0F; margin:10px 0; }
+  .research { background:rgba(158,172,234,.14); border:1px solid rgba(158,172,234,.55); border-radius:12px; padding:10px 12px; font-size:12px; color:#4A55A0; margin:10px 0; }
+  .flow { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 6px; }
+  .fs { background:#fff; border:1px solid #E4E3DD; border-radius:12px; padding:10px 14px; font-size:12.5px; }
+  .fs b { display:block; font-size:13px; }
+  .fs span { color:#6B7280; font-size:11.5px; }
+  .fa { align-self:center; color:#8BC8EA; font-size:16px; font-weight:700; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; margin:10px 0; background:#fff; border-radius:10px; overflow:hidden; }
+  th { background:#EEF1F6; text-align:left; padding:7px 10px; font-weight:600; }
+  td { padding:7px 10px; border-top:1px solid #E4E3DD; vertical-align:top; }
+  .footer { color:#9AA0A6; font-size:12px; margin-top:44px; border-top:1px solid #E4E3DD; padding-top:12px; }
+</style>
+</head>
+<body>
+
+<h1>Hachimi 交互原型</h1>
+<div class="sub">手机版 OmniAgent · 8 个关键界面 · 静态示意稿（非设计终稿）· 对应《可行性评审 v2》§3.1 技术栈与预注册 v1.2 修订清单 · 2026-09-26</div>
+
+<div class="board">
+
+<!-- S1 初始化 -->
+<div class="cell">
+  <div class="phone"><div class="notch"></div><div class="sbar"><span>9:26</span><span>▮▮▮ ⌁ 87%</span></div>
+  <div class="screen">
+    <div class="appbar"><span class="logo">Hachimi</span><span class="meta">v0.1 · 初始化 3/4</span></div>
+    <div style="padding:12px 14px; overflow:hidden;">
+      <div class="card">
+        <div class="step"><span class="ic ok">✓</span><div><b style="font-size:12.5px">无障碍服务</b><div class="small">已开启 · 操作通道（官方 API，不 root）</div></div></div>
+        <div class="step"><span class="ic ok">✓</span><div><b style="font-size:12.5px">屏幕录制</b><div class="small">已授权 · 录屏模式一次授权，连续取帧</div></div></div>
+        <div class="step"><span class="ic ok">✓</span><div><b style="font-size:12.5px">电池优化白名单</b><div class="small">防止系统回收无障碍服务</div></div></div>
+        <div class="step"><span class="ic go">4</span><div style="flex:1"><b style="font-size:12.5px">模型接入（BYOK）</b>
+          <div class="small" style="margin:4px 0">规划模型</div>
+          <div class="kbd">api.deepseek.com · sk-****7f2a</div><span class="tag t-green" style="margin-top:4px">● 已连通</span>
+          <div class="small" style="margin:6px 0 3px">视觉模型</div>
+          <div class="kbd">GLM-4V · sk-****c91d</div><span class="tag t-green" style="margin-top:4px">● 已连通</span>
+          <div class="small" style="margin-top:6px">Key 仅存本机 Keystore，不落库</div>
+        </div></div>
+      </div>
+      <button class="btn btn-p">完成，进入主界面</button>
+      <div class="small" style="text-align:center;margin-top:8px">权限引导仅首次出现 · 跳转均为系统官方入口</div>
+    </div>
+  </div></div>
+  <div class="cap"><b>S1 · 首次初始化</b><div class="d">四步授权：无障碍 → 投屏 → 白名单 → BYOK。研究机一次配好，之后免维护。</div><span class="m">M0'</span><span class="m">M2'</span></div>
+</div>
+
+<!-- S2 主界面 -->
+<div class="cell">
+  <div class="phone"><div class="notch"></div><div class="sbar"><span>9:26</span><span>▮▮▮ ⌁ 86%</span></div>
+  <div class="screen">
+    <div class="appbar"><span class="logo">Hachimi</span><div class="chips"><span class="tag t-blue"><span class="dot"></span>DeepSeek</span><span class="tag t-purple"><span class="dot"></span>GLM-4V</span></div></div>
+    <div class="seg" id="segmode"><div class="on" onclick="segpick(this)">前台引导</div><div onclick="segpick(this)">分屏</div></div>
+    <div style="padding:6px 14px 0">
+      <div class="card" style="border:1.5px solid #8BC8EA">
+        <div contenteditable="true" style="font-size:13px;min-height:44px;color:#1A1B1C">在便签里创建一条明天 9 点的提醒<span style="color:#9AA0A6">|</span></div>
+        <button class="btn btn-p" style="margin-top:6px">▶ 开始执行</button>
+        <div class="small" style="margin-top:6px">桌面版 /chat 单入口语义：一句话即任务，自动建 task</div>
+      </div>
+      <div class="small" style="margin:8px 2px 2px">最近任务</div>
+      <div class="card" style="padding:4px 12px">
+        <div class="step"><span class="ic ok">✓</span><div style="flex:1">便签 · 创建提醒笔记<div class="small">2m14s · 7 步 · 注入 1 条技能</div></div></div>
+        <div class="step"><span class="ic ok">✓</span><div style="flex:1">计算器 · 表达式连算<div class="small">1m02s · 4 步</div></div></div>
+        <div class="step"><span class="ic wn">⏸</span><div style="flex:1">图库 · 整理截图<div class="small">手动暂停于第 5 步</div></div></div>
+      </div>
+    </div>
+    <div class="nav"><div class="on"><b>▦</b>任务</div><div><b>◈</b>知识</div><div><b>⚙</b>设置</div></div>
+  </div></div>
+  <div class="cap"><b>S2 · 主界面</b><div class="d">执行模式二选一（前台引导 / 分屏）；输入框即任务入口；最近任务含知识注入标记。</div><span class="m">M2'</span><span class="m">M3'</span></div>
+</div>
+
+<!-- S3 前台引导 + 授权门控 -->
+<div class="cell">
+  <div class="phone"><div class="notch"></div><div class="sbar"><span>9:27</span><span>▮▮▮ ⌁ 85%</span></div>
+  <div class="screen" style="background:#FAFAF7">
+    <div class="fake" style="flex:1">
+      <h4>📋 便签</h4>
+      <div class="note"><b>周报草稿</b>本周完成 GUI 内核闭环…</div>
+      <div class="note"><b>购物清单</b>咖啡豆、滤纸…</div>
+      <div class="fab">+</div>
+      <div class="ground"></div>
+      <div class="panel">
+        <div class="ph"><span>▶ 前台引导 · 便签</span><span id="stepno">步骤 3/7</span></div>
+        <div class="log" id="alog">
+          <div class="ok">✓ 步骤2 · 观察：便签列表页，右下角「+」新建按钮</div>
+          <div class="act">→ 步骤3 · 点击 view_id=fab_new（悬浮新建按钮）</div>
+          <div>  等待界面响应…</div>
+        </div>
+        <div class="ctrl"><button class="btn" style="background:#EEF0F3;color:#235F7E">⏸ 暂停</button><button class="btn stop">⏹ 停止</button></div>
+      </div>
+      <div class="gate">
+        <div class="box">
+          <div style="font-weight:700;font-size:13.5px">🔐 授权门控</div>
+          <div class="small" style="margin:3px 0 4px">Hachimi 请求在「便签」中<b>输入文本</b>：「提醒：明天 9 点 项目评审」</div>
+          <div class="small">此操作由 AI 发起 · 红色虚线框为当前定位目标</div>
+          <button class="btn g1">仅本次允许</button>
+          <button class="btn g2">总是允许「便签」的文本输入</button>
+          <button class="btn g3">拒绝并停止</button>
+        </div>
+      </div>
+    </div>
+  </div></div>
+  <div class="cap"><b>S3 · 执行中：前台引导 + 授权门控</b><div class="d">agent 在目标 App 上直接操作；红色虚线框 = 视觉定位指示；底部悬浮面板实时叙述每步；敏感操作（输入/支付类页面）先过授权门控（照抄豆包形态）。</div><span class="m">M1'</span><span class="m">M3'</span></div>
+</div>
+
+<!-- S4 分屏 -->
+<div class="cell">
+  <div class="phone"><div class="notch"></div><div class="sbar"><span>9:29</span><span>▮▮▮ ⌁ 84%</span></div>
+  <div class="screen">
+    <div class="split-top" style="padding:12px 14px">
+      <h4 style="font-size:13.5px">🗺 地图 Demo · 路线详情</h4>
+      <div class="note" style="border:1.5px dashed #EA6668"><b>公司 → 家</b>预计 32 分钟 · 查看「收藏」<span class="tag t-red" style="float:right">目标元素</span></div>
+      <div class="note"><b>路线选项 B</b>预计 41 分钟</div>
+      <div class="small" style="position:absolute;bottom:6px;left:14px">上半：目标 App（MediaProjection 取帧）</div>
+    </div>
+    <div class="split-bot">
+      <div class="t">AGENT 控制台 · 分屏模式</div>
+      <div>目标：收藏公司→家的常用路线</div>
+      <div style="margin:5px 0">感知（VLM）：路线详情页，「收藏」按钮位于右下，样式为星形图标</div>
+      <div>决策：<span class="kbd">tap(0.86, 0.92) → 收藏</span></div>
+      <div class="timeline"><div class="tl done"></div><div class="tl done"></div><div class="tl done"></div><div class="tl done"></div><div class="tl cur"></div><div class="tl"></div></div>
+      <div class="small" style="color:#9AA0A6;margin-top:5px">步 5/8 · 观察→决策→执行 ✓ · 下半：agent 控制台</div>
+    </div>
+  </div></div>
+  <div class="cap"><b>S4 · 执行中：分屏模式</b><div class="d">上半目标 App、下半 agent 控制台；操作经 Accessibility 注入、观察经投屏取帧；适合长流程与自绘界面（VLM 兜底）。</div><span class="m">M1'</span><span class="m">M3'</span></div>
+</div>
+
+<!-- S5 完成 -->
+<div class="cell">
+  <div class="phone"><div class="notch"></div><div class="sbar"><span>9:31</span><span>▮▮▮ ⌁ 83%</span></div>
+  <div class="screen">
+    <div style="padding:14px">
+      <div class="card" style="text-align:center;padding:18px 14px">
+        <div style="font-size:38px">✅</div>
+        <div style="font-weight:700;font-size:15px;margin-top:2px">任务完成</div>
+        <div class="small">便签 · 创建提醒笔记</div>
+        <div style="margin-top:8px">
+          <span class="tag t-green">2m14s</span> <span class="tag t-blue">7 步</span> <span class="tag t-orange">1 次重试</span> <span class="tag t-purple">LLM 调用 9 次</span>
+        </div>
+        <div class="timeline" style="margin-top:12px"><div class="tl done"></div><div class="tl done"></div><div class="tl done"></div><div class="tl done" style="background:#F4B393"></div><div class="tl done"></div><div class="tl done"></div><div class="tl done"></div></div>
+        <div class="small">第 4 步重试（元素未响应）→ 已记录为失败片段</div>
+      </div>
+      <div class="banner">🌱 <b>学习提示</b>：成功轨迹已蒸馏为候选技能「便签-创建提醒笔记」<b>（1/3）</b>——连续 3 次成功将晋升为正式 skill，之后同类任务自动注入。</div>
+      <div class="card">
+        <div class="small">蒸馏去向</div>
+        <div class="step"><span class="ic ok">✓</span><div>skill_library · 候选条目（全局）</div></div>
+        <div class="step"><span class="ic ok">✓</span><div>world_model · 新事实：便签 FAB 位于右下角</div></div>
+        <div class="step"><span class="ic wn">…</span><div>失败片段 → failures/（14 天窗口，仅供 Curator 分析）</div></div>
+      </div>
+      <button class="btn btn-s" style="margin-top:2px">查看完整轨迹</button>
+      <button class="btn btn-s">再来一次</button>
+    </div>
+  </div></div>
+  <div class="cap"><b>S5 · 完成 + 学习提示</b><div class="d">完成即触发 Curator 蒸馏（K 闭环四步）；晋升进度对用户可见——「知识级自升级」的可视化证明点。</div><span class="m">M2'</span><span class="m">M4'</span></div>
+</div>
+
+<!-- S6 知识 Tab -->
+<div class="cell">
+  <div class="phone"><div class="notch"></div><div class="sbar"><span>9:32</span><span>▮▮▮ ⌁ 83%</span></div>
+  <div class="screen">
+    <div class="appbar"><span class="logo">知识</span><span class="tag t-gray">弱注入：开</span></div>
+    <div class="seg"><div class="on">技能</div><div>记忆</div><div>世界模型</div></div>
+    <div style="padding:6px 14px;overflow:hidden">
+      <div class="card">
+        <div class="step"><div style="flex:1"><b style="font-size:12.5px">便签-创建提醒笔记</b>
+          <div class="small">候选 · 连续成功 2/3 · 来自任务 #3 #7</div>
+          <div class="bar"><i style="width:66%"></i></div></div><span class="tag t-orange">晋升中</span></div>
+        <div class="step"><div style="flex:1"><b style="font-size:12.5px">计算器-表达式连续计算</b>
+          <div class="small">连续成功 5 次 · 平均 4 步</div></div><span class="tag t-green">active</span></div>
+        <div class="step"><div style="flex:1"><b style="font-size:12.5px">浏览器-书签批量整理</b>
+          <div class="small">候选 · 连续成功 1/3</div>
+          <div class="bar"><i style="width:33%"></i></div></div><span class="tag t-gray">观察中</span></div>
+      </div>
+      <div class="card">
+        <div class="small">全局记忆 MEMORY.md（节选）</div>
+        <div class="log" style="height:74px;margin-top:6px">
+          <div>· 便签 App 的新建按钮是右下角悬浮 FAB</div>
+          <div>· 系统「返回」手势优先于 App 内返回键</div>
+          <div>· 计算器连续运算需等待结果动画结束（约 0.8s）</div>
+        </div>
+        <div class="small" style="margin-top:6px">下次任务将注入：<b style="color:#235F7E">2 条技能 + 记忆摘要</b>（弱注入，可在设置关闭）</div>
+      </div>
+    </div>
+    <div class="nav"><div><b>▦</b>任务</div><div class="on"><b>◈</b>知识</div><div><b>⚙</b>设置</div></div>
+  </div></div>
+  <div class="cap"><b>S6 · 知识 Tab</b><div class="d">桌面版 K 系列三件套上机：技能库（N=3 晋升门可视化）、全局记忆、世界模型事实。用户能直接看到 agent「学会了什么」。</div><span class="m">M2'</span><span class="m">M4'</span></div>
+</div>
+
+<!-- S7 设置 -->
+<div class="cell">
+  <div class="phone"><div class="notch"></div><div class="sbar"><span>9:33</span><span>▮▮▮ ⌁ 82%</span></div>
+  <div class="screen">
+    <div class="appbar"><span class="logo">设置</span></div>
+    <div style="padding:6px 14px;overflow:hidden">
+      <div class="small" style="margin-top:6px">通道（BYOK）</div>
+      <div class="card">
+        <div class="step"><span class="ic ok">✓</span><div style="flex:1">规划模型 · DeepSeek<div class="small kbd">api.deepseek.com</div></div><span class="tag t-green">连通</span></div>
+        <div class="step"><span class="ic ok">✓</span><div style="flex:1">视觉模型 · GLM-4V<div class="small kbd">VLM API</div></div><span class="tag t-green">连通</span></div>
+        <div class="small" style="padding:0 2px">Key 存 Android Keystore · HTTPS 直连 · 零自有服务器</div>
+      </div>
+      <div class="small">执行</div>
+      <div class="card">
+        <div class="step"><span class="ic wt">·</span><div style="flex:1">默认模式<div class="small">前台引导</div></div><span class="tag t-blue">可切换分屏</span></div>
+        <div class="step"><span class="ic wt">·</span><div style="flex:1">授权门控级别<div class="small">敏感操作确认（输入 / 页面跳转类）</div></div><span class="tag t-blue">推荐</span></div>
+      </div>
+      <div class="small">知识（默认关，需显式开启 — K0 红线）</div>
+      <div class="card">
+        <div class="step"><span class="ic wt">·</span><div style="flex:1">弱注入<div class="small">下次任务前注入技能/记忆摘要</div></div><span class="tag t-green">开</span></div>
+        <div class="step"><span class="ic wt">·</span><div style="flex:1">Curator 蒸馏<div class="small">每次任务完成后触发（无后台定时器）</div></div><span class="tag t-green">开</span></div>
+      </div>
+      <div class="small">实验</div>
+      <div class="card">
+        <div class="step"><span class="ic wt">·</span><div style="flex:1">实验模式<div class="small">连点版本号 5 次开启（研究者入口）</div></div><span class="tag t-gray">关</span></div>
+      </div>
+    </div>
+    <div class="nav"><div><b>▦</b>任务</div><div><b>◈</b>知识</div><div class="on"><b>⚙</b>设置</div></div>
+  </div></div>
+  <div class="cap"><b>S7 · 设置</b><div class="d">三通道语义延续桌面版；「能力默认关、需显式开启」红线落到 UI；实验模式藏在版本号连点后。</div><span class="m">M2'</span></div>
+</div>
+
+<!-- S8 实验模式 -->
+<div class="cell">
+  <div class="phone"><div class="notch"></div><div class="sbar"><span>14:02</span><span>▮▮▮ ⌁ 71%</span></div>
+  <div class="screen" style="background:#FBFBFF">
+    <div class="appbar"><span class="logo">🔬 实验模式</span><span class="tag t-purple">组别 B · 自学蒸馏</span></div>
+    <div style="padding:6px 14px;overflow:hidden">
+      <div class="research">harness 已连接（adb reverse · 127.0.0.1:8071）<br>当前批次：任务 #7 便签创建 · <b>run 12/30</b> · 随机顺序由 PC 下发</div>
+      <div class="card">
+        <div class="small">注入快照（只读）</div>
+        <div class="step"><span class="ic ok">✓</span><div style="flex:1">skills_snapshot_v3<div class="small">2 条技能 + 记忆摘要 · SHA 校验一致</div></div><span class="tag t-green">锁定</span></div>
+        <div class="step"><span class="ic ok">✓</span><div style="flex:1">Curator<div class="small">实验期间冻结，防止知识漂移</div></div><span class="tag t-purple">🔒 冻结</span></div>
+      </div>
+      <div class="card">
+        <div class="small">本 run 实时</div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <div style="flex:1;text-align:center" class="card"><b style="font-size:16px">3</b><div class="small">步数</div></div>
+          <div style="flex:1;text-align:center" class="card"><b style="font-size:16px">41s</b><div class="small">耗时</div></div>
+          <div style="flex:1;text-align:center" class="card"><b style="font-size:16px">5</b><div class="small">LLM 调用</div></div>
+        </div>
+      </div>
+      <div class="card" style="border:1px dashed #EA6668">
+        <div class="small">⚠ 实验模式下蒸馏结果<b>不写入</b>正式知识库；每组每任务 ≥30 次；进度 12/1800·B 组。</div>
+      </div>
+      <button class="btn btn-s">⏸ 暂停批次（断点续跑，轨迹已落盘）</button>
+    </div>
+  </div></div>
+  <div class="cap"><b>S8 · 实验模式（研究者界面）</b><div class="d">组别/快照版本/冻结状态全部上屏——可复现性可视化的关键；harness 断连时手机侧可独立暂停续跑。</div><span class="m">M4'</span></div>
+</div>
+
+</div>
+
+<h2>交互主线（用户视角）</h2>
+<div class="flow">
+  <div class="fs"><b>① 初始化（一次性）</b><span>无障碍 → 投屏 → 白名单 → Key</span></div><div class="fa">→</div>
+  <div class="fs"><b>② 下任务</b><span>一句话 + 选前台/分屏</span></div><div class="fa">→</div>
+  <div class="fs"><b>③ 执行</b><span>悬浮叙述 + 授权门控 + 随时停</span></div><div class="fa">→</div>
+  <div class="fs"><b>④ 完成</b><span>结果卡 + 蒸馏去向</span></div><div class="fa">→</div>
+  <div class="fs"><b>⑤ 知识沉淀</b><span>候选 1/3 → 3/3 晋升</span></div><div class="fa">→</div>
+  <div class="fs"><b>⑥ 下次更强</b><span>弱注入 = 完成率提升（RQ1 待验证）</span></div>
+</div>
+
+<h2>界面 ↔ 里程碑映射</h2>
+<table>
+  <tr><th>界面</th><th>承载的机制</th><th>实现里程碑</th></tr>
+  <tr><td>S1 初始化</td><td>无障碍/投屏授权链、Keystore、BYOK 连通性自检</td><td>M0' / M2'</td></tr>
+  <tr><td>S2 主界面</td><td>/chat 单入口语义、执行模式切换、任务列表</td><td>M2' / M3'</td></tr>
+  <tr><td>S3 前台引导</td><td>Accessibility 注入 + 定位指示 + 授权门控（敏感操作确认）</td><td>M1' / M3'</td></tr>
+  <tr><td>S4 分屏</td><td>MediaProjection 观察 + VLM 感知 + 控制台</td><td>M1' / M3'</td></tr>
+  <tr><td>S5 完成</td><td>Curator 触发式蒸馏、候选晋升可视化、失败片段留存</td><td>M2' / M4'</td></tr>
+  <tr><td>S6 知识</td><td>skill 库（N=3 门）、全局记忆、世界模型、弱注入开关</td><td>M2' / M4'</td></tr>
+  <tr><td>S7 设置</td><td>三通道 BYOK、门控级别、能力默认关红线</td><td>M2'</td></tr>
+  <tr><td>S8 实验模式</td><td>组别指示、注入快照锁定、Curator 冻结、harness 通道、断点续跑</td><td>M4'</td></tr>
+</table>
+
+<div class="footer">Hachimi · 手机版 OmniAgent 交互原型 v0.1 · 2026-09-26 · 静态示意稿：视觉风格未定稿，交互语义以预注册 v1.2 与可行性评审 v2 为准 · S3 日志区含自动演示动画</div>
+
+<script>
+  // S3 执行日志自动演示
+  var logs = [
+    ['ok','✓ 步骤3 · 点击 view_id=fab_new（悬浮新建按钮）'],
+    ['ok','✓ 步骤4 · 等待编辑页加载（0.6s）'],
+    ['act','→ 步骤5 · 输入文本「提醒：明天 9 点 项目评审」'],
+    ['ok','✓ 步骤5 · 文本已注入（授权门控：仅本次）'],
+    ['act','→ 步骤6 · 点击「设提醒」→ 选择明天 9:00'],
+    ['ok','✓ 步骤7 · 保存完成，任务成功（verify 通过）']
+  ];
+  var si = 0, box = document.getElementById('alog');
+  function tick(){
+    if (!box) return;
+    var d = document.createElement('div'); d.className = logs[si][0]; d.textContent = logs[si][1];
+    box.appendChild(d); while (box.children.length > 3) box.removeChild(box.firstChild);
+    document.getElementById('stepno').textContent = '步骤 ' + Math.min(si+4,7) + '/7';
+    si = (si+1) % logs.length;
+  }
+  setInterval(tick, 1600);
+  function segpick(el){ el.parentNode.querySelectorAll('div').forEach(function(x){x.classList.remove('on')}); el.classList.add('on'); }
+</script>
+</body>
+</html>
