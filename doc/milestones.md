@@ -22,7 +22,7 @@
 
 - **目标**：一台 Android 11+ 真机成为可实验状态。
 - **入口**：CP0 预注册冻结。
-- **DoD**：① 无障碍服务开启并在重启后保持；② MediaProjection 授权流程走通（录屏模式）；③ 电池白名单 + 亮屏常驻配置完成；④ 前 5 个测试 App 安装并可手动操作；⑤ 上述四项的 checklist 脚本 + 截图证据归档。
+- **DoD**：① 无障碍服务开启并在重启后保持；② 采集链路前置验证：`adb shell screenrecord` 产出非空视频（证明设备取帧管线可用；MediaProjection **完整授权流**属 M1' DoD——M0' 时 Hachimi App 尚不存在，无授权主体）；③ 电池白名单 + 亮屏常驻配置完成；④ 前 5 个测试 App 安装并可手动操作；⑤ 上述四项的 checklist 脚本 + 截图证据归档。
 - **验证方式**：`harness/checks/m0_checklist.py`（adb 自动化核对）+ 人工 green-light。
 - **依赖**：自有真机一台。
 - **风险触发**：无障碍被 ROM 回收 → 换机型优先于写保活 hack（机型清单见评审 §4）。
@@ -31,7 +31,7 @@
 
 - **目标**：AccessibilityService + MediaProjection 桥，原语面与 u2 同构（架构 §4.1）。
 - **入口**：M0' 通过。
-- **DoD**：① 8 个原语（observe/tap_by_id/tap_xy/type_text/gesture/screenshot/launch_app/press）全部实现并有单测；② **对拍测试：同一测试 App 同一任务，u2 与 Accessibility 双后端轨迹语义一致率 ≥90%**；③ 每 action 时延实测分布（P50/P95）入文档；④ 前台服务 + 通知 + 暂停/停止可用；⑤ GateUI 三级门控可弹出并可记忆白名单。
+- **DoD**：① 8 个原语（observe/tap_by_id/tap_xy/type_text/gesture/screenshot/launch_app/press）全部实现并有单测；② **对拍测试：同一测试 App 同一任务，u2 与 Accessibility 双后端轨迹语义一致率 ≥90%**；③ MediaProjection 完整授权流走通（录屏模式一次授权连续取帧，Android 14+ 每会话确认的降级路径）；④ 每 action 时延实测分布（P50/P95）入文档；⑤ 前台服务 + 通知 + 暂停/停止可用；⑥ GateUI 三级门控可弹出并可记忆白名单。
 - **验证方式**：对拍用例脚本（进 harness，永久保留为回归）+ 时延基准脚本。
 - **依赖**：桌面 `environments/emulator/backend.py`（参照实现，已有）。
 - **风险触发**：节点树语义对不齐超 3 天 → 降级「UI 树 + 归一化坐标」混合原语并记录 ADR；总超期 >1 周 → 触发 §3 收缩 S1。
