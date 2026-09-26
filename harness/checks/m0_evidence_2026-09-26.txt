@@ -94,3 +94,33 @@ launch_app/press 全部 ok:true。
 
 M1' 剩余：时延基准 P50/P95、u2/Accessibility 双后端对拍（≥90% DoD）、前台服务/GateUI 联调。
 
+---
+
+## M1' DoD②③⑤⑥ 达成记录（2026-09-26 晚，MediaProjection 专场）
+
+**DoD③ MediaProjection 完整授权流 ✓**
+- [FINDING] Flyme(Android 16) 投屏授权**不走全屏对话框**：createScreenCaptureIntent 启动的
+  MediaProjectionPermissionActivity 一闪即毁，授权以「屏幕保护」渠道**通知**承载
+  （MiniHeadsup），用户需下拉通知栏点操作按钮。→ M4' harness 自动化注意：授权触发后
+  必须引导用户看通知栏（自动化点击系统授权 UI 被 Android 14+ 明确阻止，人工一次性操作）。
+- [FINDING] API 35+ 强制要求开始捕获前注册 MediaProjection.Callback（否则
+  IllegalStateException）——已注册 onStop 清理。
+- [FINDING] 本设备 Image.Plane rowStride=4352 > w*4=4320（行对齐 padding）→ 逐行拷贝
+  紧凑缓冲后 copyPixelsFromBuffer。修复后 captureFrame ok:true 1080×2400。
+- [FINDING] Flyme「屏幕共享保护」功能（通知保护/验证码保护/应用保护，Flyme Pay 默认
+  受保护）会在投屏时对特定窗口黑屏——测试 App 集已规避该场景；harness 需检测受保护
+  窗口导致的黑帧。
+- 帧捕获时延 173ms（含 PNG 落盘），观察通道口径内。
+
+**DoD⑥ GateUI 联调 ✓**
+- 远程触发 gate_show → 弹窗 → 用户选「总是允许」→ gate_result.json 落盘
+  {"package":"org.fossify.notes","op":"type_text","choice":"allow_always"}——白名单
+  记忆前置机制工作正常。
+
+**DoD② 对拍 ✓（树级）**
+- L1 严格(bounds+text+id) / L2 几何 / L3 文本 全部 100%（u2 包名过滤后 15 节点全对齐，
+  报告见 m1_parity_report.txt）。关键修复：u2 按 package 过滤应用窗口、a11y 先抓 u2 后连
+  （instrumentation 互斥）、结果走 run-as 文件（logcat 4KB 截断）。
+
+**M1' 六项 DoD 全部达成，green-light。剩余开口：M0' 重启保持子项（用户暂缓）。**
+

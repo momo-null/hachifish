@@ -54,6 +54,14 @@ object ProjectionHolder {
             handlerThread = HandlerThread("HachimiProjection").apply { start() }
             handler = Handler(handlerThread!!.looper)
 
+            // API 35+ 强制要求：开始捕获前必须注册 Callback（响应投屏停止事件，管理资源）
+            mp.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.i(TAG, "projection stopped by system/user, cleaning up")
+                    stop()
+                }
+            }, handler)
+
             val reader = ImageReader.newInstance(w, h, android.graphics.PixelFormat.RGBA_8888, 2)
             reader.setOnImageAvailableListener({ r ->
                 val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
@@ -71,6 +79,7 @@ object ProjectionHolder {
             Log.i(TAG, "projection started ${w}x$h")
             JSONObject().put("ok", true).put("width", w).put("height", h)
         } catch (e: Exception) {
+            Log.e(TAG, "start failed: ${e.javaClass.simpleName}: ${e.message}")
             stop()
             JSONObject().put("ok", false).put("error", "${e.javaClass.simpleName}: ${e.message}")
         }
@@ -82,14 +91,24 @@ object ProjectionHolder {
         val img: Image = latest ?: return JSONObject().put("ok", false).put("error", "no frame yet")
         return try {
             val plane = img.planes[0]
-            val bitmap: Bitmap
-            if (plane.rowStride == img.width * 4) {
-                bitmap = Bitmap.createBitmap(img.width, img.height, Bitmap.Config.ARGB_8888)
+            val w = img.width
+            val h = img.height
+            val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            if (plane.rowStride == w * 4) {
                 bitmap.copyPixelsFromBuffer(plane.buffer)
             } else {
-                // 非对齐 rowStride（少数设备）：逐行去 padding。骨架阶段先诚实报错，后续补齐。
-                return JSONObject().put("ok", false)
-                    .put("error", "rowStride ${plane.rowStride} != width*4 ${img.width * 4}（逐行拷贝未实现）")
+                // 行对齐 padding（本设备 rowStride=4352, w*4=4320）：逐行拷入紧凑缓冲
+                val src = plane.buffer
+                src.rewind()
+                val clean = java.nio.ByteBuffer.allocate(w * 4 * h)
+                val row = ByteArray(w * 4)
+                for (y in 0 until h) {
+                    src.position(y * plane.rowStride)
+                    src.get(row)
+                    clean.put(row)
+                }
+                clean.rewind()
+                bitmap.copyPixelsFromBuffer(clean)
             }
             val file = File(context.filesDir, "projection_frame.png")
             FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 90, it) }

@@ -100,7 +100,7 @@
 | CP1 打包定案 | ✅ | 2026-09-26 | 评审 §2.1 spike（commit e2dcf94） |
 | CP0 预注册冻结 | ✅ | 2026-09-26 | `preregistration_v1.2.md` + tag `prereg-v1.2`（commit 3e241b3） |
 | M0' | ✅ 条件通过 | 2026-09-26 | `harness/checks/m0_evidence_2026-09-26.txt`（PASS 8/0/2，两项豁免有据；开口：重启保持子项待验）。测试 App= Fossify 套件 5 件（notes/math/clock/gallery/filemanager），实验后卸载 |
-| M1' | ☐ | — | — |
+| M1' | ✅ 通过 | 2026-09-26 | DoD① 八原语真机 E2E ✓；DoD② 对拍 L1/L2/L3 全 100%（树级，`m1_parity_report.txt`；任务级累计口径随 M4' 验证）✓；DoD③ MediaProjection 授权流 ✓（Flyme 通知式授权 + rowStride 修复 + 帧捕获 1080×2400@173ms）；DoD④ 时延基准 p50≤17ms ✓；DoD⑤ 前台服务(mediaProjection 类型)+停止动作 ✓；DoD⑥ GateUI 弹出+allow_always 落盘 ✓。全部证据与真机发现见 `harness/checks/m0_evidence_2026-09-26.txt` M1' 段 |
 | M2' | ☐ | — | — |
 | M3' | ☐ | — | — |
 | M4' | ☐ | — | — |
