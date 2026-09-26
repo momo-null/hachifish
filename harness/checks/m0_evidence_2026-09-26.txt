@@ -17,3 +17,19 @@ M0' checklist 证据 · 2026-09-26 · 设备 REDACTED_SERIAL（SDK 36，Meizu/Fl
   待重启手机后重跑本脚本确认；Hachimi 自身服务在 M1' 加入。
 - 电池白名单对 Hachimi 的加白在 M2'（App 存在后）执行；本阶段仅验证 dumpsys 读取可用。
 - 屏幕锁定 2 分钟待用户调整（充电保持唤醒 / 30 分钟）。
+
+---
+
+## 第二次运行（同日，用户暂缓重启，追加验证）
+
+[PASS] Android 版本 >= 11 —— SDK 36
+[PASS] 无障碍服务已开启 —— hello.redacted-package.app/hello.redacted-package.app.LttService
+[MANUAL] 电池优化白名单（读数正常，Hachimi 加白待 M2' App 存在后执行）
+[MANUAL] 屏幕自动锁定 2 分钟 —— 但 `settings get global stay_on_while_plugged_in` = **15**
+        （位掩码 1=AC/2=USB/4=无线 全开 + ROM 扩展位）→ **插电场景（含 USB）屏幕保持常亮**，
+        「亮屏常驻」要求在 USB 连接的实验形态下已实质满足（实验设计本就全程插机）
+[PASS] 采集链路（screenrecord）—— 180 KB
+[MANUAL] 测试 App 安装 —— 选型中
+
+结论：DoD①②③⑤ 已达成或实质满足（①的重启保持子项待用户方便时重启验证）；
+DoD④ 测试 App 选型/install 为 M0' green-light 的唯一剩余阻塞项。
