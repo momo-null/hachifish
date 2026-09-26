@@ -59,3 +59,16 @@ DoD④ 测试 App 选型/install 为 M0' green-light 的唯一剩余阻塞项。
 
 M0' DoD⑤ 证据齐备。剩余开口：①重启保持子项（用户暂缓，待机重启后重跑确认）。
 
+---
+
+## M1' 真机发现（2026-09-26，harness 异常恢复设计输入）
+
+[FINDING] force-stop 应用后，Flyme(SDK 36) 会把该应用的无障碍服务从
+enabled_accessibility_services 中移除（不只是解绑）。恢复方式：
+adb settings put secure enabled_accessibility_services <完整列表>（保留其他服务，
+冒号分隔）；写入后系统自动重绑，无需用户手动开关。实测已用此法恢复。
+→ 必须进 M4' harness 的「异常恢复」设计（红线 R9 关联：长实验无人值守自愈）。
+
+[FINDING] 八原语调试面板（按钮 + JSON 日志回显）已上线：
+android/app/src/main/java/com/hachimi/app/MainActivity.kt
+
