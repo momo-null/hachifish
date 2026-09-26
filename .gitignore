@@ -1,0 +1,22 @@
+# Android / Kotlin
+
+# Gradle / Android Studio
+*.iml
+.gradle/
+local.properties
+.idea/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# misc
+.DS_Store
+Thumbs.db
