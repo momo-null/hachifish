@@ -42,6 +42,7 @@ class DebugBridgeReceiver : BroadcastReceiver() {
             }
         }
 
+        val t0 = System.currentTimeMillis()
         val result: JSONObject = if (svc == null) {
             JSONObject().put("ok", false).put("error", "accessibility not bound")
         } else try {
@@ -57,8 +58,13 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                 "launch_app" -> svc.launchApp(args.optString("package"))
                 "press" -> svc.press(args.optString("key", "back"))
                 "screenshot" -> run {
-                    // 异步：立即回执，真实结果随回调追加到 Logcat
-                    svc.screenshot { r -> Log.i(TAG, JSONObject().put("prim", "screenshot_result").put("result", r).toString()) }
+                    // 异步：立即回执，真实结果随回调追加（latency 含等待截图完成）
+                    svc.screenshot { r ->
+                        Log.i(TAG, JSONObject()
+                            .put("prim", "screenshot_result")
+                            .put("result", r)
+                            .put("latency_ms", System.currentTimeMillis() - t0).toString())
+                    }
                     JSONObject().put("ok", true).put("note", "async, result follows")
                 }
                 else -> JSONObject().put("ok", false).put("error", "unknown primitive: $prim")
@@ -67,7 +73,10 @@ class DebugBridgeReceiver : BroadcastReceiver() {
             JSONObject().put("ok", false).put("error", "${e.javaClass.simpleName}: ${e.message}")
         }
 
-        Log.i(TAG, JSONObject().put("prim", prim).put("args", args).put("result", result).toString())
+        val out = JSONObject()
+            .put("prim", prim).put("args", args).put("result", result)
+            .put("latency_ms", System.currentTimeMillis() - t0)
+        Log.i(TAG, out.toString())
     }
 
     companion object {
