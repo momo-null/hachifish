@@ -30,25 +30,72 @@ def adb(*args, timeout=60):
     return r.stdout.decode("utf-8", "ignore")
 
 
-def bridge(prim, extra=None):
-    """调用 Hachimi 调试桥原语并从 logcat 取回结果 JSON。"""
+def bridge(prim, extra=None, wait=1.5):
+    """调用 Hachimi 调试桥原语，结果经 App 私有文件 + run-as 读取（绕开 logcat 4KB 截断）。"""
     cmd = (f"am broadcast -a com.hachimi.app.DEBUG_PRIMITIVE "
            f"-n com.hachimi.app/.DebugBridgeReceiver --es prim {prim}")
     for k, v in (extra or {}).items():
         cmd += f" --es {k} '{v}'"
     adb("shell", cmd)
-    time.sleep(1.0)
-    out = adb("logcat", "-d", "-s", "HachimiDebug:*", "-t", "5")
-    lines = [l for l in out.splitlines() if "HachimiDebug" in l]
-    if not lines:
+    time.sleep(wait)
+    out = adb("exec-out", "run-as", "com.hachimi.app", "cat", "files/bridge_result.json")
+    if not out.strip():
         raise RuntimeError("bridge no response")
-    obj = json.loads(re.search(r"\{.*\}", lines[-1].split("HachimiDebug: ", 1)[1]).group(0))
-    return obj
+    return json.loads(re.search(r"\{.*\}", out, re.S).group(0))
 
 
-def semantic_u2(xml):
+A11Y_HACHIMI = "com.hachimi.app/com.hachimi.app.HachimiAccessibilityService"
+
+
+def force_rebind():
+    """恢复配方（实测有效，按序）：
+    1. force-stop u2 的 instrumentation（它会独占/挤掉 a11y 绑定）
+    2. am kill 本应用进程
+    3. settings 开关切换（disable→enable 触发系统重绑）"""
+    adb("shell", "am force-stop com.github.uiautomator")
+    adb("shell", "am kill com.hachimi.app")
+    time.sleep(1.5)
+    cur = adb("shell", "settings get secure enabled_accessibility_services").strip()
+    without = ":".join(p for p in cur.split(":") if p and p != A11Y_HACHIMI)
+    with_h = (without + ":" + A11Y_HACHIMI) if without else A11Y_HACHIMI
+    adb("shell", f"settings put secure enabled_accessibility_services {without}")
+    time.sleep(1.5)
+    adb("shell", f"settings put secure enabled_accessibility_services {with_h}")
+    time.sleep(2)
+
+
+def wait_bound(timeout_s=75):
+    """冷启动需要数秒（broadcast 拉起进程），未响应≠未绑定；强制恢复只做一次，
+    恢复后给足重绑时间再轮询——否则会杀掉刚恢复的绑定。"""
+    deadline = time.time() + timeout_s
+    forced = False
+    last_err = ""
+    while time.time() < deadline:
+        try:
+            r = bridge("observe", wait=2.5)
+            if r["result"].get("ok"):
+                print("  a11y bound")
+                return
+            last_err = str(r["result"].get("error"))
+        except Exception as e:
+            last_err = type(e).__name__
+        if not forced and time.time() > deadline - 45:
+            print(f"  force rebind (last: {last_err}) ...")
+            force_rebind()
+            forced = True
+        time.sleep(4)
+    raise RuntimeError(f"accessibility service not bound within {timeout_s}s (last: {last_err})")
+
+
+def semantic_u2(xml, app_pkg):
+    """解析 u2 XML。按 package 过滤到应用窗口——u2 dump 含状态栏/导航栏/输入法等
+    系统窗口节点（各自带不同 package），a11y rootInActiveWindow 只含应用窗口，
+    不按包名限定范围会引入纯窗口差异（一致性口径必须定义在同一范围）。"""
+    root = etree.fromstring(xml.encode("utf-8"))
     nodes = []
-    for n in etree.fromstring(xml.encode("utf-8")).iter("node"):
+    for n in root.iter("node"):
+        if n.get("package") != app_pkg:
+            continue
         text = n.get("text") or ""
         rid = n.get("resource-id") or ""
         clickable = n.get("clickable") == "true"
@@ -86,29 +133,38 @@ def compare(a, b, label):
 
 
 def main():
-    print("== connect u2 ==")
-    d = u2.connect(SERIAL)
-    info = d.info  # 触发 agent 就绪
-    print("  u2 device ready:", info.get("displayRotation") is not None)
+    # 顺序关键（实测：u2 的 instrumentation 连接会挤掉 a11y 绑定）：
+    # 先恢复并抓取 a11y 数据，最后才连 u2
+    print("== wait a11y bound ==")
+    wait_bound()
 
-    # 统一前台：便签列表
+    print("== launch notes ==")
     bridge("launch_app", {"package": "org.fossify.notes"})
     time.sleep(2.5)
 
-    print("== dump u2 (XML) ==")
-    xml = d.dump_hierarchy()
-    n_u2 = semantic_u2(xml)
+    # 统一屏幕状态：收起输入法（u2 dump 含 IME 全窗口，a11y rootInActiveWindow 只含
+    # 应用窗口；键盘不收起会引入纯窗口范围差异，污染一致性口径）
+    subprocess.run([ADB, "shell", "input", "keyevent", "111"], capture_output=True, timeout=30)
+    time.sleep(1.5)
 
-    print("== dump Hachimi (a11y JSON) ==")
+    print("== dump Hachimi (a11y JSON) 先抓 ==")
     obj = bridge("observe")
     if not obj["result"].get("ok"):
         raise RuntimeError("observe failed: " + str(obj["result"]))
     n_a11y = semantic_a11y(obj["result"]["tree"])
 
+    print("== connect u2 + dump (XML) 后抓 ==")
+    d = u2.connect(SERIAL)
+    # 应用窗口范围 = 本次实验启动的包（app_current 在过渡期可能返回桌面，不可靠）
+    app_pkg = "org.fossify.notes"
+    xml = d.dump_hierarchy()
+    n_u2 = semantic_u2(xml, app_pkg)
+
     print("== compare ==")
-    j_strict = compare([x for x in n_u2], [x for x in n_a11y], "L1 严格(bounds+text+id)")
-    j_bounds = compare([(x["bounds"], x["text"]) for x in n_u2],
-                       [(x["bounds"], x["text"]) for x in n_a11y], "L2 几何(bounds+text)")
+    k_strict = lambda x: (x["bounds"], x["text"], x["rid"])
+    k_bounds = lambda x: (x["bounds"], x["text"])
+    j_strict = compare([k_strict(x) for x in n_u2], [k_strict(x) for x in n_a11y], "L1 严格(bounds+text+id)")
+    j_bounds = compare([k_bounds(x) for x in n_u2], [k_bounds(x) for x in n_a11y], "L2 几何(bounds+text)")
     tu = {x["text"] for x in n_u2 if x["text"]}
     ta = {x["text"] for x in n_a11y if x["text"]}
     j_text = len(tu & ta) / len(tu | ta) if (tu or ta) else 1.0

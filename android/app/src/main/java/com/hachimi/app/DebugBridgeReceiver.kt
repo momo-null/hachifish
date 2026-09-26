@@ -76,7 +76,15 @@ class DebugBridgeReceiver : BroadcastReceiver() {
         val out = JSONObject()
             .put("prim", prim).put("args", args).put("result", result)
             .put("latency_ms", System.currentTimeMillis() - t0)
-        Log.i(TAG, out.toString())
+        // 大结果（observe 全树 >4KB）会被 logcat 截断，落文件由 PC run-as 读取
+        try {
+            context.openFileOutput("bridge_result.json", Context.MODE_PRIVATE).use {
+                it.write(out.toString().toByteArray())
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "write result failed: ${e.message}")
+        }
+        Log.i(TAG, out.toString().take(200))
     }
 
     companion object {
