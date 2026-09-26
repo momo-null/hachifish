@@ -84,17 +84,49 @@ class KernelHostService : Service() {
     }
 
     /** M2' DoD②：Chaquopy Python 桥冒烟——启动解释器并调用 hachimi_kernel.kernel_info()。 */
+    private var loopback: LoopbackServer? = null
+
     private fun attachKernel() {
         try {
             if (!com.chaquo.python.Python.isStarted()) {
                 com.chaquo.python.Python.start(com.chaquo.python.android.AndroidPlatform(this))
             }
-            val info = com.chaquo.python.Python.getInstance()
-                .getModule("hachimi_kernel").callAttr("kernel_info")
+            val py = com.chaquo.python.Python.getInstance()
+            val info = py.getModule("hachimi_kernel").callAttr("kernel_info")
             android.util.Log.i("HachimiKernel", "kernel_info: ${info.toString()}")
+
+            // 原语派发器注入 Python（工具面定义在 hachimi_kernel.bridge.TOOL_SPECS）
+            val dispatcher = PrimitiveDispatcher()
+            py.getModule("hachimi_kernel.bridge").callAttr("register_bridge", dispatcher)
+            startLoopback(py)
         } catch (e: Exception) {
             android.util.Log.e("HachimiKernel", "kernel attach failed: ${e.javaClass.simpleName}: ${e.message}")
         }
+    }
+
+    private fun startLoopback(py: com.chaquo.python.Python) {
+        if (loopback?.isAlive == true) return
+        loopback = LoopbackServer(8071) { method, path, body ->
+            val bridge = py.getModule("hachimi_kernel.bridge")
+            when {
+                method == "GET" && path == "/health" -> {
+                    200 to """{"ok":true,"a11y":${HachimiAccessibilityService.instance != null},""" +
+                            """"projection":${ProjectionHolder.isRunning},"python":${com.chaquo.python.Python.isStarted()},""" +
+                            """"loopback":true}"""
+                }
+                method == "POST" && path == "/task" ->
+                    200 to bridge.callAttr("start_task", body).toString()
+                method == "POST" && path == "/stop" ->
+                    200 to bridge.callAttr("request_stop").toString()
+                method == "GET" && path == "/status" ->
+                    200 to bridge.callAttr("status").toString()
+                method == "GET" && path == "/metrics" ->
+                    200 to bridge.callAttr("metrics").toString()
+                method == "GET" && path == "/trajectory" ->
+                    200 to bridge.callAttr("trajectory").toString()
+                else -> 404 to """{"ok":false,"error":"no route: $method $path"}"""
+            }
+        }.also { it.start() }
     }
 
     private fun buildNotification(): Notification =
