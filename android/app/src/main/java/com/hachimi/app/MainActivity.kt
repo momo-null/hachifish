@@ -26,6 +26,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var logView: TextView
     private lateinit var debugBox: LinearLayout
+    private lateinit var testInput: android.widget.EditText
     private val logBuf = StringBuilder()
     private var lastTree: JSONArray? = null
     private val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -68,7 +69,11 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(0, pad, 0, 0)
         }
-        box.addView(sectionLabel("── 八原语调试面板（红虚线=未接，绿=可用）──"))
+        box.addView(sectionLabel("── 八原语调试面板 ──"))
+        testInput = android.widget.EditText(this).apply {
+            hint = "④ type_text 的目标输入框"
+        }
+        box.addView(testInput)
         box.addView(debugBox)
 
         logView = TextView(this).apply {
@@ -94,7 +99,10 @@ class MainActivity : Activity() {
         dbg("① observe（UI 树）") { primObserve() }
         dbg("② tap_by_id（缓存树首个可点击）") { primTapById() }
         dbg("③ tap_xy(0.5,0.9)") { svc.tapXY(0.5, 0.9) }
-        dbg("④ type_text（先聚焦输入框）") { svc.typeText("Hachimi M1' 测试 123") }
+        dbg("④ type_text（替换上方输入框内容）") {
+            testInput.requestFocus()
+            svc.typeText("Hachimi M1' 测试 123")
+        }
         dbg("⑤ gesture 上滑") {
             svc.gesture(JSONArray().put(JSONArray().put(0.5).put(0.8)).put(JSONArray().put(0.5).put(0.3)))
         }
