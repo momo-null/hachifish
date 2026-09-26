@@ -20,3 +20,4 @@ venv/
 # misc
 .DS_Store
 Thumbs.db
+.tools/

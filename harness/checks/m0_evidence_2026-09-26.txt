@@ -1,0 +1,19 @@
+M0' checklist 证据 · 2026-09-26 · 设备 REDACTED_SERIAL（SDK 36，Meizu/Flyme）· USB adb
+（platform-tools 37.0.1，USB 调试授权于连接后 10s 内完成；脚本 3.6 兼容修复后首次全量运行）
+
+== 设备：REDACTED_SERIAL ==
+
+[PASS]  Android 版本 >= 11 —— SDK 36
+[PASS]  无障碍服务已开启 —— hello.redacted-package.app/hello.redacted-package.app.LttService
+[MANUAL] 电池优化白名单（当前读数） —— 手机上：设置 → 电池 → 无限制/不加优化。 白名单样例：system-excidle,com.meizu.pps,1000
+[MANUAL] 屏幕自动锁定 >= 30 分钟 —— 当前 2 分钟；建议设 30 分钟或开发期间用「充电时保持唤醒」
+[PASS]  采集链路（screenrecord） —— 114 KB
+[MANUAL] 测试 App 安装 —— 未指定 --pkg；M0' DoD④ 要求前 5 个测试 App 装机
+
+== 汇总：PASS 3 / FAIL 0 / MANUAL 3 ==
+
+备注：
+- 无障碍当前开启的是既有第三方服务（redacted-package），仅证明开关可用；DoD① 的「重启后保持」
+  待重启手机后重跑本脚本确认；Hachimi 自身服务在 M1' 加入。
+- 电池白名单对 Hachimi 的加白在 M2'（App 存在后）执行；本阶段仅验证 dumpsys 读取可用。
+- 屏幕锁定 2 分钟待用户调整（充电保持唤醒 / 30 分钟）。

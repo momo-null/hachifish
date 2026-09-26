@@ -26,7 +26,9 @@ def adb(serial, *args, timeout=15):
     if serial:
         cmd += ["-s", serial]
     cmd += list(args)
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # capture_output/text 需要 Py3.7+；用 universal_newlines 兼容 3.6
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       universal_newlines=True, timeout=timeout)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
