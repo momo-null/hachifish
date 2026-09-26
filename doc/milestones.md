@@ -99,7 +99,7 @@
 |--------|------|------|------|
 | CP1 打包定案 | ✅ | 2026-09-26 | 评审 §2.1 spike（commit e2dcf94） |
 | CP0 预注册冻结 | ✅ | 2026-09-26 | `preregistration_v1.2.md` + tag `prereg-v1.2`（commit 3e241b3） |
-| M0' | ☐ | — | — |
+| M0' | ✅ 条件通过 | 2026-09-26 | `harness/checks/m0_evidence_2026-09-26.txt`（PASS 8/0/2，两项豁免有据；开口：重启保持子项待验）。测试 App= Fossify 套件 5 件（notes/math/clock/gallery/filemanager），实验后卸载 |
 | M1' | ☐ | — | — |
 | M2' | ☐ | — | — |
 | M3' | ☐ | — | — |

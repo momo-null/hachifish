@@ -33,3 +33,29 @@ M0' checklist 证据 · 2026-09-26 · 设备 REDACTED_SERIAL（SDK 36，Meizu/Fl
 
 结论：DoD①②③⑤ 已达成或实质满足（①的重启保持子项待用户方便时重启验证）；
 DoD④ 测试 App 选型/install 为 M0' green-light 的唯一剩余阻塞项。
+
+---
+
+## 第三次运行（同日，测试 App 装机后，--pkg 全量）
+
+== 设备：REDACTED_SERIAL ==
+
+[PASS]  Android 版本 >= 11 —— SDK 36
+[PASS]  无障碍服务已开启 —— hello.redacted-package.app/hello.redacted-package.app.LttService
+[MANUAL] 电池优化白名单 —— 已豁免：Hachimi 加白顺延至 M2'（App 存在后），dumpsys 读取已验证可用
+[MANUAL] 屏幕自动锁定 —— 已豁免：stay_on_while_plugged_in=15 覆盖插电场景（实验形态全程插机）
+[PASS]  采集链路（screenrecord） —— 464 KB
+[PASS]  测试 App org.fossify.notes —— 已安装
+[PASS]  测试 App org.fossify.math —— 已安装（注：Fossify Calculator 的实际包名是 org.fossify.math）
+[PASS]  测试 App org.fossify.clock —— 已安装
+[PASS]  测试 App org.fossify.gallery —— 已安装
+[PASS]  测试 App org.fossify.filemanager —— 已安装
+
+== 汇总：PASS 8 / FAIL 0 / MANUAL 2（两项豁免有据）==
+
+安装记录（adb install -r 全部 Success，APK 来源 FossifyOrg GitHub Releases，经 gh-proxy 下载，
+版本：notes 1.7.0 / calculator 1.4.0 / clock 1.6.0 / gallery 1.13.1 / file-manager 1.6.1）：
+用户授权：实验结束即卸载。
+
+M0' DoD⑤ 证据齐备。剩余开口：①重启保持子项（用户暂缓，待机重启后重跑确认）。
+
