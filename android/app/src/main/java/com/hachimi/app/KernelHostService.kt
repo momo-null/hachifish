@@ -86,8 +86,11 @@ class KernelHostService : Service() {
     /** M2' DoD②：Chaquopy Python 桥冒烟——启动解释器并调用 hachimi_kernel.kernel_info()。 */
     private fun attachKernel() {
         try {
-            val py = com.chaquo.python.Python.getInstance()
-            val info = py.getModule("hachimi_kernel").callAttr("kernel_info")
+            if (!com.chaquo.python.Python.isStarted()) {
+                com.chaquo.python.Python.start(com.chaquo.python.android.AndroidPlatform(this))
+            }
+            val info = com.chaquo.python.Python.getInstance()
+                .getModule("hachimi_kernel").callAttr("kernel_info")
             android.util.Log.i("HachimiKernel", "kernel_info: ${info.toString()}")
         } catch (e: Exception) {
             android.util.Log.e("HachimiKernel", "kernel attach failed: ${e.javaClass.simpleName}: ${e.message}")

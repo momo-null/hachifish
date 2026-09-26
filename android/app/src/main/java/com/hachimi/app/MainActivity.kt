@@ -34,6 +34,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
+        // 内核随 App 启动（交互原型 S1→S2：初始化完成即挂载内核；幂等，服务未运行时才拉起）
+        KernelHostService.start(this)
     }
 
     override fun onResume() {
