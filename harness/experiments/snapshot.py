@@ -16,21 +16,16 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 
-ADB = os.environ.get("HACHIMI_ADB", r"D:/code/hachimi/.tools/platform-tools/adb.exe")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _env import adb, TMP
+
 APP = "com.hachimi.app"
 # runtime_paths 把 HACHIMI_DATA_DIR（files/）直接当桌面 ~/.omniagent：
 # tasks/skills/memory/snapshots 都在 files/ 下（架构 §5 的 omniagent/ 前缀示意不适用）
 DEV_ROOT = "files/snapshots"
-TMP = os.environ.get("HACHIMI_TMP", r"D:/code/hachimi/.tools/cmdtmp")
-
-
-def adb(*args, timeout=120):
-    r = subprocess.run([ADB, *args], capture_output=True, text=True, timeout=timeout)
-    return r.stdout + r.stderr
 
 
 def sha256_file(path):

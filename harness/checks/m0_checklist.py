@@ -101,6 +101,8 @@ def main():
 
     # 5. 采集链路前置验证（M0' DoD②：screenrecord 非空即通过；
     #    MediaProjection 完整授权流在 M1' 有 App 后验证）
+    #    ColorOS(realme) 封禁 shell 执行 screenrecord（binary 存在但 exec 被拒）——
+    #    实验管线只依赖 screencap（PNG），故 screenrecord 不可用时回退 screencap 判定。
     tmp = Path(tempfile.gettempdir()) / "hachimi_m0_capture.mp4"
     try:
         shell(serial, f"screenrecord --time-limit 3 /sdcard/hachimi_m0_test.mp4", timeout=20)
@@ -111,9 +113,21 @@ def main():
         if code == 0 and size > 10240:
             record("采集链路（screenrecord）", "PASS", f"{size // 1024} KB")
         else:
-            record("采集链路（screenrecord）", "FAIL", f"pull={code == 0}, size={size}")
-    except subprocess.TimeoutExpired:
-        record("采集链路（screenrecord）", "FAIL", "screenrecord 超时")
+            raise OSError("screenrecord empty")
+    except Exception:
+        # 回退：screencap（PNG 静帧）。管线（runner/drivers）只用 screencap。
+        cap = Path(tempfile.gettempdir()) / "hachimi_m0_capture.png"
+        code, _ = adb(serial, "shell", "screencap -p /sdcard/hachimi_m0_test.png", timeout=30)
+        code2, _ = adb(serial, "pull", "/sdcard/hachimi_m0_test.png", str(cap), timeout=30)
+        shell(serial, "rm /sdcard/hachimi_m0_test.png")
+        size = cap.stat().st_size if code2 == 0 and cap.exists() else 0
+        if code2 == 0 and size > 10240:
+            record("采集链路（screencap 回退）", "PASS",
+                   f"{size // 1024} KB（screenrecord 被 ROM 封禁，视频证据走 App 侧 MediaProjection）")
+        else:
+            record("采集链路（screencap 回退）", "FAIL", f"pull={code == 0 and code2 == 0}, size={size}")
+        if cap.exists():
+            cap.unlink()
     finally:
         if tmp.exists():
             tmp.unlink()

@@ -1,0 +1,28 @@
+{
+  "_comment": "设备 profile（跨品牌兼容，2026-09-27 改造）：按 ro.product.brand 匹配，未命中回退 default。字段经调试桥 config 原语注入到设备端 SharedPreferences(hachimi_config)。新增品牌时只在此加一项，不碰内核/原语代码。",
+  "default": {
+    "tap_bottom_limit": "1.0",
+    "app_switch_warning": false,
+    "permission_dialog_visible_to_a11y": true
+  },
+  "flyme": {
+    "tap_bottom_limit": "0.93",
+    "app_switch_warning": true,
+    "permission_dialog_visible_to_a11y": false
+  },
+  "meizu": {
+    "tap_bottom_limit": "0.93",
+    "app_switch_warning": true,
+    "permission_dialog_visible_to_a11y": false
+  },
+  "realme": {
+    "tap_bottom_limit": "1.0",
+    "app_switch_warning": false,
+    "permission_dialog_visible_to_a11y": false
+  },
+  "coloros": {
+    "tap_bottom_limit": "1.0",
+    "app_switch_warning": false,
+    "permission_dialog_visible_to_a11y": false
+  }
+}

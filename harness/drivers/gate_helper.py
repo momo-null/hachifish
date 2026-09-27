@@ -2,15 +2,12 @@
 """Gate observation helper: dump current screen tree via the debug bridge and
 locate gate buttons (allow-once / allow-always / deny) with absolute centers."""
 import json
+import os
 import subprocess
 import sys
 
-ADB = r"D:/code/hachimi/.tools/platform-tools/adb.exe"
-
-
-def adb(*args, timeout=30):
-    return subprocess.run([ADB, *args], capture_output=True, text=True,
-                          timeout=timeout).stdout
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _env import adb
 
 
 def observe_tree():

@@ -105,10 +105,12 @@ class HachimiAccessibilityService : AccessibilityService() {
 
     fun tapXY(xNorm: Double, yNorm: Double): JSONObject {
         val (w, h) = screenSize()
-        // Flyme 手势条补偿：底部 ~2.5% 高度是系统手势区，触摸有去无回却返回
-        // ok（2026-09-27 实测：时钟 tab 栏 2147-2331 与手势区交叠）。钳制到 0.93，
-        // 仍落在目标控件容器内（tab 容器上沿 2147 ≈ 0.895）。
-        val yC = minOf(yNorm, 0.93)
+        // 底部钳制阈值从设备 profile（SharedPreferences "hachimi_config"）读取，默认 1.0 = 不钳制。
+        // 仅对已知「系统手势区吞底部触摸」的 ROM（如旧 Flyme）经调试桥 config 写入 0.93 启用；
+        // 通用设备不裁剪，避免误伤底部控件（2026-09-27 跨品牌兼容改造）。
+        val limit = getSharedPreferences("hachimi_config", android.content.Context.MODE_PRIVATE)
+            .getFloat("tap_bottom_limit", 1.0f).toDouble()
+        val yC = minOf(yNorm, limit)
         val path = Path().apply {
             moveTo((xNorm * w).roundToInt().toFloat(), (yC * h).roundToInt().toFloat())
         }

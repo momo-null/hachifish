@@ -11,20 +11,16 @@ R1：adb 与 u2 只出现在 harness 通道。u2 种子重建后必须清 u2 ins
 """
 import argparse
 import json
-import subprocess
 import sys
 import time
 import os
 
-ADB = os.environ.get("HACHIMI_ADB", r"D:/code/hachimi/.tools/platform-tools/adb.exe")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _env import adb, LOOPBACK, current_profile, ROOT
+
 TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
+APK_DIR = os.path.join(ROOT, ".tools", "apks")
 PY = sys.executable
-LOOPBACK = "http://127.0.0.1:18071"
-
-
-def adb(*args, timeout=60):
-    r = subprocess.run([ADB, *args], capture_output=True, text=True, timeout=timeout)
-    return r.stdout + r.stderr
 
 
 def forward():
@@ -34,9 +30,14 @@ def forward():
 
 
 def pm_clear(pkg):
+    """清应用状态。ColorOS 实录（2026-09-28）：`pm clear` 被 ROM 拒（无
+    CLEAR_APP_USER_DATA）；卸载重装方案因「USB 安装」无法开启被用户否决
+    （每次安装都弹确认框，流水线无法自动化）-> 返回 False，由 reset_task
+    走 App 专属 cleanup_*（prereg §5.3 的「种子重建+产物清理」腿）。"""
     out = adb("shell", "pm clear", pkg).strip()
-    print("  pm clear %s -> %s" % (pkg, out))
-    return "Success" in out
+    ok = "Success" in out
+    print("  pm clear %s -> %s" % (pkg, "Success" if ok else "被拒（ColorOS），改走产物清理"))
+    return ok
 
 
 def pm_grant(pkg, perm):
@@ -74,6 +75,48 @@ def gate_allow_task(task):
             gate_allow(pkg, op)
 
 
+def bridge_call(expect_prim, prim_extras="", timeout=15):
+    """显式组件广播（-n；targetSdk 36 纯隐式不投递）+ run-as 轮询确认真实执行。"""
+    adb("shell", "am broadcast -a com.hachimi.app.DEBUG_PRIMITIVE "
+        "-n com.hachimi.app/.DebugBridgeReceiver --es prim " + expect_prim +
+        (" " + prim_extras if prim_extras else ""))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        raw = adb("shell", "run-as com.hachimi.app cat files/bridge_result.json")
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            obj = None
+        if isinstance(obj, dict) and obj.get("prim") == expect_prim:
+            return obj
+        time.sleep(0.5)
+    return None
+
+
+def waive_first_run_dialogs(pkg):
+    """ColorOS quirk3 代烧：pm clear 后首启的权限/通知系统弹窗对 a11y 不可见
+    （com.oplus.notificationmanager 等 overlay 盖脸 -> observe 'no active window'），
+    且 pm grant 被 ROM 锁死无法静默重授。手段：launch -> a11y 全盲则按实测坐标
+    盲点「允许」（1080x2400 底部弹窗）-> observe 复验可见。弹窗可见的 ROM 直接跳过。"""
+    prof = current_profile()
+    if prof.get("permission_dialog_visible_to_a11y", True):
+        return
+    if not a11y_ok():
+        print("  waive %s: skip (a11y down, 由 recover 链路处理)" % pkg)
+        return
+    bridge_call("launch_app", "--es package " + pkg)
+    time.sleep(3)
+    r = bridge_call("observe", timeout=8)
+    if r and r.get("result", {}).get("ok"):
+        print("  waive %s: 无遮蔽弹窗（a11y 可见）" % pkg)
+        return
+    adb("shell", "input tap 779 1357")   # ColorOS 底部弹窗「允许」@1080x2400
+    time.sleep(1.5)
+    r2 = bridge_call("observe", timeout=8)
+    ok = bool(r2 and r2.get("result", {}).get("ok"))
+    print("  waive %s: 盲点允许 -> a11y %s" % (pkg, "可见 ✓" if ok else "仍不可见（需人工看一眼）"))
+
+
 def seed_files(pkg="org.fossify.filemanager"):
     """T4/T9/T15 种子：主存储放一个可重命名/可查看的文本文件。"""
     adb("shell", "sh", "-c",
@@ -108,16 +151,40 @@ def seed_alarms():
     return _run_scripted(body)
 
 
+def apply_profile():
+    """把设备 profile 注入到设备端（跨品牌兼容）。
+    经调试桥 config 原语写入 tap_bottom_limit（底部钳制阈值）：默认 1.0 = 不钳制；
+    仅手势区吞底部触摸的 ROM（如旧 Flyme）才设 0.93。其余 profile 字段供 harness 逻辑判断。
+    注意：value 必须走 --es args JSON 形态——Kotlin 端独立 extras 白名单漏了 "value"
+    （2026-09-28 实录：--es value 写成空串），下次重建 APK 时补。"""
+    prof = current_profile()
+    limit = prof.get("tap_bottom_limit", "1.0")
+    forward()
+    adb("shell", "am broadcast -a com.hachimi.app.DEBUG_PRIMITIVE "
+        "-p com.hachimi.app --es prim config --es key tap_bottom_limit "
+        "--es args '{\"value\":\"%s\"}'" % limit)
+    print("  apply_profile: tap_bottom_limit=%s (brand-matched)" % limit)
+    return prof
+
+
 def prewarm():
-    """环境预热（Hachimi (re)install 后跑一次）：Flyme 切换警告对每个目标 App
-    首次后台拉起会弹「Hachimi 正在尝试打开 X」，允许一次后记忆（实测 pm clear
-    不清）。逐 App 先 gate_allow 再经原语拉起并点掉警告，铺平 launch_app 通道。"""
+    """环境预热（Hachimi (re)install 后跑一次）。
+    通用部分（所有设备）：清授权白名单 + 预授权 launch_app/type_text。
+    品牌专属部分：仅当 profile.app_switch_warning=true 时逐 App 拉起并点掉首次切换警告
+    （旧 Flyme 行为；通用 ROM 无此警告，跳过以免误触）。"""
+    prof = current_profile()
+    apply_profile()   # 注入 tap_bottom_limit 等到设备端
     forward()
     gate_clear()
     for pkg in ("org.fossify.notes", "org.fossify.math", "org.fossify.clock",
                 "org.fossify.gallery", "org.fossify.filemanager"):
         gate_allow(pkg, "launch_app")
         gate_allow(pkg, "type_text")
+    if not prof.get("app_switch_warning"):
+        print("  prewarm: app_switch_warning=false -> 跳过首次切换警告 Dismiss")
+        return
+    for pkg in ("org.fossify.notes", "org.fossify.math", "org.fossify.clock",
+                "org.fossify.gallery", "org.fossify.filemanager"):
         adb("shell", "am broadcast -a com.hachimi.app.DEBUG_PRIMITIVE "
             "-p com.hachimi.app --es prim launch_app --es package %s" % pkg)
         time.sleep(3)
@@ -131,46 +198,82 @@ def prewarm():
         print("  prewarm %s done" % pkg)
 
 
+def _observe_tree():
+    """observe -> 失败/盲态返回 None（调用方自行处置）。"""
+    r = bridge_call("observe", timeout=10)
+    if r and r.get("result", {}).get("ok"):
+        return r["result"].get("tree", [])
+    return None
+
+
+def _real_items(tree, view_id):
+    """取真实宽度的控件（排除已删条目的零宽僵尸节点——长按删除后旧节点会以
+    零宽形式滞留树中若干快照，其 text 仍会被 verify_done 全文探测命中）。"""
+    return [n for n in tree
+            if (n.get("view_id") or "") == view_id
+            and (n.get("bounds") or [0, 0, 0, 0])[2] > (n.get("bounds") or [0, 0, 0, 0])[0]]
+
+
+def cleanup_notes(max_rounds=12):
+    """Notes 1.7.0 状态清理（pm clear 被锁 + 用户裁定不重装后的替代复位）：
+    循环长按列表首个真实条目（长按=移入回收站+撤销 snackbar）直到无内容条目；
+    完成后 force-stop 刷掉僵尸节点。空态占位符（请在此插入文字）非产物，可留。"""
+    adb("shell", "am", "force-stop", "org.fossify.notes")
+    time.sleep(1)
+    bridge_call("launch_app", "--es package org.fossify.notes")
+    time.sleep(3)
+    placeholder = "请在此插入文字"
+    for _ in range(max_rounds):
+        tree = _observe_tree()
+        if tree is None:
+            print("  cleanup_notes: observe 失败（盲态），中止")
+            return False
+        items = _real_items(tree, "org.fossify.notes:id/text_note_view")
+        content = [n for n in items if (n.get("text") or "") not in ("", placeholder)]
+        if not content:
+            break
+        b = content[0]["bounds"]
+        cy = round((b[1] + b[3]) / 2 / 2400.0, 3)
+        bridge_call("gesture", "--es args '{\"points\":[[0.5,%s],[0.5,%s]],"
+                    "\"duration_ms\":1000}'" % (cy, cy))
+        time.sleep(2)
+    else:
+        print("  cleanup_notes: %d 轮后仍有内容条目" % max_rounds)
+        return False
+    adb("shell", "am", "force-stop", "org.fossify.notes")   # 刷僵尸节点
+    time.sleep(1)
+    bridge_call("launch_app", "--es package org.fossify.notes")
+    time.sleep(3)
+    tree = _observe_tree()
+    ok = tree is not None and not [
+        n for n in _real_items(tree, "org.fossify.notes:id/text_note_view")
+        if (n.get("text") or "") not in ("", placeholder)]
+    print("  cleanup_notes -> %s" % ("clean" if ok else "仍有残留"))
+    return ok
+
+
 def seed_notes():
     """T1/T5/T6/T10/T11/T13/T15 种子：重建内容含 111111 的便签。
     经回环 + 剧本大脑走 Hachimi 自身无障碍通道（零 u2 依赖——u2 instrumentation
     与无障碍互斥，拆除后 Flyme 重绑退避可达分钟级，见 2026-09-27 实测）。
-    双流程：A=编辑器已开直接输入；B=新建对话框流。done_when 强校验。"""
-    flow_a = {
+    1.7.0 适配（2026-09-28 实测）：主屏列表条目=内联编辑器，点入直接 type_text
+    即写入并自动保存；done_when 由内核 verify_done 全文探测强校验。
+    前置：cleanup_notes 已跑（无内容条目，防旧产物让 done_when 躺赢）。"""
+    body = {
         "objective": "seed note", "done_when": "111111", "max_steps": 8,
         "script": [
             {"name": "launch_app", "args": {"package": "org.fossify.notes"}},
             {"name": "wait", "args": {"seconds": 2}},
             {"name": "tap_by_id", "args": {"view_id": "org.fossify.notes:id/text_note_view"}},
             {"name": "type_text", "args": {"text": "111111555555555555"}},
-            {"name": "press", "args": {"key": "back"}},
             {"name": "wait", "args": {"seconds": 1}},
             {"name": "task_done", "args": {"summary": "seeded"}},
         ],
     }
-    flow_b = {
-        "objective": "seed note", "done_when": "111111", "max_steps": 12,
-        "script": [
-            {"name": "launch_app", "args": {"package": "org.fossify.notes"}},
-            {"name": "wait", "args": {"seconds": 2}},
-            {"name": "tap_by_id", "args": {"view_id": "org.fossify.notes:id/new_note"}},
-            {"name": "wait", "args": {"seconds": 1.5}},
-            {"name": "tap_by_id", "args": {"view_id": "org.fossify.notes:id/type_text_note"}},
-            {"name": "wait", "args": {"seconds": 0.5}},
-            {"name": "tap_by_id", "args": {"view_id": "android:id/button1"}},
-            {"name": "wait", "args": {"seconds": 1}},
-            {"name": "tap_by_id", "args": {"view_id": "org.fossify.notes:id/text_note_view"}},
-            {"name": "type_text", "args": {"text": "111111555555555555"}},
-            {"name": "press", "args": {"key": "back"}},
-            {"name": "wait", "args": {"seconds": 1}},
-            {"name": "task_done", "args": {"summary": "seeded"}},
-        ],
-    }
-    for name, body in (("A(direct)", flow_a), ("B(dialog)", flow_b)):
-        if _run_scripted(body):
-            print("  seed note 111111 via scripted brain flow %s" % name)
-            return
-    raise RuntimeError("seed_notes: both scripted flows failed")
+    if _run_scripted(body):
+        print("  seed note 111111 via in-place editor")
+        return True
+    raise RuntimeError("seed_notes: in-place seed failed")
 
 
 def cleanup_u2():
@@ -191,12 +294,19 @@ def a11y_ok():
 
 
 def a11y_recover():
-    """无障碍掉线恢复（M0' 配方强化版，2026-09-27 实测定案）：
-    先杀 u2 instrumentation（与 Hachimi 无障碍互斥，残留即永远绑不上）->
-    写占位 none（真实变化=全关）-> 重开 -> accessibility_enabled=1 -> 轮询（~60s）。
-    注意：空值传不进 Windows adb（引号被剥，settings put 缺值静默失败），必须用
-    无引号 token（如 none）制造 OFF 态。"""
+    """无障碍掉线恢复（无重启版，2026-09-28 定案；用户要求：手机不自动重启）：
+    第一步 判别：accessibility_enabled=0 = 框架已禁用服务（服务崩溃后框架翻开关，
+    该状态跨重启保留，reboot 救不了）-> 立即失败，需人工在手机上重开开关。
+    第二步（Flyme 配方，ColorOS 上无害失败）：杀 u2 instrumentation（与 Hachimi
+    无障碍互斥，残留即永远绑不上）-> settings put 写占位 none（真实变化=全关）->
+    重开 -> accessibility_enabled=1 -> 轮询。空值传不进 Windows adb（引号被剥，
+    settings put 缺值静默失败），必须用无引号 token（如 none）制造 OFF 态。
+    第三步仍失败（ColorOS 窗口管线卡死，enabled=1 但系统级全盲）-> 报告人工：
+    手机上把 Hachimi 无障碍关-开一次（重绑服务连接），仍不行再考虑手动重启。"""
     cleanup_u2()
+    if adb("shell", "settings", "get", "secure", "accessibility_enabled").strip() == "0":
+        print("  accessibility_enabled=0（框架已禁用）-> 需人工在手机上重开 Hachimi 无障碍")
+        return False
     svc = "com.hachimi.app/com.hachimi.app.HachimiAccessibilityService"
     adb("shell", "settings", "put", "secure",
         "enabled_accessibility_services", "none")
@@ -204,11 +314,16 @@ def a11y_recover():
     adb("shell", "settings", "put", "secure",
         "enabled_accessibility_services", svc)
     adb("shell", "settings", "put", "secure", "accessibility_enabled", "1")
-    for i in range(12):   # 最长 ~60s 重绑窗口
+    # KernelHostService（回环/内核）只在 MainActivity 打开时启动——重启/进程死后
+    # 无障碍即使重绑成功，/health 也一直拒连（2026-09-28 实录），先拉一次再轮询
+    adb("shell", "am", "start", "-n", "com.hachimi.app/.MainActivity")
+    time.sleep(3)
+    for i in range(12):   # ~60s：Flyme 走这条路；ColorOS 上 put 无效但轮询兜住偶发重绑
         time.sleep(5)
         if a11y_ok():
-            print("  a11y rebind confirmed (waited ~%ds)" % ((i + 1) * 5))
+            print("  a11y rebind confirmed (~%ds)" % ((i + 1) * 5))
             return True
+    print("  60s 未恢复（疑 ColorOS 窗口管线卡死）-> 需人工：无障碍开关关-开一次")
     return False
 
 
@@ -240,13 +355,25 @@ def reset_task(task):
     """按 tasks.json 的 reset 规格执行完整重置。"""
     print("reset %s (%s)" % (task["id"], task.get("title", "")))
     spec = task.get("reset") or {}
-    for pkg in spec.get("pm_clear", []):
-        pm_clear(pkg)
+    cleared = {pkg: pm_clear(pkg) for pkg in spec.get("pm_clear", [])}
     for pkg, perms in (spec.get("pm_grant") or {}).items():
         for p in (perms if isinstance(perms, list) else [perms]):
-            pm_grant(pkg, p)
+            pm_grant(pkg, p)   # ColorOS 上被锁，失败仅打印（-g 重装也无门，见 waive）
     gate_clear()
     gate_allow_task(task)
+    # ColorOS：pm clear 被锁 + 不重装 -> App 专属产物清理（prereg §5.3「种子重建」腿；
+    # 防上次 run 的内容残留在树里让 done_when 文本探测提前满足）
+    for pkg in spec.get("pm_clear", []):
+        if cleared.get(pkg):
+            continue
+        if pkg == "org.fossify.notes":
+            cleanup_notes()
+        else:
+            print("  %s: 无专属清理器（非产物型 App，沿用现有状态）" % pkg)
+    for pkg in spec.get("pm_clear", []):
+        # ColorOS：首启通知授权/权限弹窗对 a11y 不可见（quirk3），统一在 reset 阶段
+        # 代烧掉，不烧任务预算（无弹窗时空过）
+        waive_first_run_dialogs(pkg)
     if spec.get("seed_files"):
         seed_files()
     if spec.get("seed_alarms"):
@@ -266,7 +393,7 @@ def main():
     ap.add_argument("--packages", nargs="*", help="plain pm clear")
     ap.add_argument("--gate-clear", action="store_true")
     ap.add_argument("--prewarm", action="store_true",
-                    help="one-shot: dismiss Flyme app-switch warning for all test apps")
+                    help="one-shot: apply device profile + dismiss brand-specific first-launch warnings")
     args = ap.parse_args()
 
     if args.prewarm:

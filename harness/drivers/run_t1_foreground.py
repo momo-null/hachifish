@@ -4,18 +4,15 @@ auto-tap the gate when it pops (allow_always), printing each transition.
 Usage: python t1_run.py [tap|peek]"""
 import ast
 import json
-import subprocess
+import os
 import sys
 import time
 import urllib.request
 
-
-def parse_repr(text):
-    """回环返回 Python dict repr（单引号/True/None），ast 安全解析。"""
-    return ast.literal_eval(text)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _env import adb
 
 BASE = "http://127.0.0.1:18071"
-ADB = r"D:/code/hachimi/.tools/platform-tools/adb.exe"
 NOTE_TEXT = "提醒：明天上午备份实验数据"
 
 BODY = {
@@ -38,11 +35,6 @@ def post(path, body=None):
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
         return r.read().decode("utf-8")
-
-
-def adb(*args, timeout=30):
-    return subprocess.run([ADB, *args], capture_output=True, text=True,
-                          timeout=timeout).stdout
 
 
 def tap_gate():

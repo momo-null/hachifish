@@ -10,7 +10,7 @@ import time
 
 tmp = tempfile.mkdtemp()
 os.environ["HACHIMI_DATA_DIR"] = tmp
-sys.path.insert(0, r"D:/code/hachimi/kernel")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "kernel"))
 
 from hachimi_kernel import bridge
 

@@ -47,7 +47,11 @@ dependencies {
 // 内核仅标准库（红线 R7），无 pip requirements。
 chaquopy {
     defaultConfig {
-        buildPython("D:/code/hachimi/.tools/python312/python.exe")
+        // Python 解释器：优先用 -PhachimiPython 覆盖；默认仓库内 .tools/python312（junction 到本机 Python 3.12）。
+        val hachimiPython = if (providers.gradleProperty("hachimiPython").isPresent)
+            providers.gradleProperty("hachimiPython").get() else
+            rootDir.resolve(".tools/python312/python.exe").toString()
+        buildPython(hachimiPython)
     }
     sourceSets {
         getByName("main") {

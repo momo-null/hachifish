@@ -3,7 +3,7 @@
 Test 2: thinking disabled param -> 200, no reasoning, deterministic."""
 import json
 import sys
-sys.path.insert(0, r"D:/code/hachimi/kernel")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "kernel"))
 from hachimi_kernel.brain_client import BrainClient, BrainError
 
 cli = BrainClient("https://api.deepseek.com/v1",

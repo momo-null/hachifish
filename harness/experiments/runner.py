@@ -23,16 +23,13 @@ import time
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ADB = os.environ.get("HACHIMI_ADB", r"D:/code/hachimi/.tools/platform-tools/adb.exe")
-LOOPBACK = "http://127.0.0.1:18071"
+import sys
+sys.path.insert(0, os.path.dirname(HERE))
+from _env import adb, LOOPBACK, list_devices, resolve_serial
+
 MAX_RETRIES = 2
 POLL_S = 2.0
 RUN_TIMEOUT_S = 900
-
-
-def adb(*args, timeout=60):
-    r = subprocess.run([ADB, *args], capture_output=True, text=True, timeout=timeout)
-    return r.stdout + r.stderr
 
 
 def http(method, path, body=None, timeout=15):
@@ -49,9 +46,13 @@ def parse_repr(text):
 
 
 def health():
-    """(device_ok, a11y_ok)。"""
+    """(device_ok, a11y_ok)。设备序列号经 _env.resolve_serial 自动取唯一设备。"""
+    serial = resolve_serial()
+    if not serial:
+        devs = list_devices()
+        return (False, False) if len(devs) != 1 else (True, False)
     devs = adb("devices")
-    device_ok = "REDACTED_SERIAL" in devs and "\tdevice" in devs
+    device_ok = serial in devs and "\tdevice" in devs
     a11y_ok = False
     if device_ok:
         adb("forward", "tcp:18071", "tcp:8071")

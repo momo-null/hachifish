@@ -3,14 +3,17 @@
 Captures a mid-run screenshot of the split view (console + target app)."""
 import ast
 import json
+import os
 import subprocess
 import sys
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _env import adb, ADB, ROOT
+
 BASE = "http://127.0.0.1:18071"
-ADB = r"D:/code/hachimi/.tools/platform-tools/adb.exe"
-SHOT = r"D:/code/hachimi/harness/checks/m3_l2_split_console.png"
+SHOT = os.path.join(ROOT, "harness", "checks", "m3_l2_split_console.png")
 
 LINE1 = "L2 第一行：分屏模式任务"
 LINE2 = "L2 第二行：追加成功"
@@ -41,11 +44,6 @@ def get(path):
 
 def parse_repr(text):
     return ast.literal_eval(text)
-
-
-def adb(*args, timeout=30):
-    return subprocess.run([ADB, *args], capture_output=True, text=True,
-                          timeout=timeout).stdout
 
 
 def tap_gate():

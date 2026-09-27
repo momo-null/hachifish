@@ -12,22 +12,19 @@
 运行：.tools/python312/python.exe harness/parity/m1_parity.py
 """
 import json
+import os
 import re
-import subprocess
 import sys
 import time
 
 import uiautomator2 as u2
 from lxml import etree
 
-ADB = r"D:/code/hachimi/.tools/platform-tools/adb.exe"
-SERIAL = "REDACTED_SERIAL"
-REPORT = r"D:/code/hachimi/harness/checks/m1_parity_report.txt"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _env import adb, ROOT, resolve_serial
 
-
-def adb(*args, timeout=60):
-    r = subprocess.run([ADB, *args], capture_output=True, timeout=timeout)
-    return r.stdout.decode("utf-8", "ignore")
+SERIAL = resolve_serial() or os.environ.get("HACHIMI_SERIAL", "")
+REPORT = os.path.join(ROOT, "harness", "checks", "m1_parity_report.txt")
 
 
 def bridge(prim, extra=None, wait=1.5):

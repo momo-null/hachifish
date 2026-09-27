@@ -8,7 +8,7 @@ import tempfile
 
 tmp = tempfile.mkdtemp()
 os.environ["HACHIMI_DATA_DIR"] = tmp
-sys.path.insert(0, r"D:/code/hachimi/kernel")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "kernel"))
 
 from hachimi_kernel.brain_client import BrainError
 from hachimi_kernel.experiment import (build_group_constraints, verify_snapshot,

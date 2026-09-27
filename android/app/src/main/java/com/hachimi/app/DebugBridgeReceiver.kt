@@ -94,6 +94,15 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                     com.hachimi.app.gate.GateManager.remember(context, pkg, op)
                     JSONObject().put("ok", true).put("note", "whitelist + $pkg|$op")
                 }
+                "config" -> {
+                    // 设备 profile 注入（跨品牌兼容）：把 ROM 专属参数写入应用私有 SharedPreferences
+                    // "hachimi_config"，供原语运行时读取。例：tap_bottom_limit=0.93（手势区吞底部触摸）。
+                    val key = args.optString("key")
+                    val value = args.optString("value")
+                    context.getSharedPreferences("hachimi_config", Context.MODE_PRIVATE)
+                        .edit().putString(key, value).apply()
+                    JSONObject().put("ok", true).put("note", "config $key=$value")
+                }
                 // M4' DoD⑥ 示教录制器控制面（事件流 = 无障碍 API，落盘经 run-as 拉取）
                 "teach_start" -> TeachRecorder.start()
                 "teach_stop" -> TeachRecorder.stop()

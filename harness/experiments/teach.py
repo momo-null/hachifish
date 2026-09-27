@@ -24,15 +24,15 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ADB = os.environ.get("HACHIMI_ADB", r"D:/code/hachimi/.tools/platform-tools/adb.exe")
+sys.path.insert(0, os.path.dirname(HERE))
+from _env import adb, LOOPBACK, ADB
+
 APP = "com.hachimi.app"
-LOOPBACK = "http://127.0.0.1:18071"
 TASKS_FILE = os.path.join(HERE, "tasks.json")
 DROP_PKGS = ("com.hachimi.app", "com.android.systemui")
 LAUNCH_WAIT = 1.5
