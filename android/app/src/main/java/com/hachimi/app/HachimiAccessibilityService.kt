@@ -98,9 +98,27 @@ class HachimiAccessibilityService : AccessibilityService() {
     // ---------- 原语 4: type_text(t) —— 文本输入（GateUI 敏感操作） ----------
 
     fun typeText(text: String): JSONObject {
-        val root = rootInActiveWindow ?: return err("type_text", "no active window")
-        val target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?: return err("type_text", "no focused editable node")
+        val root0 = rootInActiveWindow ?: return err("type_text", "no active window")
+        // 授权门控（架构 §4.4：文本输入默认敏感；白名单命中则直接放行）
+        val gatedPkg = root0.packageName?.toString() ?: "?"
+        val verdict = com.hachimi.app.gate.GateManager.enforce(
+            this, gatedPkg, "type_text", "输入文本: \"$text\"")
+        if (!verdict.granted) return err("type_text", "denied by gate ($verdict)")
+        // Gate 弹层关闭后目标窗口的输入焦点恢复不保证：轮询等待（≤2.5s），
+        // 排除自家窗口（gate 残留/面板），命中门控同包窗口或任何第三方窗口
+        var target: AccessibilityNodeInfo? = null
+        val deadline = System.currentTimeMillis() + 2500
+        while (target == null && System.currentTimeMillis() < deadline) {
+            rootInActiveWindow?.let { w ->
+                val pkg = w.packageName?.toString() ?: ""
+                if (pkg == gatedPkg || pkg != packageName) {
+                    target = (w.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                        ?: findFirstEditable(w))?.also { it.refresh() }
+                }
+            }
+            if (target == null) Thread.sleep(200)
+        }
+        target ?: return err("type_text", "no focused editable node after gate")
         val args = android.os.Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
@@ -109,17 +127,33 @@ class HachimiAccessibilityService : AccessibilityService() {
         } else err("type_text", "ACTION_SET_TEXT failed")
     }
 
+    private fun findFirstEditable(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (node.isEditable) return node
+        for (i in 0 until node.childCount) {
+            node.getChild(i)?.let { c ->
+                findFirstEditable(c)?.let { return it }
+            }
+        }
+        return null
+    }
+
     // ---------- 原语 5: gesture(points) —— 手势（对应 u2 swipe/drag） ----------
 
-    /** points: 归一化坐标数组 [[x0,y0],[x1,y1],...] */
+    /** points: 归一化坐标数组 [[x0,y0],[x1,y1],...]（兼容 [{x:..,y:..}] 对象形式） */
     fun gesture(points: JSONArray, durationMs: Long = 300): JSONObject {
         if (points.length() < 2) return err("gesture", "need >= 2 points")
         val (w, h) = screenSize()
         val path = Path()
         for (i in 0 until points.length()) {
-            val p = points.getJSONArray(i)
-            val x = (p.getDouble(0) * w).roundToInt().toFloat()
-            val y = (p.getDouble(1) * h).roundToInt().toFloat()
+            val p = points.get(i)
+            val x: Float; val y: Float
+            if (p is JSONArray) {
+                x = (p.getDouble(0) * w).roundToInt().toFloat()
+                y = (p.getDouble(1) * h).roundToInt().toFloat()
+            } else if (p is JSONObject) {
+                x = (p.getDouble("x") * w).roundToInt().toFloat()
+                y = (p.getDouble("y") * h).roundToInt().toFloat()
+            } else return err("gesture", "bad point format at $i")
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
         return dispatchStroke("gesture", path, durationMs)
@@ -157,6 +191,10 @@ class HachimiAccessibilityService : AccessibilityService() {
     fun launchApp(pkg: String): JSONObject {
         val intent = packageManager.getLaunchIntentForPackage(pkg)
             ?: return err("launch_app", "package not installed or not launchable: $pkg")
+        // 授权门控（架构 §4.4：跨 App 跳转默认敏感）
+        val verdict = com.hachimi.app.gate.GateManager.enforce(
+            this, pkg, "launch_app", "跳转到应用: $pkg")
+        if (!verdict.granted) return err("launch_app", "denied by gate ($verdict)")
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(intent)
         return ok("launch_app").put("package", pkg)

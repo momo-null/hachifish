@@ -55,7 +55,8 @@ class MiniLoop(object):
     """
 
     def __init__(self, objective, done_when, tools, brain,
-                 constraints="", config=None, on_step=None, on_finish=None):
+                 constraints="", config=None, on_step=None, on_finish=None,
+                 controls=None):
         self.objective = objective
         self.done_when = done_when
         self.constraints = constraints
@@ -64,12 +65,16 @@ class MiniLoop(object):
         self.config = config or {}
         self.on_step = on_step
         self.on_finish = on_finish
+        # 外部控制面（bridge 共享 dict）：{"paused": bool, "stopped": bool}
+        # 暂停在步边界生效（下一步前阻塞，暂停时长不计入墙钟预算）
+        self._controls = controls or {}
         self._verify_tool = self.config.get("verify_tool", "verify_done")
         self._messages = []
         self._pending_reply = None   # 当前轮 brain 回复（thinking 模型要求 reasoning_content 回传）
         self._last_identical = 0
         self._last_action_key = None
         self.task_done_rejected = 0
+        self.brain_calls = 0
 
     # ---------------- 对外入口 ----------------
 
@@ -84,11 +89,21 @@ class MiniLoop(object):
         deadline = started + float(self.config.get("wall_clock_s", DEFAULT_WALL_CLOCK_S))
 
         for i in range(1, max_steps + 1):
+            # 暂停门控：阻塞在步边界，暂停时长顺延墙钟预算
+            if self._controls.get("paused"):
+                pause_started = time.time()
+                while self._controls.get("paused") and not self._controls.get("stopped"):
+                    time.sleep(0.2)
+                deadline += time.time() - pause_started
+            if self._controls.get("stopped"):
+                status, summary = "incomplete", "stopped by request"
+                break
             if time.time() > deadline:
                 status = "incomplete"
                 summary = "墙钟预算耗尽"
                 break
             reply = self.brain.chat(self._messages, self._tool_specs())
+            self.brain_calls += 1
             self._pending_reply = reply
             calls = reply.get("tool_calls") or []
             if not calls:
@@ -123,6 +138,7 @@ class MiniLoop(object):
             "status": status,
             "summary": summary,
             "steps": len(steps),
+            "brain_calls": self.brain_calls,
             "task_done_rejected": self.task_done_rejected,
             "wall_clock_s": round(time.time() - started, 3),
         }

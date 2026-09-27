@@ -56,6 +56,9 @@ class GateActivity : Activity() {
                     .toByteArray())
             }
         } catch (_: Exception) {}
+        // 阻塞桥回调：唤醒 GateManager.enforce 等待中的原语线程
+        val req = intent.getLongExtra(EXTRA_REQUEST, -1)
+        if (req >= 0) GateManager.resolve(req, code)
         setResult(code)
         finish()
     }
@@ -64,6 +67,7 @@ class GateActivity : Activity() {
         const val EXTRA_PACKAGE = "package"
         const val EXTRA_OP = "op"
         const val EXTRA_PREVIEW = "preview"
+        const val EXTRA_REQUEST = "request"
         const val RESULT_ALLOW_ONCE = 10
         const val RESULT_ALLOW_ALWAYS = 11
         const val RESULT_DENY = 12

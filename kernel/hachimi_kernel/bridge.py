@@ -141,7 +141,24 @@ def set_brain(base_url, api_key=None, model=None):
 
 # ---------------- 任务执行（回环 /task 数据面） ----------------
 
-_stop_flag = {"stop": False}
+_controls = {"paused": False, "stopped": False}
+_runs = {}      # run_id -> {"task_id", "jsonl", "run"}（轨迹导出索引；进程内）
+_narrative = None  # Kotlin 注入的叙事推送器（悬浮面板数据源）
+
+
+def register_narrative(sink):
+    global _narrative
+    _narrative = sink
+
+
+def _emit(event):
+    """叙事事件推给 Kotlin 悬浮面板（面板未装/PC 侧静默跳过）。"""
+    if _narrative is None:
+        return
+    try:
+        _narrative.push(json.dumps(event, ensure_ascii=False))
+    except Exception:
+        pass
 
 
 def start_task(body_json):
@@ -152,7 +169,8 @@ def start_task(body_json):
     with _lock:
         if _state["phase"] == "running":
             return {"ok": False, "error": "task already running"}
-        _stop_flag["stop"] = False
+        _controls["paused"] = False
+        _controls["stopped"] = False
         _state = {"run_id": "r%d" % int(time.time() * 1000), "phase": "running",
                   "objective": body.get("objective", ""), "started": time.time(),
                   "summary": None, "trajectory": [], "error": None}
@@ -162,12 +180,46 @@ def start_task(body_json):
 
 
 def request_stop():
-    _stop_flag["stop"] = True
+    _controls["stopped"] = True
+    _controls["paused"] = False
     return {"ok": True}
 
 
-def _run(body, stop_flag=_stop_flag):
+def request_pause():
+    if _state.get("phase") == "running":
+        _controls["paused"] = True
+    return {"ok": True, "paused": _controls["paused"]}
+
+
+def request_resume():
+    _controls["paused"] = False
+    return {"ok": True, "paused": False}
+
+
+def _make_store(run_id, objective, done_when):
+    """轨迹落盘器（桌面 schema 对齐：tasks/<task_id>/<date>_<run_id>.jsonl）。
+    落盘失败不阻塞任务执行（返回 None，仅进程内轨迹）。"""
+    try:
+        from hachimi_kernel.task_store import TaskStore
+        from hachimi_kernel.trajectory import TrajectoryStore
+        meta = TaskStore.create(objective, done_when)
+        store = TrajectoryStore(meta["task_id"], run_id[1:] if run_id.startswith("r") else run_id)
+        return meta["task_id"], store
+    except Exception as e:
+        print("[task] trajectory store unavailable: %s: %s" % (type(e).__name__, e), flush=True)
+        return None, None
+
+
+def _run(body, stop_flag=_controls):
     steps = []
+    objective = body.get("objective", "")
+    done_when = body.get("done_when", "")
+    run_id = _state["run_id"]
+    task_id, store = _make_store(run_id, objective, done_when)
+    with _lock:
+        if task_id:
+            _state["task_id"] = task_id
+    _emit({"event": "start", "run_id": run_id, "objective": objective})
     try:
         tools = _tools_with_verify()
         brain = _make_brain(body)
@@ -177,28 +229,105 @@ def _run(body, stop_flag=_stop_flag):
             a = step.get("action", {})
             print("[task] step %d: %s -> ok=%s" % (step.get("step"), a.get("tool"),
                   step.get("result", {}).get("ok")), flush=True)
-            if stop_flag["stop"]:
+            if store is not None:
+                try:
+                    store.log_step(state="device", observation={},
+                                   action=a, result=step.get("result"),
+                                   metrics={"retry": step.get("retry", 0)},
+                                   verified=bool(step.get("verified")))
+                except Exception as e:
+                    print("[task] trajectory log failed: %s" % e, flush=True)
+            _emit({"event": "step", "run_id": run_id, "step": step.get("step"),
+                   "tool": a.get("tool"), "args": a.get("args"),
+                   "ok": step.get("result", {}).get("ok"),
+                   "error": step.get("result", {}).get("error")})
+            if stop_flag["stopped"]:
                 raise RuntimeError("stopped by request")
+            if stop_flag["paused"]:
+                _emit({"event": "paused", "run_id": run_id, "step": step.get("step")})
 
         def on_finish(out, _steps):
+            failures = sum(1 for s in steps if s.get("result", {}).get("ok") is False)
+            if store is not None:
+                try:
+                    rec = store.finish_run(
+                        objective=objective, done_when=done_when, expected=None,
+                        backend="accessibility",
+                        brain_model=(_brain_cfg or {}).get("model") if body.get("script") is None
+                                    else "script",
+                        exec_model="accessibility",
+                        success=out["status"] == "done",
+                        steps=out["steps"], brain_calls=out.get("brain_calls", 0),
+                        decision_steps=out.get("brain_calls", 0),
+                        action_count=out["steps"], retry_count=out["task_done_rejected"],
+                        failures=failures, recoveries=0,
+                        reason=out.get("summary", "") if out["status"] != "done" else "")
+                    with _lock:
+                        _runs[run_id] = {"task_id": task_id, "jsonl": str(store.path),
+                                         "run": rec.to_dict()}
+                except Exception as e:
+                    print("[task] run record failed: %s" % e, flush=True)
             with _lock:
                 _state["phase"] = "done" if out["status"] == "done" else "error"
                 _state["summary"] = out
                 _state["trajectory"] = steps
+            _emit({"event": "finish", "run_id": run_id, "status": out["status"],
+                   "steps": out["steps"], "wall_clock_s": out.get("wall_clock_s"),
+                   "summary": out.get("summary", "")})
 
-        loop = MiniLoop(objective=body.get("objective", ""),
-                        done_when=body.get("done_when", ""),
+        loop = MiniLoop(objective=objective,
+                        done_when=done_when,
                         tools=tools, brain=brain,
                         constraints=body.get("constraints", ""),
                         config={"max_steps": body.get("max_steps", 12),
                                 "verify_tool": "verify_done"},
+                        controls=_controls,
                         on_step=on_step, on_finish=on_finish)
         loop.run()
     except Exception as e:
+        err = "%s: %s" % (type(e).__name__, e)
+        if store is not None:
+            try:
+                store.finish_run(objective=objective, done_when=done_when, expected=None,
+                                 backend="accessibility",
+                                 brain_model="error", exec_model="accessibility",
+                                 success=False, steps=len(steps),
+                                 brain_calls=0, decision_steps=0, action_count=len(steps),
+                                 retry_count=0, failures=len(steps), recoveries=0,
+                                 reason=err[:200])
+            except Exception:
+                pass
         with _lock:
             _state["phase"] = "error"
-            _state["error"] = "%s: %s" % (type(e).__name__, e)
+            _state["error"] = err
             _state["trajectory"] = steps
+        _emit({"event": "error", "run_id": run_id, "error": err})
+
+
+def trajectory_export(run_id):
+    """导出 run 轨迹（JSONL 按行解析返回）；进程内索引未命中则扫描落盘目录。"""
+    path = _runs.get(run_id, {}).get("jsonl")
+    if not path:
+        try:
+            from hachimi_kernel.runtime_paths import global_omni
+            for p in sorted(global_omni().glob("tasks/*/*_%s.jsonl" % _strip_r(run_id))):
+                path = str(p)
+                break
+        except Exception:
+            pass
+    if not path:
+        return {"ok": False, "error": "run not found: %s" % run_id}
+    lines = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                lines.append(json.loads(line))
+    return {"ok": True, "run_id": run_id, "path": path, "lines": lines}
+
+
+def _strip_r(run_id):
+    return run_id[1:] if run_id.startswith("r") else run_id
 
 
 # ---------------- 状态面（回环端点数据源） ----------------
@@ -208,6 +337,7 @@ def status():
         s = dict(_state)
     traj = s.pop("trajectory", [])
     s["steps_so_far"] = len(traj)
+    s["paused"] = _controls["paused"] if s.get("phase") == "running" else False
     return {"ok": True, **{k: v for k, v in s.items() if k != "trajectory"}}
 
 

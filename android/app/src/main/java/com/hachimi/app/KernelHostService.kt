@@ -23,6 +23,10 @@ class KernelHostService : Service() {
         const val EXTRA_RC = "resultCode"
         const val EXTRA_DATA = "data"
 
+        /** 面板按钮 → Python 控制面的通道（attachKernel 时缓存 bridge 模块）。 */
+        @Volatile
+        var pyBridgeModule: com.chaquo.python.PyObject? = null
+
         fun start(context: Context) {
             context.startForegroundService(Intent(context, KernelHostService::class.java))
         }
@@ -66,6 +70,7 @@ class KernelHostService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 ProjectionHolder.stop()
+                NarrativePanel.hide()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -88,6 +93,8 @@ class KernelHostService : Service() {
 
     private fun attachKernel() {
         try {
+            // 持久化根注入（runtime_paths 在 import 时读取）：App 私有目录 = files/
+            android.system.Os.setenv("HACHIMI_DATA_DIR", filesDir.absolutePath, true)
             if (!com.chaquo.python.Python.isStarted()) {
                 com.chaquo.python.Python.start(com.chaquo.python.android.AndroidPlatform(this))
             }
@@ -97,7 +104,12 @@ class KernelHostService : Service() {
 
             // 原语派发器注入 Python（工具面定义在 hachimi_kernel.bridge.TOOL_SPECS）
             val dispatcher = PrimitiveDispatcher()
-            py.getModule("hachimi_kernel.bridge").callAttr("register_bridge", dispatcher)
+            val bridgeMod = py.getModule("hachimi_kernel.bridge")
+            bridgeMod.callAttr("register_bridge", dispatcher)
+            // 叙事面板：Python 步进事件 → 悬浮层（前台引导模式 UI 组成，架构 §6）
+            bridgeMod.callAttr("register_narrative", NarrativePanel)
+            pyBridgeModule = bridgeMod
+            NarrativePanel.show(this)
             startLoopback(py)
         } catch (e: Exception) {
             android.util.Log.e("HachimiKernel", "kernel attach failed: ${e.javaClass.simpleName}: ${e.message}")
@@ -120,16 +132,23 @@ class KernelHostService : Service() {
                     if (cfg != null) {
                         bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
                     }
+                    NarrativePanel.show(this)
                     200 to bridge.callAttr("start_task", body).toString()
                 }
                 method == "POST" && path == "/stop" ->
                     200 to bridge.callAttr("request_stop").toString()
+                method == "POST" && path == "/pause" ->
+                    200 to bridge.callAttr("request_pause").toString()
+                method == "POST" && path == "/resume" ->
+                    200 to bridge.callAttr("request_resume").toString()
                 method == "GET" && path == "/status" ->
                     200 to bridge.callAttr("status").toString()
                 method == "GET" && path == "/metrics" ->
                     200 to bridge.callAttr("metrics").toString()
                 method == "GET" && path == "/trajectory" ->
                     200 to bridge.callAttr("trajectory").toString()
+                method == "GET" && path.startsWith("/trajectory/") ->
+                    200 to bridge.callAttr("trajectory_export", path.removePrefix("/trajectory/")).toString()
                 else -> 404 to """{"ok":false,"error":"no route: $method $path"}"""
             }
         }.also { it.start() }
