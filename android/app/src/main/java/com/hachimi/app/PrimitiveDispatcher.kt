@@ -18,7 +18,8 @@ class PrimitiveDispatcher {
             "tap_by_id" -> svc.tapById(args.optString("view_id"))
             "tap_xy" -> svc.tapXY(args.optDouble("x", 0.5), args.optDouble("y", 0.9))
             "type_text" -> svc.typeText(args.optString("text"))
-            "gesture" -> svc.gesture(args.optJSONArray("points") ?: JSONArray())
+            "gesture" -> svc.gesture(args.optJSONArray("points") ?: JSONArray(),
+                args.optLong("duration_ms", 300L))
             "screenshot" -> ProjectionHolder.captureFrameJson(svc)
             "launch_app" -> svc.launchApp(args.optString("package"))
             "press" -> svc.press(args.optString("key", "back"))

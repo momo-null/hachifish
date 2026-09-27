@@ -49,10 +49,17 @@ class HachimiAccessibilityService : AccessibilityService() {
     // ---------- 原语 1: observe() —— UI 树序列化（对应 u2 dump_hierarchy） ----------
 
     /** compact=true 只保留有文本/可交互节点（导航用，噪声约为全树 1/10）；
-     *  默认全树（对拍/细查语义不变，R3 同构面）。 */
+     *  默认全树（对拍/细查语义不变，R3 同构面）。
+     *  转场稳态重试：对话框关闭/App 切换瞬间 rootInActiveWindow 短暂为空，
+     *  轮询至多 2s 再报错（2026-09-27 DoD① 实测：该噪声让模型反复重试烧穿预算）。 */
     fun observe(compact: Boolean = false): JSONObject {
-        val root = rootInActiveWindow
-            ?: return err("observe", "no active window")
+        var root = rootInActiveWindow
+        val deadline = System.currentTimeMillis() + 2000
+        while (root == null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(150)
+            root = rootInActiveWindow
+        }
+        if (root == null) return err("observe", "no active window")
         val arr = JSONArray()
         walk(root, arr, depth = 0, maxDepth = 40, maxNodes = 500, compact = compact)
         return ok("observe").put("tree", arr).put("compact", compact)
@@ -98,8 +105,12 @@ class HachimiAccessibilityService : AccessibilityService() {
 
     fun tapXY(xNorm: Double, yNorm: Double): JSONObject {
         val (w, h) = screenSize()
+        // Flyme 手势条补偿：底部 ~2.5% 高度是系统手势区，触摸有去无回却返回
+        // ok（2026-09-27 实测：时钟 tab 栏 2147-2331 与手势区交叠）。钳制到 0.93，
+        // 仍落在目标控件容器内（tab 容器上沿 2147 ≈ 0.895）。
+        val yC = minOf(yNorm, 0.93)
         val path = Path().apply {
-            moveTo((xNorm * w).roundToInt().toFloat(), (yNorm * h).roundToInt().toFloat())
+            moveTo((xNorm * w).roundToInt().toFloat(), (yC * h).roundToInt().toFloat())
         }
         return dispatchStroke("tap_xy", path, durationMs = 60)
     }

@@ -82,8 +82,12 @@ object NarrativePanel {
                     "finish" -> {
                         append("■ 完成 ${e.optString("status")} · ${e.optInt("steps")}步")
                         addTimeline("■ ${e.optString("status")} · ${e.optInt("steps")}步")
+                        scheduleHide(2500)
                     }
-                    "error" -> append("■ 错误: " + e.optString("error").take(80))
+                    "error" -> {
+                        append("■ 错误: " + e.optString("error").take(80))
+                        scheduleHide(4000)
+                    }
                 }
             } catch (ex: Exception) {
                 Log.w(TAG, "push parse: ${ex.message}")
@@ -121,6 +125,12 @@ object NarrativePanel {
     @Synchronized
     fun hide() {
         detach()
+    }
+
+    /** run 收尾自动收起（2026-09-27 实测：残留 overlay 按钮条拦截目标 App 底部
+     *  触摸——时钟 tab 栏被吞，烧穿 T3/T8/T14 预算）。新 run 的 /task 会重新 show。 */
+    private fun scheduleHide(delayMs: Long) {
+        main.postDelayed({ hide() }, delayMs)
     }
 
     // ---------------- 视图构建 ----------------

@@ -56,7 +56,8 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                 "type_text" -> svc.typeText(args.optString("text"))
                 "gesture" -> svc.gesture(
                     args.optJSONArray("points")
-                        ?: JSONArray().put(JSONArray().put(0.5).put(0.8)).put(JSONArray().put(0.5).put(0.3))
+                        ?: JSONArray().put(JSONArray().put(0.5).put(0.8)).put(JSONArray().put(0.5).put(0.3)),
+                    args.optLong("duration_ms", 300L)
                 )
                 "launch_app" -> svc.launchApp(args.optString("package"))
                 "press" -> svc.press(args.optString("key", "back"))

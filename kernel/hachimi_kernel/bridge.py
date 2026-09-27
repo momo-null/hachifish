@@ -42,8 +42,10 @@ TOOL_SPECS = [
     {"name": "type_text", "description": "设置聚焦可编辑控件的完整文本（替换语义，"
      "非光标插入——追加时须传入含原文的完整新文本）",
      "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
-    {"name": "gesture", "description": "手势滑动，points 为归一化坐标序列",
-     "parameters": {"type": "object", "properties": {"points": {"type": "array"}}}},
+    {"name": "gesture", "description": "手势滑动，points 为归一化坐标序列；"
+     "duration_ms 可选（默认 300）。长按 = 起终点相同 + duration_ms>=800",
+     "parameters": {"type": "object", "properties": {"points": {"type": "array"},
+      "duration_ms": {"type": "number"}}, "required": ["points"]}},
     {"name": "screenshot", "description": "全屏截图（返回宽高，PNG 落盘）"},
     {"name": "launch_app", "description": "启动应用",
      "parameters": {"type": "object", "properties": {"package": {"type": "string"}}, "required": ["package"]}},
@@ -264,6 +266,10 @@ def _run(body, stop_flag=_controls):
     _emit({"event": "start", "run_id": run_id, "objective": objective})
     if body.get("mode") == "split":
         _emit({"event": "mode", "run_id": run_id, "docked": True})
+    else:
+        # foreground 强制回到浮条形态（2026-09-27 实测：docked 残留跨 run 存续，
+        # 底部按钮条吞掉目标 App 底部触摸——时钟类任务 tab 栏不可点）
+        _emit({"event": "mode", "run_id": run_id, "docked": False})
     try:
         tools = _tools_with_verify()
         brain = _make_brain(body)

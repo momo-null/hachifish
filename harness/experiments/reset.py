@@ -39,6 +39,15 @@ def pm_clear(pkg):
     return "Success" in out
 
 
+def pm_grant(pkg, perm):
+    """pm clear 会吊销运行时授权 -> 重置后静默重授（环境配置非实验变量，
+    免去首启权限弹窗烧预算；2026-09-27 实测 gallery 媒体权限/clock 通知权限）。"""
+    out = adb("shell", "pm grant", pkg, perm).strip()
+    ok = "Exception" not in out and "error" not in out.lower()
+    print("  pm grant %s %s -> %s" % (pkg, perm.split(".")[-1], "ok" if ok else out[-60:]))
+    return ok
+
+
 def gate_clear():
     out = adb("shell", "am broadcast -a com.hachimi.app.DEBUG_PRIMITIVE "
                        "-p com.hachimi.app --es prim gate_clear")
@@ -73,21 +82,53 @@ def seed_files(pkg="org.fossify.filemanager"):
 
 
 def seed_alarms():
-    """T11/T14 种子：经脚本大脑在 clock 里加一个 07:30 闹钟（跑之前先 pm clear）。"""
+    """T11/T14 种子：clock 加一个 08:00 闹钟（跑之前先 pm clear）。
+    2026-09-27 实测修 bug：旧脚本 tap add_alarm（id 不存在）且从不设时间。
+    真实流 = alarm_fab -> 编辑器（默认 08:00）-> button1 保存 -> button1 关首次
+    提示框（pm clear 后必现）。注意：Hachimi 重装后 Flyme 切换警告会拦首次
+    launch_app，开头的 button1 空点即警告的「打开」（无警告时 view not found
+    空过，剧本大脑不看结果）。文本模式改时间不可靠（type_text 替换语义吞字段），
+    默认 08:00 即种子值。"""
     body = {
-        "objective": "Open the app org.fossify.clock, add a new alarm at 07:30, "
-                     "enable it, confirm it appears in the alarm list, then call task_done.",
-        "done_when": "07:30", "max_steps": 16,
+        "objective": "seed alarm", "done_when": "08:00", "max_steps": 14,
         "script": [
             {"name": "launch_app", "args": {"package": "org.fossify.clock"}},
             {"name": "wait", "args": {"seconds": 1.5}},
-            {"name": "tap_by_id", "args": {"view_id": "org.fossify.clock:id/add_alarm"}},
-            {"name": "wait", "args": {"seconds": 1}},
             {"name": "tap_by_id", "args": {"view_id": "android:id/button1"}},
+            {"name": "wait", "args": {"seconds": 2}},
+            {"name": "tap_by_id", "args": {"view_id": "org.fossify.clock:id/alarm_fab"}},
+            {"name": "wait", "args": {"seconds": 1.2}},
+            {"name": "tap_by_id", "args": {"view_id": "android:id/button1"}},
+            {"name": "wait", "args": {"seconds": 1.2}},
+            {"name": "tap_by_id", "args": {"view_id": "android:id/button1"}},
+            {"name": "wait", "args": {"seconds": 1}},
             {"name": "task_done", "args": {"summary": "seed alarm"}},
         ],
     }
     return _run_scripted(body)
+
+
+def prewarm():
+    """环境预热（Hachimi (re)install 后跑一次）：Flyme 切换警告对每个目标 App
+    首次后台拉起会弹「Hachimi 正在尝试打开 X」，允许一次后记忆（实测 pm clear
+    不清）。逐 App 先 gate_allow 再经原语拉起并点掉警告，铺平 launch_app 通道。"""
+    forward()
+    gate_clear()
+    for pkg in ("org.fossify.notes", "org.fossify.math", "org.fossify.clock",
+                "org.fossify.gallery", "org.fossify.filemanager"):
+        gate_allow(pkg, "launch_app")
+        gate_allow(pkg, "type_text")
+        adb("shell", "am broadcast -a com.hachimi.app.DEBUG_PRIMITIVE "
+            "-p com.hachimi.app --es prim launch_app --es package %s" % pkg)
+        time.sleep(3)
+        # 警告对话框在则点「打开」(button1)；无则空过
+        adb("shell", "am broadcast -a com.hachimi.app.DEBUG_PRIMITIVE "
+            "-p com.hachimi.app --es prim tap_by_id --es view_id android:id/button1",
+            timeout=90)
+        time.sleep(2)
+        adb("shell", "input keyevent 4")   # 回到桌面，下一个
+        time.sleep(1)
+        print("  prewarm %s done" % pkg)
 
 
 def seed_notes():
@@ -201,6 +242,9 @@ def reset_task(task):
     spec = task.get("reset") or {}
     for pkg in spec.get("pm_clear", []):
         pm_clear(pkg)
+    for pkg, perms in (spec.get("pm_grant") or {}).items():
+        for p in (perms if isinstance(perms, list) else [perms]):
+            pm_grant(pkg, p)
     gate_clear()
     gate_allow_task(task)
     if spec.get("seed_files"):
@@ -221,8 +265,13 @@ def main():
     ap.add_argument("--tasks", nargs="*", help="task ids in tasks.json")
     ap.add_argument("--packages", nargs="*", help="plain pm clear")
     ap.add_argument("--gate-clear", action="store_true")
+    ap.add_argument("--prewarm", action="store_true",
+                    help="one-shot: dismiss Flyme app-switch warning for all test apps")
     args = ap.parse_args()
 
+    if args.prewarm:
+        prewarm()
+        return
     if args.gate_clear:
         gate_clear()
         return
