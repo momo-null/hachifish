@@ -15,20 +15,34 @@ import android.widget.TextView
 import org.json.JSONObject
 
 /**
- * 悬浮叙事面板（架构 §6 前台引导模式组成，交互原型 S3）：
- * 步骤/当前动作/日志 + 暂停/继续/停止。TYPE_APPLICATION_OVERLAY 悬浮于目标 App 之上，
- * FLAG_NOT_FOCUSABLE 不抢输入焦点。数据源 = Python bridge 叙事事件（register_narrative）。
- * 需要「显示在其他应用上层」权限；研究机经 adb appops 授予。
+ * 悬浮叙事层（架构 §6 两种执行形态的 UI 组成）：
+ * - 浮条（前台引导模式）：顶部窄条，步骤/当前动作 + 暂停/停止。
+ * - 停靠（分屏模式）：下半屏 agent 控制台——感知描述（observe 摘要）/决策（当前工具）/
+ *   时间线（最近步）。系统分屏无程序化公开 API，overlay 停靠视觉等价（v1 决策，帧预览后置）。
+ * 数据源 = Python bridge 叙事事件（register_narrative）；TYPE_APPLICATION_OVERLAY +
+ * FLAG_NOT_FOCUSABLE 不抢目标 App 输入。研究机经 adb appops 授予权限。
  */
 object NarrativePanel {
 
     private const val TAG = "HachimiPanel"
     private val main = Handler(Looper.getMainLooper())
     private var wm: WindowManager? = null
-    private var view: LinearLayout? = null
+    private var context: Context? = null
+    private var contentView: LinearLayout? = null
+    private var barView: LinearLayout? = null
+    private var docked = false
+    private var paused = false
+
+    // 浮条视图引用
     private var statusLine: TextView? = null
     private var logLine: TextView? = null
-    private var paused = false
+
+    // 停靠控制台视图引用
+    private var consoleStatus: TextView? = null
+    private var perception: TextView? = null
+    private var decision: TextView? = null
+    private var timeline: TextView? = null
+    private val timelineLines = ArrayDeque<String>()
 
     /** Python 叙事事件入口（bridge.register_narrative 注入的 sink）。 */
     @JvmStatic
@@ -37,20 +51,40 @@ object NarrativePanel {
             try {
                 val e = JSONObject(json)
                 when (e.optString("event")) {
-                    "start" -> append("▶ 目标: " + e.optString("objective").take(40))
+                    "start" -> {
+                        append("▶ 目标: " + e.optString("objective").take(40))
+                        addTimeline("▶ " + e.optString("objective").take(36))
+                        setAllStatus("run " + e.optString("run_id").take(14))
+                    }
+                    "mode" -> if (e.optBoolean("docked")) dock() else undock()
                     "step" -> {
                         val tool = e.optString("tool")
-                        val ok = if (e.has("ok")) (if (e.optBoolean("ok")) "✓" else "✗") else "…"
+                        val ok = when {
+                            !e.has("ok") || e.isNull("ok") -> "…"
+                            e.optBoolean("ok") -> "✓"
+                            else -> "✗"
+                        }
                         val err = if (e.isNull("error")) "" else e.optString("error")
-                        append("step ${e.optInt("step")} $tool $ok" +
-                                (if (err.isNotEmpty()) " $err".take(60) else ""))
+                        val screen = e.optJSONArray("screen") ?: org.json.JSONArray()
+                        val perceptionText = (0 until screen.length())
+                            .joinToString(" | ") { screen.optString(it) }
+                        val line = "step ${e.optInt("step")} $tool $ok" +
+                                (if (err.isNotEmpty()) " $err".take(50) else "")
+                        append(line)
+                        addTimeline(line)
+                        if (perceptionText.isNotEmpty()) {
+                            perception?.text = "感知: " + perceptionText.take(160)
+                        }
+                        decision?.text = "决策: $tool " +
+                                e.optJSONObject("args")?.toString()?.take(90).orEmpty()
                     }
-                    "paused" -> append("⏸ 已暂停（面板继续可恢复）")
-                    "finish" -> append("■ 完成 ${e.optString("status")} · ${e.optInt("steps")}步")
+                    "paused" -> append("⏸ 已暂停（面板可恢复）")
+                    "finish" -> {
+                        append("■ 完成 ${e.optString("status")} · ${e.optInt("steps")}步")
+                        addTimeline("■ ${e.optString("status")} · ${e.optInt("steps")}步")
+                    }
                     "error" -> append("■ 错误: " + e.optString("error").take(80))
                 }
-                if (e.has("event")) statusLine?.text =
-                    "Hachimi · run ${e.optString("run_id").take(14)}"
             } catch (ex: Exception) {
                 Log.w(TAG, "push parse: ${ex.message}")
             }
@@ -59,36 +93,148 @@ object NarrativePanel {
 
     @Synchronized
     fun show(context: Context) {
-        if (view != null) return
-        if (!android.provider.Settings.canDrawOverlays(context)) {
+        this.context = context.applicationContext
+        if (contentView != null) return
+        if (!canOverlay(context)) {
             Log.w(TAG, "overlay permission missing (adb appops SYSTEM_ALERT_WINDOW)")
             return
         }
-        val pad = (12 * context.resources.displayMetrics.density).toInt()
-        val box = LinearLayout(context).apply {
+        this.context?.let { attach(it, docked) }
+    }
+
+    @Synchronized
+    fun dock() {
+        docked = true
+        val c = context ?: return
+        if (contentView != null) detach() else if (!canOverlay(c)) return
+        attach(c, true)
+    }
+
+    @Synchronized
+    fun undock() {
+        docked = false
+        val c = context ?: return
+        if (contentView != null) detach() else if (!canOverlay(c)) return
+        attach(c, false)
+    }
+
+    @Synchronized
+    fun hide() {
+        detach()
+    }
+
+    // ---------------- 视图构建 ----------------
+
+    private fun canOverlay(c: Context): Boolean =
+        android.provider.Settings.canDrawOverlays(c)
+
+    /** 双窗结构：内容窗纯显示（NOT_TOUCHABLE，触摸穿透到目标 App——分屏并行语义），
+     *  按钮条窗可触摸（仅按钮自身区域拦截）。 */
+    private fun attach(c: Context, dock: Boolean) {
+        if (!canOverlay(c)) {
+            Log.w(TAG, "overlay permission missing")
+            return
+        }
+        val pad = (12 * c.resources.displayMetrics.density).toInt()
+
+        contentView = LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xE6000000.toInt())
+            setBackgroundColor(0xF2000000.toInt())
             setPadding(pad, pad / 2, pad, pad / 2)
+        }.also { box ->
+            if (dock) {
+                consoleStatus = TextView(c).apply {
+                    text = "Hachimi 控制台 · idle"
+                    setTextColor(0xFF9FD8FF.toInt()); textSize = 10f
+                }
+                perception = TextView(c).apply {
+                    text = "感知: -"
+                    setTextColor(0xFFB0E0B0.toInt()); textSize = 11f; maxLines = 2
+                }
+                decision = TextView(c).apply {
+                    text = "决策: -"
+                    setTextColor(0xFFFFD9A0.toInt()); textSize = 11f; maxLines = 1
+                }
+                timeline = TextView(c).apply {
+                    text = ""
+                    setTextColor(Color.WHITE); textSize = 11f; maxLines = 6
+                    typeface = Typeface.MONOSPACE
+                }
+                box.addView(consoleStatus)
+                box.addView(perception)
+                box.addView(decision)
+                box.addView(timeline)
+            } else {
+                consoleStatus = null; perception = null; decision = null; timeline = null
+                statusLine = TextView(c).apply {
+                    text = "Hachimi · idle"
+                    setTextColor(0xFF9FD8FF.toInt()); textSize = 10f
+                }
+                logLine = TextView(c).apply {
+                    text = ""
+                    setTextColor(Color.WHITE); textSize = 11f; maxLines = 4
+                }
+                box.addView(statusLine)
+                box.addView(logLine)
+            }
+            // 内容窗让位按钮条：停靠=条在底（内容其上），浮条=条在顶（内容其下）
+            addWindow(box, WindowManager.LayoutParams.MATCH_PARENT,
+                if (dock) (c.resources.displayMetrics.heightPixels * 0.40f).toInt()
+                else WindowManager.LayoutParams.WRAP_CONTENT,
+                passThrough = true,
+                gravity = if (dock) Gravity.BOTTOM else Gravity.TOP,
+                yOff = barPx)
         }
-        val title = TextView(context).apply {
-            text = "Hachimi 叙事面板"
-            setTextColor(Color.WHITE); textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
+
+        barView = buttonsRow(c).apply {
+            addWindow(this, WindowManager.LayoutParams.MATCH_PARENT, barPx,
+                passThrough = false,
+                gravity = if (dock) Gravity.BOTTOM else Gravity.TOP,
+                yOff = 0)
         }
-        statusLine = TextView(context).apply {
-            text = "Hachimi · idle"
-            setTextColor(0xFF9FD8FF.toInt()); textSize = 10f
+        Log.i(TAG, if (dock) "console docked (split mode, touch-through)" else "panel shown (compact)")
+    }
+
+    private val barPx: Int
+        get() = context?.resources?.displayMetrics?.density?.let { (50 * it).toInt() } ?: 132
+
+    private fun addWindow(v: LinearLayout, w: Int, h: Int, passThrough: Boolean,
+                          gravity: Int, yOff: Int) {
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                (if (passThrough) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
+        val params = WindowManager.LayoutParams(
+            w, h,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            flags, PixelFormat.TRANSLUCENT
+        ).apply {
+            this.gravity = gravity
+            this.y = yOff
         }
-        logLine = TextView(context).apply {
-            text = ""
-            setTextColor(Color.WHITE); textSize = 11f
-            maxLines = 4
+        try {
+            wm = context?.getSystemService(WindowManager::class.java)
+            wm!!.addView(v, params)
+        } catch (e: Exception) {
+            Log.e(TAG, "addWindow failed: ${e.message}")
         }
-        val buttons = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-        fun btn(label: String, onClick: (Button) -> Unit) = Button(context).apply {
+    }
+
+    private fun detach() {
+        for (v in listOf(contentView, barView)) {
+            try {
+                wm?.removeView(v)
+            } catch (_: Exception) {}
+        }
+        contentView = null; barView = null
+        statusLine = null; logLine = null
+        consoleStatus = null; perception = null; decision = null; timeline = null
+    }
+
+    private fun buttonsRow(c: Context): LinearLayout {
+        val row = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
+        fun btn(label: String, onClick: (Button) -> Unit) = Button(c).apply {
             text = label; textSize = 11f
             setOnClickListener { v -> onClick(v as Button) }
-            buttons.addView(this)
+            row.addView(this)
         }
         btn("暂停") { b ->
             paused = !paused
@@ -96,38 +242,12 @@ object NarrativePanel {
             b.text = if (paused) "继续" else "暂停"
         }
         btn("停止") { _ -> py("request_stop") }
+        btn(if (docked) "浮条" else "停靠") { _ -> if (docked) undock() else dock() }
         btn("收起") { _ -> hide() }
-        box.addView(title)
-        box.addView(statusLine)
-        box.addView(logLine)
-        box.addView(buttons)
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP }
-        try {
-            wm = context.getSystemService(WindowManager::class.java)
-            wm!!.addView(box, params)
-            view = box
-            Log.i(TAG, "panel shown")
-        } catch (e: Exception) {
-            Log.e(TAG, "show failed: ${e.message}")
-        }
+        return row
     }
 
-    @Synchronized
-    fun hide() {
-        val v = view ?: return
-        try {
-            wm?.removeView(v)
-        } catch (_: Exception) {}
-        view = null
-        logLine = null
-        statusLine = null
-    }
+    // ---------------- 文本更新 ----------------
 
     private fun append(line: String) {
         val v = logLine ?: return
@@ -135,6 +255,18 @@ object NarrativePanel {
         if ((v.text.split("\n").size) > 4) {
             v.text = v.text.split("\n").takeLast(4).joinToString("\n")
         }
+    }
+
+    private fun addTimeline(line: String) {
+        if (timelineLines.size >= 6) timelineLines.removeFirst()
+        timelineLines.addLast(line)
+        timeline?.text = timelineLines.joinToString("\n")
+    }
+
+    private fun setAllStatus(s: String) {
+        statusLine?.text = "Hachimi · $s"
+        consoleStatus?.text = "Hachimi 控制台 · $s" +
+                (if (docked) " · 分屏模式" else "")
     }
 
     /** 面板按钮 → Python bridge 控制面（挂在 KernelHostService 缓存的 bridge 模块上）。 */

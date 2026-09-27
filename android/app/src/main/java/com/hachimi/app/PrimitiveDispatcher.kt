@@ -14,7 +14,7 @@ class PrimitiveDispatcher {
             ?: return JSONObject().put("ok", false).put("error", "a11y not bound").toString()
         val args = try { JSONObject(argsJson) } catch (e: Exception) { JSONObject() }
         return when (name) {
-            "observe" -> svc.observe()
+            "observe" -> svc.observe(args.optBoolean("compact", false))
             "tap_by_id" -> svc.tapById(args.optString("view_id"))
             "tap_xy" -> svc.tapXY(args.optDouble("x", 0.5), args.optDouble("y", 0.9))
             "type_text" -> svc.typeText(args.optString("text"))

@@ -46,30 +46,37 @@ class HachimiAccessibilityService : AccessibilityService() {
 
     // ---------- 原语 1: observe() —— UI 树序列化（对应 u2 dump_hierarchy） ----------
 
-    fun observe(): JSONObject {
+    /** compact=true 只保留有文本/可交互节点（导航用，噪声约为全树 1/10）；
+     *  默认全树（对拍/细查语义不变，R3 同构面）。 */
+    fun observe(compact: Boolean = false): JSONObject {
         val root = rootInActiveWindow
             ?: return err("observe", "no active window")
         val arr = JSONArray()
-        walk(root, arr, depth = 0, maxDepth = 40, maxNodes = 500)
-        return ok("observe").put("tree", arr)
+        walk(root, arr, depth = 0, maxDepth = 40, maxNodes = 500, compact = compact)
+        return ok("observe").put("tree", arr).put("compact", compact)
     }
 
-    private fun walk(node: AccessibilityNodeInfo, out: JSONArray, depth: Int, maxDepth: Int, maxNodes: Int) {
+    private fun walk(node: AccessibilityNodeInfo, out: JSONArray,
+                     depth: Int, maxDepth: Int, maxNodes: Int, compact: Boolean) {
         if (depth > maxDepth || out.length() >= maxNodes) return
         val b = Rect()
         node.getBoundsInScreen(b)
-        out.put(
-            JSONObject()
-                .put("view_id", node.viewIdResourceName ?: "")
-                .put("cls", node.className ?: "")
-                .put("text", node.text ?: "")
-                .put("desc", node.contentDescription ?: "")
-                .put("clickable", node.isClickable)
-                .put("editable", node.isEditable)
-                .put("bounds", JSONArray().put(b.left).put(b.top).put(b.right).put(b.bottom))
-        )
+        val hasText = !(node.text.isNullOrEmpty() && node.contentDescription.isNullOrEmpty())
+        val interactive = node.isClickable || node.isEditable || node.isScrollable
+        if (!compact || hasText || interactive) {
+            out.put(
+                JSONObject()
+                    .put("view_id", node.viewIdResourceName ?: "")
+                    .put("cls", node.className ?: "")
+                    .put("text", node.text ?: "")
+                    .put("desc", node.contentDescription ?: "")
+                    .put("clickable", node.isClickable)
+                    .put("editable", node.isEditable)
+                    .put("bounds", JSONArray().put(b.left).put(b.top).put(b.right).put(b.bottom))
+            )
+        }
         for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { walk(it, out, depth + 1, maxDepth, maxNodes) }
+            node.getChild(i)?.let { walk(it, out, depth + 1, maxDepth, maxNodes, compact) }
         }
     }
 

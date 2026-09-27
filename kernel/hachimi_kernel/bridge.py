@@ -29,7 +29,9 @@ _lock = threading.Lock()
 
 # 八原语工具面（架构 §4.1 同构面；verify_done 由内核实现，v1 = 文本探测）
 TOOL_SPECS = [
-    {"name": "observe", "description": "观察当前屏幕 UI 树（结构化节点：view_id/cls/text/bounds）"},
+    {"name": "observe", "description": "观察当前屏幕 UI 树（结构化节点：view_id/cls/text/bounds）。"
+     "建议传 {\"compact\": true}：只含有文本/可交互节点，噪声小、推荐导航用；"
+     "不传参数为全树（节点多）"},
     {"name": "wait", "description": "等待界面加载（秒）——应用切换/加载转场后先 wait 再 observe",
      "parameters": {"type": "object", "properties": {"seconds": {"type": "number"}}}},
     {"name": "tap_by_id", "description": "按控件 resource-id 点击",
@@ -37,7 +39,8 @@ TOOL_SPECS = [
                     "required": ["view_id"]}},
     {"name": "tap_xy", "description": "按归一化坐标点击 (0-1)",
      "parameters": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}}},
-    {"name": "type_text", "description": "向聚焦的可编辑控件输入文本",
+    {"name": "type_text", "description": "设置聚焦可编辑控件的完整文本（替换语义，"
+     "非光标插入——追加时须传入含原文的完整新文本）",
      "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
     {"name": "gesture", "description": "手势滑动，points 为归一化坐标序列",
      "parameters": {"type": "object", "properties": {"points": {"type": "array"}}}},
@@ -83,7 +86,8 @@ def _make_tools():
 def _verify_done(args):
     """v1 完成校验：done_when 文本出现在当前屏幕任一节点文本中。"""
     try:
-        r = json.loads(_bridge.call("observe", "{}")) if _bridge else {"ok": False}
+        r = json.loads(_bridge.call("observe", "{\"compact\":true}")) if _bridge \
+            else {"ok": False}
         if not r.get("ok"):
             return {"passed": False, "reason": "observe unavailable"}
         blob = " ".join((n.get("text") or "") + (n.get("desc") or "")
@@ -210,6 +214,23 @@ def _make_store(run_id, objective, done_when):
         return None, None
 
 
+def _perception_summary(result):
+    """observe 结果 → 感知摘要（前 5 条非空文本/描述，每条 ≤24 字符）。
+    分屏控制台的「感知描述」数据源；解析失败静默降级为空。"""
+    try:
+        tree = (result or {}).get("tree") or []
+        out = []
+        for n in tree:
+            t = ((n.get("text") or "") + " " + (n.get("desc") or "")).strip()
+            if t:
+                out.append(t[:24])
+            if len(out) >= 5:
+                break
+        return out
+    except Exception:
+        return []
+
+
 def _run(body, stop_flag=_controls):
     steps = []
     objective = body.get("objective", "")
@@ -220,6 +241,8 @@ def _run(body, stop_flag=_controls):
         if task_id:
             _state["task_id"] = task_id
     _emit({"event": "start", "run_id": run_id, "objective": objective})
+    if body.get("mode") == "split":
+        _emit({"event": "mode", "run_id": run_id, "docked": True})
     try:
         tools = _tools_with_verify()
         brain = _make_brain(body)
@@ -240,7 +263,9 @@ def _run(body, stop_flag=_controls):
             _emit({"event": "step", "run_id": run_id, "step": step.get("step"),
                    "tool": a.get("tool"), "args": a.get("args"),
                    "ok": step.get("result", {}).get("ok"),
-                   "error": step.get("result", {}).get("error")})
+                   "error": step.get("result", {}).get("error"),
+                   "screen": _perception_summary(step.get("result"))
+                             if a.get("tool") == "observe" else []})
             if stop_flag["stopped"]:
                 raise RuntimeError("stopped by request")
             if stop_flag["paused"]:
