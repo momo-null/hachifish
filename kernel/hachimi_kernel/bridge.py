@@ -124,7 +124,9 @@ def _make_brain(body):
     if not cfg or not cfg.get("base_url"):
         raise BrainError("no brain configured (BYOK 未设置)")
     print("[task] brain: %s model=%s" % (cfg["base_url"], cfg["model"]), flush=True)
-    return BrainClient(cfg["base_url"], cfg.get("api_key", ""), cfg.get("model", ""))
+    # thinking 默认 disabled（brain_client 注释：自适应思考与多轮工具循环不兼容）
+    return BrainClient(cfg["base_url"], cfg.get("api_key", ""), cfg.get("model", ""),
+                       thinking=cfg.get("thinking") or {"type": "disabled"})
 
 
 _brain_cfg = None

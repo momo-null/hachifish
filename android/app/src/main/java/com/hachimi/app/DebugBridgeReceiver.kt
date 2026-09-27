@@ -29,9 +29,11 @@ class DebugBridgeReceiver : BroadcastReceiver() {
         val svc = HachimiAccessibilityService.instance
         val prim = intent.getStringExtra("prim") ?: "observe"
 
-        // 参数从独立 extras 读取（adb 传 JSON 转义易碎）；--es args '{json}' 仍可覆盖/补充
+        // 参数从独立 extras 读取（adb 传 JSON 转义易碎，set_brain 三字段必须走独立
+        // --es：嵌套 --es args '{json}' 在 Windows Git Bash→adb shell 双层引号中会丢值）
         val args = JSONObject()
-        for (k in listOf("view_id", "text", "package", "key")) {
+        for (k in listOf("view_id", "text", "package", "key",
+                         "base_url", "api_key", "model")) {
             intent.getStringExtra(k)?.let { args.put(k, it) }
         }
         if (intent.hasExtra("x")) args.put("x", intent.getStringExtra("x")?.toDoubleOrNull() ?: intent.getDoubleExtra("x", 0.5))

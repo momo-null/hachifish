@@ -66,6 +66,7 @@ class MiniLoop(object):
         self.on_finish = on_finish
         self._verify_tool = self.config.get("verify_tool", "verify_done")
         self._messages = []
+        self._pending_reply = None   # 当前轮 brain 回复（thinking 模型要求 reasoning_content 回传）
         self._last_identical = 0
         self._last_action_key = None
         self.task_done_rejected = 0
@@ -88,10 +89,14 @@ class MiniLoop(object):
                 summary = "墙钟预算耗尽"
                 break
             reply = self.brain.chat(self._messages, self._tool_specs())
+            self._pending_reply = reply
             calls = reply.get("tool_calls") or []
             if not calls:
                 # 纯文本回复：注入提醒继续使用工具（防空转，不终止——桌面语义为升级判定，此处先简化）
-                self._messages.append({"role": "assistant", "content": reply.get("content") or ""})
+                no_call = {"role": "assistant", "content": reply.get("content") or ""}
+                if reply.get("reasoning_content"):
+                    no_call["reasoning_content"] = reply["reasoning_content"]
+                self._messages.append(no_call)
                 self._messages.append({"role": "user",
                                        "content": "(系统) 请调用工具推进任务；完成后调用 task_done。"})
                 continue
@@ -146,13 +151,13 @@ class MiniLoop(object):
                                        "content": "(系统) task_done 校验未通过: "
                                                   + verdict.get("reason", "") + "。请继续任务。"})
             step = self._record(step_no, name, args, result, verified, retry)
-            self._push_tool_result(name, result)
+            self._push_tool_result(name, args, result)
             return result, step, False
 
         if name not in self.tools:
             result = {"ok": False, "error": "unknown tool: " + name}
             step = self._record(step_no, name, args, result, None, 0)
-            self._push_tool_result(name, result)
+            self._push_tool_result(name, args, result)
             return result, step, False
 
         # 卡住检测（升级判定子集）
@@ -164,7 +169,7 @@ class MiniLoop(object):
         if self._last_identical >= STUCK_GIVE_UP:
             result = {"ok": False, "error": "stuck: 相同动作已连续 %d 次" % self._last_identical}
             step = self._record(step_no, name, args, result, None, 0)
-            self._push_tool_result(name, result)
+            self._push_tool_result(name, args, result)
             return result, step, True
 
         try:
@@ -178,7 +183,7 @@ class MiniLoop(object):
             result = dict(result)
             result["stuck_warning"] = "该动作已连续 %d 次，请换思路或先 observe" % self._last_identical
         step = self._record(step_no, name, args, result, None, 0)
-        self._push_tool_result(name, result)
+        self._push_tool_result(name, args, result)
         return result, step, False
 
     def _verify(self):
@@ -206,9 +211,15 @@ class MiniLoop(object):
             "ts": round(time.time(), 3),
         }
 
-    def _push_tool_result(self, name, result):
-        self._messages.append({"role": "assistant", "content": None,
-                               "tool_calls": [{"name": name, "args": result.get("_echo_args", {})}]})
+    def _push_tool_result(self, name, args, result):
+        # assistant 消息保留内核内部 schema（{name, args}）；wire 包装（id/tool_call_id/
+        # reasoning_content 回传）由 brain 侧负责
+        reply = self._pending_reply or {}
+        m = {"role": "assistant", "content": reply.get("content"),
+             "tool_calls": [{"name": name, "args": args}]}
+        if reply.get("reasoning_content"):
+            m["reasoning_content"] = reply["reasoning_content"]
+        self._messages.append(m)
         self._messages.append({"role": "tool", "name": name,
                                "content": json.dumps(result, ensure_ascii=False)})
 

@@ -46,7 +46,10 @@ object BrainConfigStore {
     fun load(context: Context): BrainConfig? {
         return try {
             val file = context.getFileStreamPath(FILE)
-            if (!file.exists()) return null
+            if (!file.exists()) {
+                Log.w(TAG, "load: no brain config file")
+                return null
+            }
             val all = file.readBytes()
             val ivLen = all[0].toInt()
             val iv = all.copyOfRange(1, 1 + ivLen)
@@ -55,7 +58,11 @@ object BrainConfigStore {
             cipher.init(Cipher.DECRYPT_MODE, key(context), GCMParameterSpec(128, iv))
             val plain = String(cipher.doFinal(ct), Charsets.UTF_8)
             val re = Regex("\"base_url\":\"([^\"]*)\".*\"api_key\":\"([^\"]*)\".*\"model\":\"([^\"]*)\"")
-            val m = re.find(plain) ?: return null
+            val m = re.find(plain)
+            if (m == null) {
+                Log.w(TAG, "load: decrypted but pattern mismatch (${plain.length} chars)")
+                return null
+            }
             BrainConfig(m.groupValues[1], m.groupValues[2], m.groupValues[3])
         } catch (e: Exception) {
             Log.e(TAG, "load failed: ${e.message}")
