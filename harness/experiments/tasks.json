@@ -1,0 +1,156 @@
+{
+  "_comment": "M4' 任务集（preregistration §5.1 口径）：15 任务 × 3 难度层，全部 Fossify 测试 App / 系统设置（R8：无登录/支付/实名）。objective/done_when 与内核 /task body 直通；reset = 每任务执行前的状态重置规格。审计口径：R8 任务清单 = 本文件。",
+  "tasks": [
+    {
+      "id": "T1",
+      "level": "L1",
+      "app": "org.fossify.notes",
+      "title": "便签创建提醒",
+      "objective": "Open the app org.fossify.notes, create a new text note containing the text '提醒：明天上午备份实验数据', make sure the note is saved so the notes list shows it, then call task_done.",
+      "done_when": "提醒：明天上午备份实验数据",
+      "max_steps": 20,
+      "reset": {"pm_clear": ["org.fossify.notes"], "seed_notes": true}
+    },
+    {
+      "id": "T2",
+      "level": "L1",
+      "app": "org.fossify.math",
+      "title": "计算器表达式",
+      "objective": "Open the app org.fossify.math, calculate the expression 12*34+66 using the calculator UI, confirm the result 474 is displayed on screen, then call task_done.",
+      "done_when": "474",
+      "max_steps": 14,
+      "reset": {"pm_clear": ["org.fossify.math"]}
+    },
+    {
+      "id": "T3",
+      "level": "L1",
+      "app": "org.fossify.clock",
+      "title": "时钟加闹钟",
+      "objective": "Open the app org.fossify.clock, add a new alarm set to 07:30 with label 'Hachimi 起床', enable it, confirm the alarm 07:30 appears in the alarm list, then call task_done.",
+      "done_when": "07:30",
+      "max_steps": 16,
+      "reset": {"pm_clear": ["org.fossify.clock"]}
+    },
+    {
+      "id": "T4",
+      "level": "L1",
+      "app": "org.fossify.filemanager",
+      "title": "文件重命名",
+      "objective": "Open the app org.fossify.filemanager, find any file in the main storage list, rename it to 'hachimi_renamed.txt' (if it is not a file but a folder, pick another entry that is a file), confirm the new name is visible, then call task_done.",
+      "done_when": "hachimi_renamed",
+      "max_steps": 16,
+      "reset": {"pm_clear": ["org.fossify.filemanager"], "seed_files": true}
+    },
+    {
+      "id": "T5",
+      "level": "L1",
+      "app": "org.fossify.notes",
+      "title": "便签格式化",
+      "objective": "Open the app org.fossify.notes, create a new note with three lines: '购物清单', '牛奶', '鸡蛋', save it, confirm all three lines are visible, then call task_done.",
+      "done_when": "鸡蛋",
+      "max_steps": 20,
+      "reset": {"pm_clear": ["org.fossify.notes"], "seed_notes": true}
+    },
+    {
+      "id": "T6",
+      "level": "L2",
+      "app": "org.fossify.notes",
+      "title": "笔记多页编辑",
+      "objective": "Open the app org.fossify.notes, create a new text note whose content is 'L2 第一行：分屏模式任务', and save it. Then reopen that note, append a second line 'L2 第二行：追加成功' (set the full text to both lines), save again, confirm both lines are visible, then call task_done.",
+      "done_when": "L2 第二行：追加成功",
+      "max_steps": 30,
+      "reset": {"pm_clear": ["org.fossify.notes"], "seed_notes": true}
+    },
+    {
+      "id": "T7",
+      "level": "L2",
+      "app": "org.fossify.gallery",
+      "title": "图库建相册整理",
+      "objective": "Open the app org.fossify.gallery, create a new album named 'Hachimi整理', confirm the album appears in the album list, then call task_done.",
+      "done_when": "Hachimi整理",
+      "max_steps": 22,
+      "reset": {"pm_clear": ["org.fossify.gallery"]}
+    },
+    {
+      "id": "T8",
+      "level": "L2",
+      "app": "org.fossify.clock",
+      "title": "秒表计时",
+      "objective": "Open the app org.fossify.clock, switch to the stopwatch tab, start the stopwatch, wait at least 3 seconds, stop it, confirm a non-zero elapsed time is displayed, then call task_done.",
+      "done_when": "00:00",
+      "max_steps": 14,
+      "reset": {"pm_clear": ["org.fossify.clock"]},
+      "_verify_note": "done_when 需模型以 observe 结果自证非零；verify_done 文本探测作弱校验"
+    },
+    {
+      "id": "T9",
+      "level": "L2",
+      "app": "org.fossify.filemanager",
+      "title": "文件归档移动",
+      "objective": "Open the app org.fossify.filemanager, create a new folder named 'Hachimi归档' in the main storage, confirm it appears in the list, then call task_done.",
+      "done_when": "Hachimi归档",
+      "max_steps": 18,
+      "reset": {"pm_clear": ["org.fossify.filemanager"], "seed_files": true}
+    },
+    {
+      "id": "T10",
+      "level": "L2",
+      "app": "org.fossify.notes",
+      "title": "便签检索确认",
+      "objective": "Open the app org.fossify.notes, use the search function to find notes containing '111111', confirm a note containing 111111 is visible in the search results, then call task_done.",
+      "done_when": "111111",
+      "max_steps": 16,
+      "reset": {"pm_clear": ["org.fossify.notes"], "seed_notes": true}
+    },
+    {
+      "id": "T11",
+      "level": "L3",
+      "app": "org.fossify.clock + org.fossify.notes",
+      "title": "跨 App 信息汇总",
+      "objective": "Open the app org.fossify.clock, find the alarm list and read the first alarm time shown, then open org.fossify.notes and create a new note whose content is '闹钟时间：' followed by that exact time, save it, confirm the note is visible in the list, then call task_done.",
+      "done_when": "闹钟时间：",
+      "max_steps": 34,
+      "reset": {"pm_clear": ["org.fossify.notes", "org.fossify.clock"], "seed_notes": true, "seed_alarms": true}
+    },
+    {
+      "id": "T12",
+      "level": "L3",
+      "app": "org.fossify.gallery",
+      "title": "图库多条件整理",
+      "objective": "Open the app org.fossify.gallery, browse the media list, then create a new album named 'Hachimi精选' and confirm it appears in the albums view, then call task_done. If the app asks for any permission, accept it.",
+      "done_when": "Hachimi精选",
+      "max_steps": 30,
+      "reset": {"pm_clear": ["org.fossify.gallery"]}
+    },
+    {
+      "id": "T13",
+      "level": "L3",
+      "app": "org.fossify.math + org.fossify.notes",
+      "title": "长流程向导",
+      "objective": "Open the app org.fossify.math, calculate 8*9 and note the result shown, then open org.fossify.notes and create a note with content '计算结果：' followed by that exact result, save it, confirm the note is visible, then call task_done.",
+      "done_when": "计算结果：",
+      "max_steps": 34,
+      "reset": {"pm_clear": ["org.fossify.notes", "org.fossify.math"], "seed_notes": true}
+    },
+    {
+      "id": "T14",
+      "level": "L3",
+      "app": "org.fossify.clock",
+      "title": "定时任务编排",
+      "objective": "Open the app org.fossify.clock, add two alarms: one at 08:00 labeled '早会' and one at 20:00 labeled '复盘', confirm both alarms appear in the alarm list, then call task_done.",
+      "done_when": "20:00",
+      "max_steps": 30,
+      "reset": {"pm_clear": ["org.fossify.clock"]}
+    },
+    {
+      "id": "T15",
+      "level": "L3",
+      "app": "org.fossify.filemanager + org.fossify.notes",
+      "title": "多 App 数据对比",
+      "objective": "Open the app org.fossify.filemanager, check how many items are in the main storage list, then open org.fossify.notes and create a note with content '存储条目数：' followed by that count, save it, confirm the note is visible, then call task_done.",
+      "done_when": "存储条目数：",
+      "max_steps": 34,
+      "reset": {"pm_clear": ["org.fossify.notes", "org.fossify.filemanager"], "seed_notes": true, "seed_files": true}
+    }
+  ]
+}

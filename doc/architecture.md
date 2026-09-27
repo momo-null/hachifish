@@ -117,14 +117,17 @@
 
 **学习**（K 闭环四步，挂在 loop 收尾）：轨迹落盘 `trajectory.jsonl` → Curator 触发式蒸馏（任务完成后一次，无定时器）→ 候选 skill（N=3 连续成功晋升）/ world_model merge / 全局记忆 → 下次任务弱注入。
 
-**存储布局**（App 私有目录，替代桌面 `~/.omniagent/`）：
+**存储布局**（App 私有目录，替代桌面 `~/.omniagent/`；2026-09-27 实测更正：
+runtime_paths 把 `HACHIMI_DATA_DIR`（= filesDir）直接映射为桌面 `~/.omniagent` 根，
+故无 `omniagent/` 中间层，与最初示意不同）：
 
 ```plain
-files/omniagent/
+files/
 ├── config.json            # 三通道配置（key 仅 Keystore 别名引用）
-├── tasks/<task_id>/       # task.json · trajectory.jsonl · world_model.md · skills/
+├── tasks/<task_id>/       # task.json · <date>_<run_id>.jsonl · <run_id>.run.json · failures/
 ├── skills/                # 全局通用 skill（SKILL.md + frontmatter）
-└── memory/                # MEMORY.md · memory_summary.md · rollouts/ · merged.json
+├── memory/                # MEMORY.md · memory_summary.md · rollouts/ · merged.json
+└── snapshots/<id>/        # M4' 注入快照（manifest.json SHA256 + 只读装载，R9）
 ```
 
 ## 6. 执行模式的 UI 组成

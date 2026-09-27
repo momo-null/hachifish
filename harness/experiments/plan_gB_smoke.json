@@ -1,0 +1,9 @@
+{
+  "plan_id": "gB_smoke",
+  "group": "B",
+  "snapshot_id": "skills_v1",
+  "mode": "foreground",
+  "task_ids": ["T1"],
+  "runs_per_task": 1,
+  "seed": 7
+}

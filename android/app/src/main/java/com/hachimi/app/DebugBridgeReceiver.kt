@@ -32,7 +32,7 @@ class DebugBridgeReceiver : BroadcastReceiver() {
         // 参数从独立 extras 读取（adb 传 JSON 转义易碎，set_brain 三字段必须走独立
         // --es：嵌套 --es args '{json}' 在 Windows Git Bash→adb shell 双层引号中会丢值）
         val args = JSONObject()
-        for (k in listOf("view_id", "text", "package", "key",
+        for (k in listOf("view_id", "text", "package", "key", "op",
                          "base_url", "api_key", "model")) {
             intent.getStringExtra(k)?.let { args.put(k, it) }
         }
@@ -80,6 +80,18 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                         args.optString("model")
                     )
                     JSONObject().put("ok", ok).put("note", "brain config stored (Keystore-encrypted)")
+                }
+                "gate_clear" -> {
+                    // M4' 状态重置：清空授权白名单（实验组间口径一致）
+                    com.hachimi.app.gate.GateManager.clear(context)
+                    JSONObject().put("ok", true).put("note", "gate whitelist cleared")
+                }
+                "gate_allow" -> {
+                    // M4' 门控预授权（reset 阶段逐任务注入 App×操作对，避免 run 内人工应答）
+                    val pkg = args.optString("package")
+                    val op = args.optString("op")
+                    com.hachimi.app.gate.GateManager.remember(context, pkg, op)
+                    JSONObject().put("ok", true).put("note", "whitelist + $pkg|$op")
                 }
                 "screenshot" -> run {
                     // 异步：立即回执，真实结果随回调追加（latency 含等待截图完成）

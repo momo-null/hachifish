@@ -200,6 +200,27 @@ def request_resume():
     return {"ok": True, "paused": False}
 
 
+def _group_constraints(body, objective):
+    """M4' 实验组注入（R5 默认关 / R9 快照 SHA 校验）：无 group 字段零变化。
+    实验期 Curator 冻结 = 组任务标记 _frozen_run，蒸馏触发点见 on_finish 防御断言。"""
+    try:
+        from hachimi_kernel.experiment import build_group_constraints
+        block = build_group_constraints(body)
+        if block and (body or {}).get("group"):
+            with _lock:
+                _frozen_run.add(_state.get("run_id"))
+        if body and body.get("constraints"):
+            return (block + "\n" + body["constraints"]).strip() if block \
+                else body["constraints"]
+        return block
+    except Exception as e:
+        # 注入失败（含 SHA 不匹配）→ 任务以 error 终止，不静默降级到无注入
+        raise BrainError("group injection failed: %s" % e)
+
+
+_frozen_run = set()
+
+
 def _make_store(run_id, objective, done_when):
     """轨迹落盘器（桌面 schema 对齐：tasks/<task_id>/<date>_<run_id>.jsonl）。
     落盘失败不阻塞任务执行（返回 None，仅进程内轨迹）。"""
@@ -296,6 +317,12 @@ def _run(body, stop_flag=_controls):
                 _state["phase"] = "done" if out["status"] == "done" else "error"
                 _state["summary"] = out
                 _state["trajectory"] = steps
+            # K 闭环挂载点（桌面 tool_loop._finish → Curator 触发）。R9：实验期冻结——
+            # 组任务（_frozen_run 命中）禁止蒸馏；未来接线时在此检查
+            with _lock:
+                frozen = _state.get("run_id") in _frozen_run
+            if frozen and globals().get("_curator_hook"):
+                print("[task] CURATOR SUPPRESSED (experiment freeze)", flush=True)
             _emit({"event": "finish", "run_id": run_id, "status": out["status"],
                    "steps": out["steps"], "wall_clock_s": out.get("wall_clock_s"),
                    "summary": out.get("summary", "")})
@@ -303,7 +330,7 @@ def _run(body, stop_flag=_controls):
         loop = MiniLoop(objective=objective,
                         done_when=done_when,
                         tools=tools, brain=brain,
-                        constraints=body.get("constraints", ""),
+                        constraints=_group_constraints(body, objective),
                         config={"max_steps": body.get("max_steps", 12),
                                 "verify_tool": "verify_done"},
                         controls=_controls,
