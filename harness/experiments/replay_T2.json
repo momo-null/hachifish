@@ -1,0 +1,193 @@
+{
+ "objective": "Open the app org.fossify.math, calculate the expression 12*34+66 using the calculator UI, confirm the result 474 is displayed on screen, then call task_done.",
+ "done_when": "474",
+ "max_steps": 35,
+ "script": [
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "launch_app",
+   "args": {
+    "package": "org.fossify.math"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 1.5
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_1"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 0.8
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_2"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 0.8
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_multiply"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 0.8
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_3"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 0.8
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_4"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 0.8
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_plus"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 0.8
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_6"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 0.9
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_6"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 0.9
+   }
+  },
+  {
+   "name": "observe",
+   "args": {
+    "compact": true
+   }
+  },
+  {
+   "name": "tap_by_id",
+   "args": {
+    "view_id": "org.fossify.math:id/btn_equals"
+   }
+  },
+  {
+   "name": "wait",
+   "args": {
+    "seconds": 1.0
+   }
+  },
+  {
+   "name": "task_done",
+   "args": {
+    "summary": "replay of human demo (T2)"
+   }
+  }
+ ]
+}

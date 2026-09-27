@@ -39,7 +39,9 @@ class HachimiAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // M1' 后续：事件驱动的窗口变化监听（等待型 observe）。骨架阶段轮询式 observe 已够。
+        // M4' DoD⑥ 示教录制挂载点（未激活时开销 = 一次布尔检查）。
+        // 事件驱动的等待型 observe 仍为 M1' 后续项。
+        if (event != null) TeachRecorder.onEvent(this, event)
     }
 
     override fun onInterrupt() {}

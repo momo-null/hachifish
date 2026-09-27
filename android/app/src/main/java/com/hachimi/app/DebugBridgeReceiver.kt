@@ -93,6 +93,11 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                     com.hachimi.app.gate.GateManager.remember(context, pkg, op)
                     JSONObject().put("ok", true).put("note", "whitelist + $pkg|$op")
                 }
+                // M4' DoD⑥ 示教录制器控制面（事件流 = 无障碍 API，落盘经 run-as 拉取）
+                "teach_start" -> TeachRecorder.start()
+                "teach_stop" -> TeachRecorder.stop()
+                "teach_status" -> TeachRecorder.status()
+                "teach_dump" -> TeachRecorder.dump(context)
                 "screenshot" -> run {
                     // 异步：立即回执，真实结果随回调追加（latency 含等待截图完成）
                     svc.screenshot { r ->
