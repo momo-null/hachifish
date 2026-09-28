@@ -32,7 +32,7 @@ class DebugBridgeReceiver : BroadcastReceiver() {
         // 参数从独立 extras 读取（adb 传 JSON 转义易碎，set_brain 三字段必须走独立
         // --es：嵌套 --es args '{json}' 在 Windows Git Bash→adb shell 双层引号中会丢值）
         val args = JSONObject()
-        for (k in listOf("view_id", "text", "package", "key", "op",
+        for (k in listOf("view_id", "text", "package", "key", "op", "value",
                          "base_url", "api_key", "model")) {
             intent.getStringExtra(k)?.let { args.put(k, it) }
         }
@@ -97,10 +97,14 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                 "config" -> {
                     // 设备 profile 注入（跨品牌兼容）：把 ROM 专属参数写入应用私有 SharedPreferences
                     // "hachimi_config"，供原语运行时读取。例：tap_bottom_limit=0.93（手势区吞底部触摸）。
+                    // 类型契约：数值必须写 Float（读方 getFloat，如 tapXY；putString 会让
+                    // getFloat 抛 ClassCastException——2026-09-28 实录），其余写 String。
                     val key = args.optString("key")
                     val value = args.optString("value")
-                    context.getSharedPreferences("hachimi_config", Context.MODE_PRIVATE)
-                        .edit().putString(key, value).apply()
+                    val editor = context.getSharedPreferences("hachimi_config", Context.MODE_PRIVATE).edit()
+                    value.toFloatOrNull()?.let { editor.putFloat(key, it) }
+                        ?: editor.putString(key, value)
+                    editor.apply()
                     JSONObject().put("ok", true).put("note", "config $key=$value")
                 }
                 // M4' DoD⑥ 示教录制器控制面（事件流 = 无障碍 API，落盘经 run-as 拉取）

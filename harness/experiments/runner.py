@@ -41,8 +41,19 @@ def http(method, path, body=None, timeout=15):
 
 
 def parse_repr(text):
+    """解析回环响应。
+
+    2026-09-28 实录：/health 与 /trajectory 返回的是 JSON，而这里原来只用
+    ast.literal_eval（原为 python-repr 形态设计）-> JSON 的 true/false 被当成
+    Python 名字抛 `ValueError: malformed node or string`，health() 因此恒返回
+    a11y=False：**每一轮 run 都误判无障碍掉线**，触发一次无效的 a11y_recover。
+    先 repr 后 JSON（两条兼容，谁成功算谁）。"""
     import ast
-    return ast.literal_eval(text)
+
+    try:
+        return ast.literal_eval(text)
+    except Exception:
+        return json.loads(text)
 
 
 def health():

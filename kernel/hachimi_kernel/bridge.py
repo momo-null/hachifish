@@ -95,15 +95,12 @@ def _verify_done(args):
         blob = " ".join((n.get("text") or "") + (n.get("desc") or "")
                         for n in r.get("tree", []))
         cond = (args or {}).get("done_when", "")
+        # 空判据：空串是任何文本的子串，会让校验恒真（假绿通道），必须拒判
+        if not cond:
+            return {"passed": False, "reason": "empty done_when (拒绝空判据)"}
         return {"passed": cond in blob, "reason": "text probe: %r" % cond[:40]}
     except Exception as e:
         return {"passed": False, "reason": "%s: %s" % (type(e).__name__, e)}
-
-
-def _tools_with_verify():
-    tools = _make_tools()
-    tools["verify_done"] = {"description": "完成校验（内核强制门控）", "call": _verify_done}
-    return tools
 
 
 # ---------------- 大脑 ----------------
@@ -271,7 +268,8 @@ def _run(body, stop_flag=_controls):
         # 底部按钮条吞掉目标 App 底部触摸——时钟类任务 tab 栏不可点）
         _emit({"event": "mode", "run_id": run_id, "docked": False})
     try:
-        tools = _tools_with_verify()
+        # verify 不进模型工具面（只作 loop 强制门控）：防模型绕过 task_done 自调校验刷假绿
+        tools = _make_tools()
         brain = _make_brain(body)
 
         def on_step(step):
@@ -340,6 +338,7 @@ def _run(body, stop_flag=_controls):
                         config={"max_steps": body.get("max_steps", 12),
                                 "verify_tool": "verify_done"},
                         controls=_controls,
+                        verify_fn=_verify_done,
                         on_step=on_step, on_finish=on_finish)
         loop.run()
     except Exception as e:

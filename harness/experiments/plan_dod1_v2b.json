@@ -1,0 +1,9 @@
+{
+  "plan_id": "dod1_v2b",
+  "group": "A",
+  "snapshot_id": null,
+  "mode": "foreground",
+  "task_ids": ["T3", "T7", "T11", "T13", "T14", "T15"],
+  "runs_per_task": 1,
+  "seed": 42
+}

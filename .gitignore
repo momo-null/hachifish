@@ -22,3 +22,7 @@ venv/
 Thumbs.db
 .tools/
 .codebuddy/
+
+# 本地密钥 / BYOK 配置（绝不入库）
+*.local.json
+*.local.env

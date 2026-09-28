@@ -108,8 +108,12 @@ class HachimiAccessibilityService : AccessibilityService() {
         // 底部钳制阈值从设备 profile（SharedPreferences "hachimi_config"）读取，默认 1.0 = 不钳制。
         // 仅对已知「系统手势区吞底部触摸」的 ROM（如旧 Flyme）经调试桥 config 写入 0.93 启用；
         // 通用设备不裁剪，避免误伤底部控件（2026-09-27 跨品牌兼容改造）。
-        val limit = getSharedPreferences("hachimi_config", android.content.Context.MODE_PRIVATE)
-            .getFloat("tap_bottom_limit", 1.0f).toDouble()
+        // 防御性读取：旧版本 config 原语曾以 String 落盘，getFloat 直接抛 ClassCastException
+        // 令 tap_xy 全灭（2026-09-28 实录），历史字符串值也要能解析。
+        val prefs = getSharedPreferences("hachimi_config", android.content.Context.MODE_PRIVATE)
+        val limit = (prefs.getString("tap_bottom_limit", null)?.toFloatOrNull()
+            ?: runCatching { prefs.getFloat("tap_bottom_limit", 1.0f) }.getOrNull()
+            ?: 1.0f).toDouble()
         val yC = minOf(yNorm, limit)
         val path = Path().apply {
             moveTo((xNorm * w).roundToInt().toFloat(), (yC * h).roundToInt().toFloat())
@@ -237,8 +241,25 @@ class HachimiAccessibilityService : AccessibilityService() {
 
     // ---------- helpers ----------
 
-    private fun screenSize(): Pair<Int, Int> =
-        resources.displayMetrics.widthPixels to resources.displayMetrics.heightPixels
+    private fun screenSize(): Pair<Int, Int> {
+        // 必须与 observe 树的坐标系一致：树用的是 AccessibilityNodeInfo.getBoundsInScreen，
+        // 落在「真实全屏」像素空间（含系统导航栏）。而 Service 上下文的 resources.displayMetrics
+        // 是「可用区域」（排除了导航栏），两者不同源会让 tap_xy/gesture 的归一化 y 落点整体偏高
+        // （2026-09-28 实录：REDACTED_MODEL 真实 1080x2400，Service metrics 只有 ~2250，落点偏高 ~6.7%，
+        // 底部 tab/fab 系统性打不中，且 cleanup_alarms 误把「点开了闹钟编辑器」当成「列表已空」）。
+        val dm = android.util.DisplayMetrics()
+        @Suppress("DEPRECATION")
+        runCatching {
+            val dmgr = getSystemService(android.content.Context.DISPLAY_SERVICE) as? android.hardware.display.DisplayManager
+            val d = dmgr?.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+                ?: (getSystemService(android.content.Context.WINDOW_SERVICE) as? android.view.WindowManager)
+                    ?.defaultDisplay
+            d?.getRealMetrics(dm)
+        }
+        if (dm.widthPixels > 0 && dm.heightPixels > 0) return dm.widthPixels to dm.heightPixels
+        @Suppress("DEPRECATION")
+        return resources.displayMetrics.widthPixels to resources.displayMetrics.heightPixels
+    }
 
     private fun dispatchStroke(name: String, path: Path, durationMs: Long): JSONObject {
         val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)

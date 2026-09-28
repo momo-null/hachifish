@@ -34,8 +34,11 @@ def adb(*args, serial=None, timeout=60):
     if ser:
         cmd += ["-s", ser]
     cmd += list(args)
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return r.stdout + r.stderr
+    # 桥返回含 UTF-8 中文，而本机 locale=GBK；text=True 会 UnicodeDecodeError
+    # 并把 stdout 打成 None。显式 utf-8 + replace，并对 None 兜底。
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                       encoding="utf-8", errors="replace")
+    return (r.stdout or "") + (r.stderr or "")
 
 
 def list_devices():
@@ -68,6 +71,27 @@ def device_brand(serial=None):
     """读取设备品牌（ro.product.brand，小写）。"""
     out = adb("shell", "getprop", "ro.product.brand", serial=serial)
     return out.strip().lower()
+
+
+def brain_config():
+    """BYOK 大脑配置 {base_url, api_key, model}。
+
+    优先级：环境变量 > harness/config.local.json（*.local.json 已 gitignore）。
+    环境变量：HACHIMI_BRAIN_BASE_URL / HACHIMI_BRAIN_API_KEY / HACHIMI_BRAIN_MODEL。
+    密钥一律不写进代码、不入库。
+    """
+    import json
+    cfg = {}
+    path = os.path.join(ROOT, "harness", "config.local.json")
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            cfg = (json.load(f) or {}).get("brain") or {}
+    for key, var in (("base_url", "HACHIMI_BRAIN_BASE_URL"),
+                     ("api_key", "HACHIMI_BRAIN_API_KEY"),
+                     ("model", "HACHIMI_BRAIN_MODEL")):
+        if os.environ.get(var):
+            cfg[key] = os.environ[var]
+    return cfg
 
 
 def load_profiles():
