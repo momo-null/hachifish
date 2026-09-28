@@ -1,5 +1,5 @@
 {
- "_comment": "M4' 任务集（preregistration §5.1 口径）：15 任务 × 3 难度层，全部 Fossify 测试 App / 系统设置（R8：无登录/支付/实名）。objective/done_when 与内核 /task body 直通；reset = 每任务执行前的状态重置规格。审计口径：R8 任务清单 = 本文件。2026-09-27 DoD① 调参修订：max_steps 按 15 任务真机实测步数 +25~40% 余量；objective 内的流程提示 = 消环境噪声（Flyme 时间选择器文本模式/闹钟首存提示框/长按重命名等 ROM 或工具面特性），四组同文不影响可比性（修订记录见 progress.md）；pm_grant = pm clear 后静默重授运行时权限（免首启权限弹窗，环境配置非实验变量）。",
+ "_comment": "M4' 任务集（preregistration §5.1 口径）：15 任务 × 3 难度层，全部 Fossify 测试 App / 系统设置（R8：无登录/支付/实名）。objective/done_when 与内核 /task body 直通；reset = 每任务执行前的状态重置规格。审计口径：R8 任务清单 = 本文件。2026-09-27 DoD① 调参修订：max_steps 按 15 任务真机实测步数 +25~40% 余量；objective 内的流程提示 = 消环境噪声（Flyme 时间选择器文本模式/闹钟首存提示框/长按重命名等 ROM 或工具面特性），四组同文不影响可比性（修订记录在本地工作日志，不入库）；pm_grant = pm clear 后静默重授运行时权限（免首启权限弹窗，环境配置非实验变量）。",
  "tasks": [
   {
    "id": "T1",

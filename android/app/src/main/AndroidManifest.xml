@@ -30,6 +30,12 @@
             </intent-filter>
         </activity>
 
+        <!-- P0：BYOK 设置页（Keystore 存取，product_milestones.md P0 DoD3） -->
+        <activity android:name=".SettingsActivity" android:exported="false" />
+
+        <!-- 八原语调试面板（原 MainActivity 调试形态，研究/排障用） -->
+        <activity android:name=".DebugPanelActivity" android:exported="false" />
+
         <!-- 授权门控弹层（S3 GateUI）：由无障碍服务在敏感操作前拉起 -->
         <activity
             android:name=".gate.GateActivity"

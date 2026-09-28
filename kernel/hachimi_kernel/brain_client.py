@@ -33,12 +33,13 @@ class BrainClient:
         body = {
             "model": self.model,
             "messages": self._wire_messages(messages),
-            "tools": [{"type": "function",
-                       "function": {"name": t["name"],
-                                    "description": t.get("description", ""),
-                                    "parameters": t.get("parameters", {"type": "object"})}}
-                      for t in tools],
         }
+        if tools:
+            body["tools"] = [{"type": "function",
+                              "function": {"name": t["name"],
+                                           "description": t.get("description", ""),
+                                           "parameters": t.get("parameters", {"type": "object"})}}
+                             for t in tools]
         if self.thinking is not None:
             body["thinking"] = self.thinking
         url = self.base_url + "/chat/completions"

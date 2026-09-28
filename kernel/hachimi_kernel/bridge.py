@@ -9,6 +9,7 @@
 工具面 = 八原语（architecture §4.1）+ verify_done（done_when 文本探测，v1）。
 """
 import json
+import re
 import threading
 import time
 
@@ -85,8 +86,26 @@ def _make_tools():
     return tools
 
 
+def _probe_terms(objective):
+    """空判据弱探测（P0）：从 objective 抽「可探测关键词」——引号内文本优先，
+    其次数字/时间。只取这两类：App 名/动词等泛词常驻屏幕会造成假绿，不作判据。"""
+    if not objective:
+        return []
+    quoted = re.findall(u"[「『“\"']([^「『」』“”\"']{1,40})[」』”\"']", objective)
+    if quoted:
+        seen, out = set(), []
+        for q in quoted:
+            if q not in seen:
+                seen.add(q)
+                out.append(q)
+        return out
+    nums = re.findall(r"\d+(?:[:.]\d+)*", objective)
+    return list(dict.fromkeys(nums))
+
+
 def _verify_done(args):
-    """v1 完成校验：done_when 文本出现在当前屏幕任一节点文本中。"""
+    """v1 完成校验：done_when 文本出现在当前屏幕任一节点文本中；
+    done_when 为空时退化为 objective 关键短语弱探测（引号文本/数字，P0 判据可留空）。"""
     try:
         r = json.loads(_bridge.call("observe", "{\"compact\":true}")) if _bridge \
             else {"ok": False}
@@ -95,10 +114,19 @@ def _verify_done(args):
         blob = " ".join((n.get("text") or "") + (n.get("desc") or "")
                         for n in r.get("tree", []))
         cond = (args or {}).get("done_when", "")
-        # 空判据：空串是任何文本的子串，会让校验恒真（假绿通道），必须拒判
-        if not cond:
-            return {"passed": False, "reason": "empty done_when (拒绝空判据)"}
-        return {"passed": cond in blob, "reason": "text probe: %r" % cond[:40]}
+        if cond:
+            return {"passed": cond in blob, "reason": "text probe: %r" % cond[:40]}
+        # 空判据：空串是任何文本的子串，直接判据必须拒绝（假绿通道）；
+        # 但目标里若有引号文本/数字，可作弱探测，避免「判据留空 = 永远不过」的死锁
+        terms = _probe_terms((args or {}).get("objective", ""))
+        if not terms:
+            return {"passed": False,
+                    "reason": "空判据且目标无引号文本或数字可探测（填写完成判据可加强校验）"}
+        missing = [t for t in terms if t not in blob]
+        if missing:
+            return {"passed": False,
+                    "reason": "弱探测未命中: %s" % "/".join(missing)[:40]}
+        return {"passed": True, "reason": "弱探测命中: %s" % "/".join(terms)[:40]}
     except Exception as e:
         return {"passed": False, "reason": "%s: %s" % (type(e).__name__, e)}
 
@@ -140,6 +168,24 @@ def set_brain(base_url, api_key=None, model=None):
     global _brain_cfg
     _brain_cfg = {"base_url": base_url, "api_key": api_key, "model": model}
     return {"ok": True}
+
+
+def test_brain(base_url, api_key=None, model=None):
+    """设置页「测试连通」（P0 DoD3/4）：走 BrainClient 真实链路发一个最小请求，
+    与正式任务同一 URL 拼接/鉴权/thinking 语义——通过即任务链路可用。"""
+    t0 = time.time()
+    latency = lambda: round((time.time() - t0) * 1000)
+    try:
+        client = BrainClient(base_url, api_key or "", model or "",
+                             timeout=20, thinking={"type": "disabled"})
+        reply = client.chat([{"role": "user", "content": "连通性测试，请回复 pong"}], [])
+        return {"ok": True, "latency_ms": latency(),
+                "reply": (reply.get("content") or "")[:80]}
+    except BrainError as e:
+        return {"ok": False, "latency_ms": latency(), "error": str(e)[:300]}
+    except Exception as e:
+        return {"ok": False, "latency_ms": latency(),
+                "error": ("%s: %s" % (type(e).__name__, e))[:300]}
 
 
 # ---------------- 任务执行（回环 /task 数据面） ----------------
@@ -186,6 +232,21 @@ def request_stop():
     _controls["stopped"] = True
     _controls["paused"] = False
     return {"ok": True}
+
+
+# ---- JSON 包装（产品 UI 用）：Chaquopy PyObject.toString() 是 python-repr 而非 JSON，
+# Kotlin 侧 JSONObject 解析不了；回环 HTTP 保持 repr 语义不动（harness 依赖）。 ----
+
+def start_task_json(body_json):
+    return json.dumps(start_task(body_json), ensure_ascii=False)
+
+
+def status_json():
+    return json.dumps(status(), ensure_ascii=False)
+
+
+def test_brain_json(base_url, api_key=None, model=None):
+    return json.dumps(test_brain(base_url, api_key, model), ensure_ascii=False)
 
 
 def request_pause():
@@ -275,6 +336,11 @@ def _run(body, stop_flag=_controls):
         def on_step(step):
             steps.append(step)
             a = step.get("action", {})
+            with _lock:
+                # status() 数据面：主界面「当前动作」行（P0 DoD1）
+                _state["last_action"] = {"step": step.get("step"), "tool": a.get("tool"),
+                                         "args": a.get("args"),
+                                         "ok": step.get("result", {}).get("ok")}
             print("[task] step %d: %s -> ok=%s" % (step.get("step"), a.get("tool"),
                   step.get("result", {}).get("ok")), flush=True)
             if store is not None:
@@ -335,7 +401,9 @@ def _run(body, stop_flag=_controls):
                         done_when=done_when,
                         tools=tools, brain=brain,
                         constraints=_group_constraints(body, objective),
-                        config={"max_steps": body.get("max_steps", 12),
+                        # 默认 24 与内核 DEFAULT_MAX_STEPS 对齐（12 是实验期口径，
+                        # 便签类任务实测需 ~15 步，产品 UI 不传 max_steps 会撞墙）
+                        config={"max_steps": body.get("max_steps", 24),
                                 "verify_tool": "verify_done"},
                         controls=_controls,
                         verify_fn=_verify_done,

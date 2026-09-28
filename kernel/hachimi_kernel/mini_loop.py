@@ -140,6 +140,9 @@ class MiniLoop(object):
             if status == "done" or terminal:
                 break
 
+        if status == "incomplete" and not summary:
+            summary = "步数预算 %d 步耗尽，任务未完成" % max_steps
+
         out = {
             "status": status,
             "summary": summary,
@@ -212,7 +215,9 @@ class MiniLoop(object):
         """task_done 强制校验。verify 返回 {"passed": bool, "reason": str}。"""
         if self._verify_fn is not None:
             try:
-                out = self._verify_fn({"done_when": self.done_when})
+                # objective 一并传入：空 done_when 时校验方走目标关键短语弱探测（P0）
+                out = self._verify_fn({"done_when": self.done_when,
+                                       "objective": self.objective})
                 return {"passed": bool(out.get("passed")),
                         "reason": out.get("reason", "")}
             except Exception as e:
