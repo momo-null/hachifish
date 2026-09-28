@@ -26,3 +26,6 @@ Thumbs.db
 # 本地密钥 / BYOK 配置（绝不入库）
 *.local.json
 *.local.env
+
+# 工作上下文文档（本地交接用，不入库）
+docs/progress.md

@@ -1,6 +1,7 @@
 # Hachimi 里程碑计划（v1.0）
 
-> **状态**：与预注册 v1.2 同批冻结（tag `prereg-v1.2`）。计划本身属于预注册的一部分。
+> **状态**：与预注册同批冻结（当前预注册 = `preregistration_v1.3.md`，tag `prereg-v1.3`）。
+> 计划本身属于预注册的一部分。
 > **纪律**：每里程碑独立可验证、逐个人工 green-light（沿用上游 master spec 惯例）；出口准则（DoD）未达标不进下一里程碑。
 > **总工期**：**8–10 周单人**（评审 §3.2 估 7–9 周；本计划按 DoD 展开后取诚实区间——M1'/M2' 有 PC 侧并行空间，见时间线）。
 > **进度记录**：每里程碑 green-light 时在本文 §4 状态表打勾并注明日期与证据链接。
@@ -11,7 +12,7 @@
 
 | # | 检查点 | 内容 | 状态 |
 |---|--------|------|------|
-| CP0 | **预注册冻结** | 修订清单⑤条并入 v1.1 正文 → v1.2 定稿（`preregistration_v1.2.md`）→ tag `prereg-v1.2`。此后 R9/R10 红线生效 | ✅ 2026-09-26 |
+| CP0 | **预注册冻结** | 预注册文档定稿（`doc/preregistration_v1.3.md`）→ tag `prereg-v1.3`。此后 R9/R10 红线生效 | ✅ 2026-09-29 |
 | CP1 | **打包定案** | pydantic-core spike 已完成（2026-09-26，评审 §2.1）——loop 走自写路线 | ✅ 已完成 |
 | CP2 | **中期检查** | M5' 出口：效应方向 + 功效复核，决定补样/调整/止损（§3 触发规则） | ☐ |
 | CP3 | **每周复盘** | 对照当前里程碑 DoD；偏差 >1 周触发 §3 范围收缩 | 常设 |
@@ -98,7 +99,7 @@
 | 里程碑 | 状态 | 日期 | 证据 |
 |--------|------|------|------|
 | CP1 打包定案 | ✅ | 2026-09-26 | 评审 §2.1 spike（commit e2dcf94） |
-| CP0 预注册冻结 | ✅ | 2026-09-26 | `preregistration_v1.2.md` + tag `prereg-v1.2`（commit 3e241b3） |
+| CP0 预注册冻结 | ✅ | 2026-09-29 | `doc/preregistration_v1.3.md` + tag `prereg-v1.3` |
 | M0' | ✅ 条件通过 | 2026-09-26 | `harness/checks/m0_evidence_2026-09-26.txt`（PASS 8/0/2，两项豁免有据；开口：重启保持子项待验）。测试 App= Fossify 套件 5 件（notes/math/clock/gallery/filemanager），实验后卸载 |
 | M1' | ✅ 通过 | 2026-09-26 | DoD① 八原语真机 E2E ✓；DoD② 对拍 L1/L2/L3 全 100%（树级，`m1_parity_report.txt`；任务级累计口径随 M4' 验证）✓；DoD③ MediaProjection 授权流 ✓（Flyme 通知式授权 + rowStride 修复 + 帧捕获 1080×2400@173ms）；DoD④ 时延基准 p50≤17ms ✓；DoD⑤ 前台服务(mediaProjection 类型)+停止动作 ✓；DoD⑥ GateUI 弹出+allow_always 落盘 ✓。全部证据与真机发现见 `harness/checks/m0_evidence_2026-09-26.txt` M1' 段 |
 | M2' | ✅ 通过 | 2026-09-26 起（09-27 收口） | DoD① 六模块+mini_loop+brain_client 移植，PC 对拍 63/63 绿（R6）✓；DoD② 真机 LLM 调用任务 ✅（08:44 run_id r1790469891956：Keystore 注入 BYOK → DeepSeek deepseek-flash 自主 launch_app→observe→task_done，verify_done 探测 111111 通过，3 步 3.0s，4 轮 HTTP 全 200；inline brain 路径同样验证 08:25）✓；DoD③ Keystore 存取 ✅（brain_config.enc 144B AES/GCM，save→load→set_brain 全链路）✓；DoD④ 回环六端点 ✓；DoD⑤ R7 检查（kernel 11 文件 stdlib-only）✓；DoD⑥ APK 23.4MB，冷启动→kernel_info ≈11s（次要优化项）✓。**过程记录**：BrainError 修复真机验证（error 正常上报无僵尸）；DeepSeek V4 thinking 自适应与多轮循环冲突（历史缺 reasoning_content 400）→ thinking disabled 默认 + wire 格式（tool_call id 配对/reasoning 回传）修复；Windows Git Bash adb --es 嵌套 JSON 丢值 → 接收器改独立 extras；SDK 36 重装后隐式广播不投递 → 必须 `-p` 显式包名 |

@@ -245,7 +245,7 @@ class HachimiAccessibilityService : AccessibilityService() {
         // 必须与 observe 树的坐标系一致：树用的是 AccessibilityNodeInfo.getBoundsInScreen，
         // 落在「真实全屏」像素空间（含系统导航栏）。而 Service 上下文的 resources.displayMetrics
         // 是「可用区域」（排除了导航栏），两者不同源会让 tap_xy/gesture 的归一化 y 落点整体偏高
-        // （2026-09-28 实录：REDACTED_MODEL 真实 1080x2400，Service metrics 只有 ~2250，落点偏高 ~6.7%，
+        // （实测：设备真实分辨率 1080x2400，而 Service 的 displayMetrics 只有 ~2250，落点偏高 ~6.7%，
         // 底部 tab/fab 系统性打不中，且 cleanup_alarms 误把「点开了闹钟编辑器」当成「列表已空」）。
         val dm = android.util.DisplayMetrics()
         @Suppress("DEPRECATION")

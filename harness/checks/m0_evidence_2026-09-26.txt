@@ -1,11 +1,11 @@
-M0' checklist 证据 · 2026-09-26 · 设备 REDACTED_SERIAL（SDK 36，Meizu/Flyme）· USB adb
+M0' checklist 证据 · 2026-09-26 · 设备 <serial-redacted>（SDK 36，ROM 品牌不记录）· USB adb
 （platform-tools 37.0.1，USB 调试授权于连接后 10s 内完成；脚本 3.6 兼容修复后首次全量运行）
 
-== 设备：REDACTED_SERIAL ==
+== 设备：<serial-redacted> ==
 
 [PASS]  Android 版本 >= 11 —— SDK 36
-[PASS]  无障碍服务已开启 —— hello.redacted-package.app/hello.redacted-package.app.LttService
-[MANUAL] 电池优化白名单（当前读数） —— 手机上：设置 → 电池 → 无限制/不加优化。 白名单样例：system-excidle,com.meizu.pps,1000
+[PASS]  无障碍服务已开启 —— <既有第三方无障碍服务，包名不入库>
+[MANUAL] 电池优化白名单（当前读数） —— 手机上：设置 → 电池 → 无限制/不加优化。 白名单样例：system-excidle,<某系统组件包名>,1000
 [MANUAL] 屏幕自动锁定 >= 30 分钟 —— 当前 2 分钟；建议设 30 分钟或开发期间用「充电时保持唤醒」
 [PASS]  采集链路（screenrecord） —— 114 KB
 [MANUAL] 测试 App 安装 —— 未指定 --pkg；M0' DoD④ 要求前 5 个测试 App 装机
@@ -13,7 +13,7 @@ M0' checklist 证据 · 2026-09-26 · 设备 REDACTED_SERIAL（SDK 36，Meizu/Fl
 == 汇总：PASS 3 / FAIL 0 / MANUAL 3 ==
 
 备注：
-- 无障碍当前开启的是既有第三方服务（redacted-package），仅证明开关可用；DoD① 的「重启后保持」
+- 无障碍当前开启的是设备上既有第三方服务（包名不记录），仅证明开关可用；DoD① 的「重启后保持」
   待重启手机后重跑本脚本确认；Hachimi 自身服务在 M1' 加入。
 - 电池白名单对 Hachimi 的加白在 M2'（App 存在后）执行；本阶段仅验证 dumpsys 读取可用。
 - 屏幕锁定 2 分钟待用户调整（充电保持唤醒 / 30 分钟）。
@@ -23,7 +23,7 @@ M0' checklist 证据 · 2026-09-26 · 设备 REDACTED_SERIAL（SDK 36，Meizu/Fl
 ## 第二次运行（同日，用户暂缓重启，追加验证）
 
 [PASS] Android 版本 >= 11 —— SDK 36
-[PASS] 无障碍服务已开启 —— hello.redacted-package.app/hello.redacted-package.app.LttService
+[PASS] 无障碍服务已开启 —— <既有第三方无障碍服务，包名不入库>
 [MANUAL] 电池优化白名单（读数正常，Hachimi 加白待 M2' App 存在后执行）
 [MANUAL] 屏幕自动锁定 2 分钟 —— 但 `settings get global stay_on_while_plugged_in` = **15**
         （位掩码 1=AC/2=USB/4=无线 全开 + ROM 扩展位）→ **插电场景（含 USB）屏幕保持常亮**，
@@ -38,10 +38,10 @@ DoD④ 测试 App 选型/install 为 M0' green-light 的唯一剩余阻塞项。
 
 ## 第三次运行（同日，测试 App 装机后，--pkg 全量）
 
-== 设备：REDACTED_SERIAL ==
+== 设备：<serial-redacted> ==
 
 [PASS]  Android 版本 >= 11 —— SDK 36
-[PASS]  无障碍服务已开启 —— hello.redacted-package.app/hello.redacted-package.app.LttService
+[PASS]  无障碍服务已开启 —— <既有第三方无障碍服务，包名不入库>
 [MANUAL] 电池优化白名单 —— 已豁免：Hachimi 加白顺延至 M2'（App 存在后），dumpsys 读取已验证可用
 [MANUAL] 屏幕自动锁定 —— 已豁免：stay_on_while_plugged_in=15 覆盖插电场景（实验形态全程插机）
 [PASS]  采集链路（screenrecord） —— 464 KB
@@ -63,7 +63,7 @@ M0' DoD⑤ 证据齐备。剩余开口：①重启保持子项（用户暂缓，
 
 ## M1' 真机发现（2026-09-26，harness 异常恢复设计输入）
 
-[FINDING] force-stop 应用后，Flyme(SDK 36) 会把该应用的无障碍服务从
+[FINDING] force-stop 应用后，该设备 ROM 会把该应用的无障碍服务从
 enabled_accessibility_services 中移除（不只是解绑）。恢复方式：
 adb settings put secure enabled_accessibility_services <完整列表>（保留其他服务，
 冒号分隔）；写入后系统自动重绑，无需用户手动开关。实测已用此法恢复。
@@ -78,14 +78,14 @@ android/app/src/main/java/com/hachimi/app/MainActivity.kt
 
 驱动方式：PC 调试桥（DebugBridgeReceiver，仅 debug 构建生效）→ adb 显式广播 → Logcat 收结果。
 完整链路：launch_app(便签) → tap_by_id(text_note_view) → type_text(37字符，含真实换行，
-**用户原内容 REDACTED_NOTE_CONTENT 完整保留** + 追加证据行) → observe 自校验 evidence_verified=True
+**设备上既有便签内容完整保留**（具体内容不记录） + 追加证据行) → observe 自校验 evidence_verified=True
 → screenshot 1080×2400。八原语 observe/tap_by_id/tap_xy/type_text/gesture/screenshot/
 launch_app/press 全部 ok:true。
 
 真机踩坑记录（每条都已修复并验证）：
 1. targetSdk 26+ 清单接收器收不到隐式广播 → adb 发送必须带 -n 显式组件；
 2. Android 11+ 包可见性：launch_app 需 manifest <queries> 声明（已加，查询全部 LAUNCHER）；
-3. Flyme 跨应用启动确认弹窗（"Hachimi 正在尝试打开笔记"）→ tap_xy 命中「打开」通过，
+3. 设备 ROM 级跨应用启动确认弹窗（"Hachimi 正在尝试打开笔记"）→ tap_xy 命中「打开」通过，
    该 ROM 级门控必须进 M4' harness 自动化处理；
 4. AccessibilityService 截图需 config 声明 canTakeScreenshot="true"（javap 核实 ScreenshotResult
    无宽高方法，尺寸在 HardwareBuffer 上）；
@@ -99,7 +99,7 @@ M1' 剩余：时延基准 P50/P95、u2/Accessibility 双后端对拍（≥90% Do
 ## M1' DoD②③⑤⑥ 达成记录（2026-09-26 晚，MediaProjection 专场）
 
 **DoD③ MediaProjection 完整授权流 ✓**
-- [FINDING] Flyme(Android 16) 投屏授权**不走全屏对话框**：createScreenCaptureIntent 启动的
+- [FINDING] 该设备 ROM 的投屏授权**不走全屏对话框**：createScreenCaptureIntent 启动的
   MediaProjectionPermissionActivity 一闪即毁，授权以「屏幕保护」渠道**通知**承载
   （MiniHeadsup），用户需下拉通知栏点操作按钮。→ M4' harness 自动化注意：授权触发后
   必须引导用户看通知栏（自动化点击系统授权 UI 被 Android 14+ 明确阻止，人工一次性操作）。
@@ -107,7 +107,7 @@ M1' 剩余：时延基准 P50/P95、u2/Accessibility 双后端对拍（≥90% Do
   IllegalStateException）——已注册 onStop 清理。
 - [FINDING] 本设备 Image.Plane rowStride=4352 > w*4=4320（行对齐 padding）→ 逐行拷贝
   紧凑缓冲后 copyPixelsFromBuffer。修复后 captureFrame ok:true 1080×2400。
-- [FINDING] Flyme「屏幕共享保护」功能（通知保护/验证码保护/应用保护，Flyme Pay 默认
+- [FINDING] 该 ROM 的「屏幕共享保护」功能（通知保护/验证码保护/应用保护，支付类应用默认
   受保护）会在投屏时对特定窗口黑屏——测试 App 集已规避该场景；harness 需检测受保护
   窗口导致的黑帧。
 - 帧捕获时延 173ms（含 PNG 落盘），观察通道口径内。
