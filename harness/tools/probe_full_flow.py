@@ -1,13 +1,23 @@
 # -*- coding: utf-8 -*-
 """Full-fidelity device-flow reproduction: 11 tools, real MiniLoop system prompt,
 same objective; loop until the device round-4 400 reproduces; then bisect."""
+import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "kernel"))
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "kernel"))
+sys.path.insert(0, os.path.join(ROOT, "harness"))
+from _env import brain_config  # noqa: E402
 from hachimi_kernel.brain_client import BrainClient, BrainError
 from hachimi_kernel.mini_loop import MiniLoop
 
-cli = BrainClient("https://api.deepseek.com/v1",
-                  "REDACTED_API_KEY", "deepseek-flash", thinking={"type": "disabled"})
+# 密钥一律走配置（harness/config.local.json 或环境变量 HACHIMI_BRAIN_*），不写进代码
+_cfg = brain_config()
+if not all(_cfg.get(k) for k in ("base_url", "api_key", "model")):
+    raise SystemExit("no brain config: fill harness/config.local.json "
+                     "(see config.example.json) or set HACHIMI_BRAIN_*")
+cli = BrainClient(_cfg["base_url"], _cfg["api_key"], _cfg["model"],
+                  thinking={"type": "disabled"})
 
 FAKE_TREE = '{"ok": true, "primitive": "observe", "tree": ' \
             '[{"view_id": "org.fossify.notes:id/note_1", "cls": "TextView", "text": "111111555555555555", ' \

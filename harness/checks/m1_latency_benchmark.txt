@@ -1,4 +1,4 @@
-M1' 八原语时延基准（设备侧计时，ms）· 2026-09-28 · 设备 REDACTED_SERIAL · N=12/原语
+M1' 八原语时延基准（设备侧计时，ms）· 2026-09-28 · 设备 <serial-redacted> · N=12/原语
 口径：预注册 §5.3 每次 action 50-300ms；M1' DoD③
 
 primitive           n      min      p50      p95      max  备注

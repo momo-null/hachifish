@@ -2,12 +2,21 @@
 """Test 1: history WITHOUT reasoning_content -> expect 400 (confirms rule).
 Test 2: thinking disabled param -> 200, no reasoning, deterministic."""
 import json
+import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "kernel"))
-from hachimi_kernel.brain_client import BrainClient, BrainError
 
-cli = BrainClient("https://api.deepseek.com/v1",
-                  "REDACTED_API_KEY", "deepseek-flash")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "kernel"))
+sys.path.insert(0, os.path.join(ROOT, "harness"))
+from _env import brain_config  # noqa: E402
+from hachimi_kernel.brain_client import BrainClient, BrainError  # noqa: E402
+
+# 密钥一律走配置（harness/config.local.json 或环境变量 HACHIMI_BRAIN_*），不写进代码
+_cfg = brain_config()
+if not all(_cfg.get(k) for k in ("base_url", "api_key", "model")):
+    raise SystemExit("no brain config: fill harness/config.local.json "
+                     "(see config.example.json) or set HACHIMI_BRAIN_*")
+cli = BrainClient(_cfg["base_url"], _cfg["api_key"], _cfg["model"])
 
 TOOLS = [{"type": "function", "function": {"name": "launch_app", "description": "launch app",
            "parameters": {"type": "object", "properties": {"package": {"type": "string"}}}}},
@@ -42,16 +51,16 @@ print("TEST2: thinking disabled param")
 
 import urllib.request
 body = {
-    "model": "deepseek-flash",
+    "model": _cfg["model"],
     "messages": cli._wire_messages(msgs),
     "tools": TOOLS,
     "thinking": {"type": "disabled"},
 }
 req = urllib.request.Request(
-    "https://api.deepseek.com/v1/chat/completions",
+    _cfg["base_url"].rstrip("/") + "/chat/completions",
     data=json.dumps(body).encode("utf-8"),
     headers={"Content-Type": "application/json",
-             "Authorization": "Bearer REDACTED_API_KEY"},
+             "Authorization": "Bearer " + _cfg["api_key"]},
     method="POST")
 try:
     with urllib.request.urlopen(req, timeout=60) as resp:
