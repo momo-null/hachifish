@@ -43,6 +43,27 @@ object Ds {
     fun dp(c: Context, v: Int): Int =
         (v * c.resources.displayMetrics.density + 0.5f).toInt()
 
+    /**
+     * 页面根视图吃掉系统条 insets（2026-09-30 魅族 Android 16 实录：targetSDK 35+
+     * 强制 edge-to-edge，标题与状态栏重合）。关闭 decor 贴合后按真实 insets 补
+     * 顶/底留白，Android 12 与 16 行为一致；状态栏/导航条透明由调用方主题保证。
+     */
+    fun systemBars(activity: android.app.Activity, root: View,
+                   extraTopDp: Int = 0, extraBottomDp: Int = 0) {
+        activity.window.setDecorFitsSystemWindows(false)
+        activity.window.statusBarColor = Color.TRANSPARENT
+        activity.window.navigationBarColor = Color.TRANSPARENT
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            val bars = insets.getInsets(
+                android.view.WindowInsets.Type.statusBars()
+                        or android.view.WindowInsets.Type.displayCutout()
+                        or android.view.WindowInsets.Type.navigationBars())
+            v.setPadding(v.paddingLeft, bars.top + dp(activity, extraTopDp),
+                v.paddingRight, bars.bottom + dp(activity, extraBottomDp))
+            insets
+        }
+    }
+
     /** LinearLayout 子项显式边距参数：addView(v, Ds.vp(...))——在 addView 前就带齐
      *  layoutParams（杜绝「先 addView 再改 params」的空指针/顺序坑）。 */
     fun vp(top: Int = 0, left: Int = 0, right: Int = 0, bottom: Int = 0,

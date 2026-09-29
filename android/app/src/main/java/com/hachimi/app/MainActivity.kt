@@ -45,6 +45,7 @@ class MainActivity : Activity() {
         root.addView(navBar, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, Ds.dp(this, 58)))
         setContentView(root)
+        Ds.systemBars(this, root)
         // 内核随 App 启动（幂等；harness 依赖不变）
         KernelHostService.start(this)
         // 首次初始化引导（权限引导仅首次出现）

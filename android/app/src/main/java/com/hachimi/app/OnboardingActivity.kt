@@ -49,6 +49,7 @@ class OnboardingActivity : Activity() {
         })
 
         page = ScrollView(this).apply { addView(box) }
+        Ds.systemBars(this, page, extraBottomDp = 8)
         setContentView(page)
         refresh()
     }

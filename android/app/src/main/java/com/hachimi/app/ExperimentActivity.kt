@@ -53,6 +53,8 @@ class ExperimentActivity : Activity() {
                 Ds.dp(this@ExperimentActivity, 12), Ds.dp(this@ExperimentActivity, 10))
         }, Ds.vp(top = Ds.dp(this, 12)))
 
-        setContentView(ScrollView(this).apply { addView(box) })
+        val root = ScrollView(this).apply { addView(box) }
+        Ds.systemBars(this, root, extraBottomDp = 8)
+        setContentView(root)
     }
 }

@@ -2,6 +2,7 @@ package com.hachimi.app
 
 import android.app.Activity
 import android.os.Bundle
+import com.hachimi.app.ui.Ds
 import com.hachimi.app.ui.SettingsPage
 
 /**
@@ -15,7 +16,10 @@ class SettingsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        page = SettingsPage(this).also { setContentView(it.view) }
+        page = SettingsPage(this)
+        val v = page!!.view
+        Ds.systemBars(this, v, extraBottomDp = 8)
+        setContentView(v)
     }
 
     override fun onResume() {
