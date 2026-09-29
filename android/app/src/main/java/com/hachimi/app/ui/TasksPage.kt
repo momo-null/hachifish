@@ -1,7 +1,6 @@
 package com.hachimi.app.ui
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -99,13 +98,13 @@ class TasksPage(private val act: Activity) {
         }
         inputCard.addView(objInput)
 
-        // 完成判据（可选，折叠收进输入卡——弱探测语义对用户保持「可不管」）
+        // 完成判据（可选，折叠收进输入卡——2026-09-30 语义对齐桌面版：留空 = 模型自判完成）
         doneToggle = Ds.small(act, "完成判据（可选）▸").apply {
             setPadding(0, Ds.dp(act, 8), 0, 0)
             setOnClickListener { toggleDone() }
         }
         inputCard.addView(doneToggle)
-        doneInput = Ds.field(act, "留空按引号文本/数字弱探测；填写则要求该文字出现在最终屏幕", single = false)
+        doneInput = Ds.field(act, "留空 = 由模型自行判断完成（桌面版语义）；填写则要求该文字出现在最终屏幕", single = false)
             .apply { minLines = 1; visibility = View.GONE }
         inputCard.addView(doneInput)
 
@@ -139,6 +138,8 @@ class TasksPage(private val act: Activity) {
 
         result.onRetry = { result.render(null); refreshRecent() }
         result.onControl = { onControl(it) }
+        // 环境状态自动跟随（权限/录屏/内核就绪后 1.5s 内更正,无需手动刷新）
+        main.postDelayed(envPoll, 1500)
         return ScrollView(act).apply { addView(box) }
     }
 
@@ -182,6 +183,35 @@ class TasksPage(private val act: Activity) {
         refreshRecent()
         refreshLastResult()
     }
+
+    /**
+     * 环境就绪状态轮询（2026-09-30 真机反馈：无障碍/录屏在系统侧配置后，
+     * 主界面状态卡要手动刷新才更正——权限连接与录屏会话建立都是异步事件，
+     * 不保证落在 onResume 时点）。1.5s 比对就绪签名，有变化才重建，静态时零 UI 开销；
+     * Activity 销毁后自终止，不持有引用。
+     */
+    private var lastEnvSig = ""
+    private val envPoll = object : Runnable {
+        override fun run() {
+            if (act.isFinishing || act.isDestroyed) return
+            val sig = envSignature()
+            if (sig != lastEnvSig) {
+                lastEnvSig = sig
+                refreshChips()
+                refreshEnv()
+            }
+            main.postDelayed(this, 1500)
+        }
+    }
+
+    /** 就绪签名：无障碍 / 悬浮窗 / 视觉开启时录屏会话 / 内核（BYOK 变更走 onResume,不进轮询）。 */
+    private fun envSignature(): String =
+        listOf(
+            HachimiAccessibilityService.instance != null,
+            android.provider.Settings.canDrawOverlays(act),
+            ProjectionHolder.isRunning,
+            KernelHostService.pyBridgeModule != null,
+        ).joinToString("|")
 
     /**
      * 回显上次任务结果（S5 语义补全）：不在运行期且页面没在轮询时，拉一次
@@ -251,9 +281,6 @@ class TasksPage(private val act: Activity) {
         envHost.addView(View(act).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, Ds.dp(act, 10))
         })
-        if (KernelHostService.pyBridgeModule == null) {
-            main.postDelayed({ refreshEnv() }, 2000)
-        }
     }
 
     private var recentRetries = 0
@@ -331,17 +358,18 @@ class TasksPage(private val act: Activity) {
         recentHost.addView(card)
     }
 
+    /** 详情页（2026-09-30 需求③）：完整执行轨迹 + 继续对话（同 task 追加 run）。 */
     private fun showTaskDetail(t: JSONObject) {
-        AlertDialog.Builder(act)
-            .setTitle("任务详情")
-            .setMessage(
-                "目标：${t.optString("objective")}\n\n" +
-                        "判据：${t.optString("done_when").ifEmpty { "（弱探测）" }}\n" +
-                        "状态：${t.optString("state")} · 成功=${t.optBoolean("success")}\n" +
-                        "task_id：${t.optString("task_id")}\n" +
-                        "runs：${t.optJSONArray("runs")?.toString()?.ifEmpty { "-" }}")
-            .setPositiveButton("关闭", null)
-            .show()
+        act.startActivity(Intent(act, com.hachimi.app.TaskDetailActivity::class.java).apply {
+            putExtra("task_id", t.optString("task_id"))
+            putExtra("objective", t.optString("objective"))
+            putExtra("done_when", t.optString("done_when"))
+            putExtra("state", t.optString("state"))
+            putExtra("success", t.optBoolean("success"))
+            putExtra("created_at", t.optString("created_at"))
+            putExtra("steps", t.optInt("steps", -1))
+            putExtra("wall_s", t.optDouble("wall_s", -1.0))
+        })
     }
 
     private fun openSettings() {
@@ -385,6 +413,10 @@ class TasksPage(private val act: Activity) {
                 val body = JSONObject()
                     .put("objective", objective)
                     .put("done_when", doneInput.text.toString().trim())
+                    // 步数上限（设置 → 通道，默认 24）：替换内核写死默认的可配置口
+                    .put("max_steps", SettingsPage.maxSteps(act))
+                    // 墙钟随步数放大，大步数任务不被内核 15 分钟默认墙钟截断
+                    .put("wall_clock_s", SettingsPage.wallClockS(SettingsPage.maxSteps(act)))
                 if (runMode == 1) body.put("mode", "split")
                 // 让位：任务已受理，Hachimi 回桌面，agent 从桌面开始找应用/开应用
                 // （2026-09-30 用户反馈：Hachimi 一直占前台，agent 无从下手）

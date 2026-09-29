@@ -109,6 +109,8 @@ class KernelHostService : Service() {
             // 叙事面板：Python 步进事件 → 悬浮层（前台引导模式 UI 组成，架构 §6）
             bridgeMod.callAttr("register_narrative", NarrativePanel)
             pyBridgeModule = bridgeMod
+            // 本机应用索引预热（后台线程）：首次 launch_app 按应用名跳转零建索引成本
+            AppIndex.warmup(this)
             // P1.5：attach 不再 show——面板只在 run 开始时出现（直调/回环 /task 各自
             // show），否则开机即挂浮条遮挡引导页/主界面
             startLoopback(py)

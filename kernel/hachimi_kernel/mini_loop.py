@@ -30,11 +30,13 @@ SYSTEM_RULES = (
     "你通过调用工具完成任务。规则：\n"
     "1. 每轮调用一个工具；参数必须是合法 JSON。\n"
     "2. 动手前先 observe 观察界面，再决策；不要凭空猜测控件 id。\n"
-    "3. 任务全部完成且自检通过后，才可调用 task_done；未完成不得谎报。\n"
-    "4. task_done 会被强制校验（verify），失败会被拒绝并要求继续。\n"
+    "3. 是否完成由你对照目标与完成判据自行判断；确认全部完成后才调用 task_done，"
+    "未完成不得谎报。\n"
+    "4. 若系统启用强制校验，task_done 未通过会被拒绝并要求继续——此时换做法重试，"
+    "不要重复同一动作；未启用校验时完成即可直接调用。\n"
     "5. 输入或编辑后必须再 observe 复核是否生效，并按界面需要点确认/保存；\n"
     "   不得重复提交完全相同的输入（重复意味着上一步没生效，应换做法，而不是再输一遍）。\n"
-    "6. 不要自行调用校验类工具；是否完成只以 task_done 为准（校验由系统自动执行）。"
+    "6. 不要自行调用校验类工具；是否完成只以 task_done 为准（若启用校验，由系统自动执行）。"
 )
 
 
@@ -75,6 +77,10 @@ class MiniLoop(object):
         # 校验优先走内核注入的 verify_fn（不进模型工具面，防模型自己调校验刷假绿）；
         # 未注入时回退旧语义：从 tools 里按名字取（PC 对拍用例走这条）。
         self._verify_fn = verify_fn
+        # 完成判断语义（2026-09-30 对齐桌面 OmniAgent）：有无校验面决定 task_done
+        # 的提示口径——无校验面 = 信任大脑（桌面语义：无条件时信任）。
+        self._has_verify = self._verify_fn is not None or (
+            bool(self._verify_tool) and self._verify_tool in self.tools)
         self._messages = []
         self._pending_reply = None   # 当前轮 brain 回复（thinking 模型要求 reasoning_content 回传）
         self._last_identical = 0
@@ -263,7 +269,8 @@ class MiniLoop(object):
                  for n, t in self.tools.items()]
         specs.append({
             "name": "task_done",
-            "description": "任务完成时调用。会被强制校验，失败将被拒绝。",
+            "description": "任务完成时调用。" + ("会被强制校验，失败将被拒绝。"
+                             if self._has_verify else "完成与否由你判断，不要谎报。"),
             "parameters": {"type": "object",
                            "properties": {"summary": {"type": "string"}},
                            "required": ["summary"]},

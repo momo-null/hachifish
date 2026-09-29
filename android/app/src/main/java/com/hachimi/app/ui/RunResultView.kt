@@ -143,9 +143,27 @@ class RunResultView(private val act: Activity) {
         card.addView(tl.apply { setPadding(dp(10), dp(8), dp(10), dp(8)) })
 
         card.addView(row(buttons = listOf(
-            Ds.button(act, "查看完整轨迹", primary = false) { showTrajectory(s) },
+            Ds.button(act, "查看完整轨迹", primary = false) { openDetail(s, ok, stopped) },
+            Ds.button(act, "继续对话", primary = false) { openDetail(s, ok, stopped, focus = true) })))
+        card.addView(row(buttons = listOf(
             Ds.button(act, "再来一次", primary = false) { onRetry?.invoke() })))
         return card
+    }
+
+    /**
+     * 详情页入口（2026-09-30 需求③）：有 task_id 时跳任务详情（轨迹 + 继续对话）；
+     * 无落盘（内核未持久化/旧 run）退回进程内轨迹弹层。
+     */
+    private fun openDetail(s: JSONObject, ok: Boolean, stopped: Boolean, focus: Boolean = false) {
+        val tid = s.optString("task_id")
+        if (tid.isEmpty()) { showTrajectory(s); return }
+        act.startActivity(android.content.Intent(act, com.hachimi.app.TaskDetailActivity::class.java).apply {
+            putExtra("task_id", tid)
+            putExtra("objective", s.optString("objective"))
+            putExtra("state", if (ok) "done" else if (stopped) "stopped" else "failed")
+            putExtra("run_id", s.optString("run_id"))
+            if (focus) putExtra("focus_input", true)
+        })
     }
 
     private fun showTrajectory(s: JSONObject) {

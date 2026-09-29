@@ -116,6 +116,10 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                     com.hachimi.app.gate.GateManager.clear(context)
                     JSONObject().put("ok", true).put("note", "gate whitelist cleared")
                 }
+                "app_index" -> {
+                    // 本机应用索引数据面（2026-09-30）：规模/样本/时效，PC 排查用
+                    AppIndex.debugJson(context)
+                }
                 "gate_allow" -> {
                     // M4' 门控预授权（reset 阶段逐任务注入 App×操作对，避免 run 内人工应答）
                     val pkg = args.optString("package")

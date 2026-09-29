@@ -212,18 +212,60 @@ class HachimiAccessibilityService : AccessibilityService() {
         takeScreenshot(android.view.Display.DEFAULT_DISPLAY, mainExecutor, cb)
     }
 
-    // ---------- 原语 7: launch_app(package) ----------
+    // ---------- 原语 7: launch_app(package 或应用名) ----------
 
-    fun launchApp(pkg: String): JSONObject {
-        val intent = packageManager.getLaunchIntentForPackage(pkg)
-            ?: return err("launch_app", "package not installed or not launchable: $pkg")
-        // 授权门控（架构 §4.4：跨 App 跳转默认敏感）
+    /**
+     * 跳转顺序（2026-09-30 需求「先索引后跳转」）：
+     * ① 精确包名快路径（原语义，harness/脚本零影响）；
+     * ② 本机应用索引解析（AppIndex）——唯一命中直接跳转，省去
+     *    「回桌面 → observe → 找图标」的视觉搜索慢路径（每单省 5~15 步）；
+     * ③ 多候选返回 candidates 供选定后按包名重试；无命中提示桌面视觉搜索兜底。
+     * 门控语义不变：仍按解析后的真实包名走 GateManager.enforce。
+     */
+    fun launchApp(pkgOrName: String): JSONObject {
+        val q = pkgOrName.trim()
+        if (q.isEmpty()) return err("launch_app", "empty package or app name")
+        var intent = packageManager.getLaunchIntentForPackage(q)
+        var resolvedPkg = q
+        var matchedLabel: String? = null
+        if (intent == null) {
+            val r = AppIndex.resolve(this, q)
+            when (r.status) {
+                "package", "unique" -> {
+                    resolvedPkg = r.pkg ?: q
+                    intent = packageManager.getLaunchIntentForPackage(resolvedPkg)
+                    matchedLabel = r.label
+                }
+                "ambiguous" -> return err("launch_app",
+                    "ambiguous app name: \"$q\" → ${r.candidates.size} 个候选，" +
+                            "从 candidates 选定一个后用其 package 重试")
+                        .put("query", q)
+                        .put("candidates", candidatesJson(r.candidates))
+                else -> return err("launch_app",
+                    "no match in local app index: \"$q\" — 请回退桌面搜索" +
+                            "（press home → observe → 找图标点按），或核对应用名后重试")
+                        .put("query", q)
+            }
+        }
+        if (intent == null) return err("launch_app", "package not installed or not launchable: $q")
+        // 授权门控（架构 §4.4：跨 App 跳转默认敏感；按解析后包名门控）
         val verdict = com.hachimi.app.gate.GateManager.enforce(
-            this, pkg, "launch_app", "跳转到应用: $pkg")
+            this, resolvedPkg, "launch_app",
+            "跳转到应用: $resolvedPkg" + (matchedLabel?.let { "（$it）" } ?: ""))
         if (!verdict.granted) return err("launch_app", "denied by gate ($verdict)")
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(intent)
-        return ok("launch_app").put("package", pkg)
+        val out = ok("launch_app").put("package", resolvedPkg)
+        matchedLabel?.let { out.put("matched", it) }
+        return out
+    }
+
+    private fun candidatesJson(candidates: List<AppIndex.AppInfo>): JSONArray {
+        val arr = JSONArray()
+        for (a in candidates) {
+            arr.put(JSONObject().put("package", a.pkg).put("label", a.label))
+        }
+        return arr
     }
 
     // ---------- 原语 8: press(key) —— back/home/recents ----------

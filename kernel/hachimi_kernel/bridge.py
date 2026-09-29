@@ -48,7 +48,10 @@ TOOL_SPECS = [
      "parameters": {"type": "object", "properties": {"points": {"type": "array"},
       "duration_ms": {"type": "number"}}, "required": ["points"]}},
     {"name": "screenshot", "description": "全屏截图（返回宽高，PNG 落盘）"},
-    {"name": "launch_app", "description": "启动应用",
+    {"name": "launch_app", "description": "启动应用。package 可传包名（com.example.app）"
+     "或应用名（如「微信」「便签」，系统按本机应用索引自动解析）：唯一命中直接跳转"
+     "（比桌面视觉搜索快一个量级）；返回 candidates 时从中选定一个，再用其 package 重试；"
+     "ok=false 且无 candidates 时回退桌面搜索（press home → observe）",
      "parameters": {"type": "object", "properties": {"package": {"type": "string"}}, "required": ["package"]}},
     {"name": "press", "description": "系统按键 back/home/recents",
      "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}},
@@ -194,26 +197,10 @@ def _look(args):
     return out
 
 
-def _probe_terms(objective):
-    """空判据弱探测（P0）：从 objective 抽「可探测关键词」——引号内文本优先，
-    其次数字/时间。只取这两类：App 名/动词等泛词常驻屏幕会造成假绿，不作判据。"""
-    if not objective:
-        return []
-    quoted = re.findall(u"[「『“\"']([^「『」』“”\"']{1,40})[」』”\"']", objective)
-    if quoted:
-        seen, out = set(), []
-        for q in quoted:
-            if q not in seen:
-                seen.add(q)
-                out.append(q)
-        return out
-    nums = re.findall(r"\d+(?:[:.]\d+)*", objective)
-    return list(dict.fromkeys(nums))
-
-
 def _verify_done(args):
-    """v1 完成校验：done_when 文本出现在当前屏幕任一节点文本中；
-    done_when 为空时退化为 objective 关键短语弱探测（引号文本/数字，P0 判据可留空）。"""
+    """v1 完成校验：done_when 文本出现在当前屏幕任一节点文本中。
+    2026-09-30 起仅在用户显式填写完成判据时被接线（verify_fn 门控）；
+    判据留空 = 信任大脑（桌面语义），不再走目标关键词弱探测。"""
     try:
         r = json.loads(_bridge.call("observe", "{\"compact\":true}")) if _bridge \
             else {"ok": False}
@@ -224,17 +211,8 @@ def _verify_done(args):
         cond = (args or {}).get("done_when", "")
         if cond:
             return {"passed": cond in blob, "reason": "text probe: %r" % cond[:40]}
-        # 空判据：空串是任何文本的子串，直接判据必须拒绝（假绿通道）；
-        # 但目标里若有引号文本/数字，可作弱探测，避免「判据留空 = 永远不过」的死锁
-        terms = _probe_terms((args or {}).get("objective", ""))
-        if not terms:
-            return {"passed": False,
-                    "reason": "空判据且目标无引号文本或数字可探测（填写完成判据可加强校验）"}
-        missing = [t for t in terms if t not in blob]
-        if missing:
-            return {"passed": False,
-                    "reason": "弱探测未命中: %s" % "/".join(missing)[:40]}
-        return {"passed": True, "reason": "弱探测命中: %s" % "/".join(terms)[:40]}
+        # 空判据防御分支（正常链路不会走到）：按桌面语义信任大脑
+        return {"passed": True, "reason": "空判据：信任大脑（桌面语义）"}
     except Exception as e:
         return {"passed": False, "reason": "%s: %s" % (type(e).__name__, e)}
 
@@ -424,18 +402,71 @@ def _group_constraints(body, objective):
 _frozen_run = set()
 
 
-def _make_store(run_id, objective, done_when):
+def _make_store(run_id, objective, done_when, task_id=None):
     """轨迹落盘器（桌面 schema 对齐：tasks/<task_id>/<date>_<run_id>.jsonl）。
-    落盘失败不阻塞任务执行（返回 None，仅进程内轨迹）。"""
+    task_id 传入且存在时复用既有任务（「继续对话」= 同 task 追加 run）；
+    否则新建任务。落盘失败不阻塞任务执行（返回 None，仅进程内轨迹）。"""
     try:
         from hachimi_kernel.task_store import TaskStore
         from hachimi_kernel.trajectory import TrajectoryStore
-        meta = TaskStore.create(objective, done_when)
+        meta = TaskStore.get(task_id) if task_id else None
+        if meta is None:
+            meta = TaskStore.create(objective, done_when)
         store = TrajectoryStore(meta["task_id"], run_id[1:] if run_id.startswith("r") else run_id)
         return meta["task_id"], store
     except Exception as e:
         print("[task] trajectory store unavailable: %s: %s" % (type(e).__name__, e), flush=True)
         return None, None
+
+
+def _continuation_context(task_id, limit=8):
+    """「继续对话」背景（R3）：同一 task 追加 run 时，把上一轮轨迹尾部压缩成
+    约束注入，消除跨 run 失忆——新 run 不至于对已做过的事从零瞎找。
+    读不到历史/解析失败返回空串（不阻塞任务）。"""
+    try:
+        from hachimi_kernel import runtime_paths as P
+        d = P.task_trajectory(task_id).parent
+        if not d.exists():
+            return ""
+        # 新 run 的轨迹文件在 _make_store 阶段才创建，此处 glob 只会拿到上一轮的历史
+        files = sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+        if not files:
+            return ""
+        lines = []
+        for x in files[-1].read_text(encoding="utf-8").splitlines():
+            x = x.strip()
+            if x:
+                try:
+                    lines.append(json.loads(x))
+                except Exception:
+                    pass
+        acted = [ln for ln in lines if ln.get("action")]
+        if not acted:
+            return ""
+        meta = {}
+        rj = sorted(d.glob("*.run.json"), key=lambda p: p.stat().st_mtime)
+        if rj:
+            try:
+                meta = json.loads(rj[-1].read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+        rows = []
+        for ln in acted[-limit:]:
+            a = ln.get("action") or {}
+            r = ln.get("result") or {}
+            rows.append("#%s %s %s -> %s" % (
+                ln.get("step"), a.get("tool"),
+                json.dumps(a.get("args"), ensure_ascii=False)[:60],
+                "ok" if r.get("ok") is True else ("err: %s" % str(r.get("error", ""))[:60])))
+        return ("(续话背景) 本任务是同一任务 ID 下的新一轮。上一轮目标「%s」共执行 %d 步，"
+                "结束状态 %s；最近动作：%s。当前屏幕即上一轮结束时的状态，先 observe 再动手，"
+                "已完成的事不要重做。"
+                % (str(meta.get("objective", ""))[:80], len(acted),
+                   "成功" if meta.get("success") else "未完成",
+                   "；".join(rows)))
+    except Exception as e:
+        print("[task] continuation context unavailable: %s" % e, flush=True)
+        return ""
 
 
 def _perception_summary(result):
@@ -460,7 +491,10 @@ def _run(body, stop_flag=_controls):
     objective = body.get("objective", "")
     done_when = body.get("done_when", "")
     run_id = _state["run_id"]
-    task_id, store = _make_store(run_id, objective, done_when)
+    # 「继续对话」：body 带 task_id = 同任务追加 run（内核自动携带上一轮轨迹背景）
+    reuse = body.get("task_id") or None
+    cont_ctx = _continuation_context(reuse) if reuse else ""
+    task_id, store = _make_store(run_id, objective, done_when, reuse)
     with _lock:
         if task_id:
             _state["task_id"] = task_id
@@ -547,10 +581,18 @@ def _run(body, stop_flag=_controls):
                    "steps": out["steps"], "wall_clock_s": out.get("wall_clock_s"),
                    "summary": out.get("summary", "")})
 
+        # 完成判断（2026-09-30 对齐桌面 OmniAgent 语义）：仅在用户显式填写完成判据时
+        # 启用机械校验（done_when 文本探测）；留空 = 信任大脑（模型自判完成），
+        # 不再做目标关键词弱探测（强制写目标的假拒通道，2026-09-30 用户反馈移除）
+        verify = _verify_done if (done_when or "").strip() else None
+        constraints = _group_constraints(body, objective)
+        if cont_ctx:
+            constraints = ((constraints + "\n" + cont_ctx).strip()
+                           if constraints else cont_ctx)
         loop = MiniLoop(objective=objective,
                         done_when=done_when,
                         tools=tools, brain=brain,
-                        constraints=_group_constraints(body, objective),
+                        constraints=constraints,
                         # 默认 24 与内核 DEFAULT_MAX_STEPS 对齐（12 是实验期口径，
                         # 便签类任务实测需 ~15 步，产品 UI 不传 max_steps 会撞墙）；
                         # wall_clock_s 可由 /task body 覆盖（视觉任务网关慢，需放宽）
@@ -558,7 +600,7 @@ def _run(body, stop_flag=_controls):
                                 "wall_clock_s": body.get("wall_clock_s", 900),
                                 "verify_tool": "verify_done"},
                         controls=_controls,
-                        verify_fn=_verify_done,
+                        verify_fn=verify,
                         on_step=on_step, on_finish=on_finish)
         loop.run()
     except Exception as e:
@@ -605,6 +647,42 @@ def trajectory_export(run_id):
 
 def _strip_r(run_id):
     return run_id[1:] if run_id.startswith("r") else run_id
+
+
+def task_trace_json(task_id):
+    """任务详情数据面（R3）：某 task 全部 run 的轨迹行 + run 指标，按文件名升序
+    （日期前缀即时间序）。供详情页渲染执行轨迹；每 run 轨迹行截尾 200 行防肥。
+    task 目录不存在返回 ok=false（诚实空态）。"""
+    runs_out = []
+    try:
+        from hachimi_kernel import runtime_paths as P
+        d = P.task_trajectory(task_id).parent
+        if not d.exists():
+            return json.dumps({"ok": False, "error": "task not found: %s" % task_id,
+                               "runs": []}, ensure_ascii=False)
+        run_jsons = {}
+        for p in d.glob("*.run.json"):
+            try:
+                run_jsons[p.name[:-len(".run.json")]] = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        for p in sorted(d.glob("*.jsonl"), key=lambda x: x.name):
+            lines = []
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        lines.append(json.loads(line))
+                    except Exception:
+                        pass
+            rid = next((ln.get("run_id") for ln in lines if ln.get("run_id")), "")
+            runs_out.append({"run_id": rid, "file": p.name,
+                             "run": run_jsons.get(rid), "lines": lines[-200:]})
+        return json.dumps({"ok": True, "task_id": task_id, "runs": runs_out},
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                           "runs": runs_out}, ensure_ascii=False)
 
 
 def list_tasks_json(limit=20):
@@ -672,8 +750,11 @@ def status():
         s = dict(_state)
     traj = s.pop("trajectory", [])
     s["steps_so_far"] = len(traj)
+    # 轨迹随 status 下发（2026-09-30 修复：此前被整体裁掉，主界面结果卡时间线与
+    # 「查看完整轨迹」永远空）；截尾 40 行防长任务撑肥 500ms 轮询载荷
+    s["trajectory"] = traj[-40:]
     s["paused"] = _controls["paused"] if s.get("phase") == "running" else False
-    return {"ok": True, **{k: v for k, v in s.items() if k != "trajectory"}}
+    return {"ok": True, **s}
 
 
 def metrics():

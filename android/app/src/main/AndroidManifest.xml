@@ -44,6 +44,9 @@
         <!-- S4 真分屏控制台页：Hachimi 分屏后本 Activity 即 agent 下半屏 -->
         <activity android:name=".ConsoleActivity" android:exported="false" />
 
+        <!-- 任务详情页（执行轨迹回放 + 同任务继续对话） -->
+        <activity android:name=".TaskDetailActivity" android:exported="false" />
+
         <!-- S8 实验模式骨架（设置→实验→版本号连点 5 次进入） -->
         <activity android:name=".ExperimentActivity" android:exported="false" />
 

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""bridge 完成校验测试（P0）：done_when 文本探测 / 空判据目标弱探测 / objective 传递。
+"""bridge 完成校验测试（P0；2026-09-30 需求④修订）：done_when 文本探测保留 /
+空判据 = 信任大脑（桌面语义，弱探测移除）/ objective 传递回归。
 
 纯标准库离线跑（不触网）：`py -3 tests/test_bridge_verify.py`。
 """
@@ -56,47 +57,39 @@ def test_done_when_miss():
     assert r["passed"] is False, r
 
 
-# ---------------- 空判据 → 目标弱探测 ----------------
+# ---------------- 空判据 → 信任大脑（2026-09-30 对齐桌面，弱探测移除） ----------------
 
-def test_weak_probe_quoted_text_hit():
-    r = verify(u"在便签里写一条「买牛奶」", "", EDITOR_TREE)
-    assert r["passed"] is True, r
-
-
-def test_weak_probe_quoted_text_miss():
+def test_empty_done_when_trusts_brain():
+    # 判据留空不再做目标关键词弱探测（强制写目标的假拒通道已移除）：
+    # 完成与否由大模型自己判断，task_done 直接通过
     r = verify(u"在便签里写一条「买牛奶」", "", LIST_TREE)
-    assert r["passed"] is False, r
-
-
-def test_weak_probe_number_hit():
-    r = verify(u"加一个 07:30 的闹钟", "", EDITOR_TREE)
     assert r["passed"] is True, r
+    assert u"信任大脑" in r["reason"], r
 
 
-def test_weak_probe_number_miss():
-    r = verify(u"加一个 21:45 的闹钟", "", EDITOR_TREE)
-    assert r["passed"] is False, r
+def test_task_done_spec_without_verify():
+    # 无校验面时模型工具面的 task_done 提示口径 = 模型自判
+    class DoneBrain(object):
+        def chat(self, messages, tools):
+            return {"content": None,
+                    "tool_calls": [{"name": "task_done", "args": {"summary": "x"}}]}
+
+    loop = MiniLoop(objective="x", done_when="", tools={}, brain=DoneBrain())
+    specs = {s["name"]: s for s in loop._tool_specs()}
+    assert u"由你判断" in specs["task_done"]["description"], specs["task_done"]
 
 
-def test_weak_probe_all_terms_required():
-    # 多个引号段：全部命中才过（AND 语义，防单泛词假绿）
-    r = verify(u"在便签写「咖啡豆」和「滤纸」", "", EDITOR_TREE)
-    assert r["passed"] is False, r
+def test_task_done_spec_with_verify():
+    # 有校验面（verify_fn 注入）时提示口径 = 强制校验
+    class DoneBrain(object):
+        def chat(self, messages, tools):
+            return {"content": None,
+                    "tool_calls": [{"name": "task_done", "args": {"summary": "x"}}]}
 
-
-def test_weak_probe_no_terms_rejected():
-    # 目标无引号无数字：宁可拒判（非假绿），提示用户填判据
-    r = verify(u"打开便签", "", LIST_TREE)
-    assert r["passed"] is False, r
-    assert u"空判据" in r["reason"], r
-
-
-def test_probe_terms_extraction():
-    assert bridge._probe_terms(u"写「买 牛奶」提醒") == [u"买 牛奶"]
-    assert bridge._probe_terms(u"设 07:30 闹钟") == ["07:30"]
-    assert bridge._probe_terms(u"重命名为 notes2") == ["2"]
-    assert bridge._probe_terms(u"打开图库") == []
-    assert bridge._probe_terms("") == []
+    loop = MiniLoop(objective="x", done_when="买牛奶", tools={}, brain=DoneBrain(),
+                    verify_fn=lambda a: {"passed": False, "reason": "not yet"})
+    specs = {s["name"]: s for s in loop._tool_specs()}
+    assert u"强制校验" in specs["task_done"]["description"], specs["task_done"]
 
 
 # ---------------- mini_loop → verify_fn 传参（objective 传递回归） ----------------

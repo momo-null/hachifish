@@ -36,6 +36,7 @@ class SettingsPage(private val act: Activity) {
     private lateinit var visUrl: EditText
     private lateinit var visKey: EditText
     private lateinit var visModel: EditText
+    private lateinit var maxStepsField: EditText
     private lateinit var resultView: TextView
     private var modeSeg: Ds.Seg? = null
     private var gateSeg: Ds.Seg? = null
@@ -48,6 +49,18 @@ class SettingsPage(private val act: Activity) {
         /** 门控级别（GateManager.enforce 读取）：standard=type_text+launch_app，relaxed=仅 type_text。 */
         fun gateLevel(c: Activity): String =
             c.getSharedPreferences(TasksPage.PREFS, 0).getString("gate_level", "standard") ?: "standard"
+
+        /** 步数上限（每任务执行预算）：TasksPage.startTask / 详情页续话写入 /task body
+         *  的 max_steps。内核默认 24（便签类任务实测需 ~15 步），可配范围 4–2000。 */
+        fun maxSteps(c: Activity): Int =
+            c.getSharedPreferences(TasksPage.PREFS, 0).getInt("max_steps", 24).coerceIn(4, 2000)
+
+        /**
+         * 墙钟预算随步数线性放大（45s/步，下限 900s）：不放大时内核 15 分钟默认墙钟
+         * 会在大步数设置下先到限，「步数上限」形同虚设。仅产品 UI 路径显式下发；
+         * 内核默认 900s 不动（实验线/对拍口径零影响）。
+         */
+        fun wallClockS(steps: Int): Long = maxOf(900L, steps * 45L)
     }
 
     private lateinit var page: ScrollView
@@ -88,6 +101,16 @@ class SettingsPage(private val act: Activity) {
         visUrl = field(ch, "留空 = 视觉能力关闭")
         visKey = field(ch, "sk-…")
         visModel = field(ch, "模型需支持图片输入")
+        // 步数上限（2026-09-30 用户反馈：默认写死的 24 改为可配置）
+        ch.addView(divider(ch))
+        ch.addView(sectionLabel("步数上限（每任务）"))
+        maxStepsField = field(ch, "默认 24 · 可填 4–2000").apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        ch.addView(Ds.small(act, "单次任务最多执行的工具步数；复杂任务（多层弹窗/多输入）"
+                + "可调大，超出即按「未完成」终止。").apply {
+            setPadding(0, Ds.dp(act, 6), 0, 0)
+        })
         ch.addView(Ds.small(act,
             "Key 仅存本机 Keystore，不落库 · HTTPS 直连 · 零自有服务器。\n" +
                     "视觉端点留空时，观察兜底自动关闭（行为退回纯无障碍树）。").apply {
@@ -205,6 +228,7 @@ class SettingsPage(private val act: Activity) {
     // ---------------- 配置读写与测试（P0 语义原样迁移） ----------------
 
     private fun loadCurrent() {
+        maxStepsField.setText(maxSteps(act).toString())
         val cfg = BrainConfigStore.load(act) ?: return
         planUrl.setText(cfg.baseUrl)
         planKey.setText(cfg.apiKey)
@@ -236,9 +260,15 @@ class SettingsPage(private val act: Activity) {
     private fun save(): Boolean {
         val cfg = collect() ?: return false
         val ok = BrainConfigStore.save(act, cfg)
-        show(ok, if (ok) "已保存（Keystore 加密落盘，重启 App 后仍生效；视觉" +
-                if (cfg.visionEnabled) "=${cfg.visionModel}）" else "=关）"
-        else "保存失败（Keystore 或文件写入异常），请重试")
+        if (ok) {
+            val n = maxStepsField.text.toString().trim().toIntOrNull() ?: 24
+            act.getSharedPreferences(TasksPage.PREFS, 0).edit()
+                .putInt("max_steps", n.coerceIn(4, 2000)).apply()
+        }
+        show(ok, if (ok) {
+            val v = if (cfg.visionEnabled) "视觉=${cfg.visionModel}" else "视觉=关"
+            "已保存（Keystore 加密落盘，重启 App 后仍生效；$v；步数上限=${maxSteps(act)}）"
+        } else "保存失败（Keystore 或文件写入异常），请重试")
         return ok
     }
 
