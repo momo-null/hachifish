@@ -120,6 +120,45 @@ LOOK_SPEC = {
 }
 
 
+# 坐标系常量：镜像帧纵横比与真实屏差异（VirtualDisplay 排除导航条，
+# tap_xy 以真实屏 2400 归一化）→ y 需乘 mirror_h/(mirror_w×(2400/1080))
+_REAL_W, _REAL_H = 1080.0, 2400.0
+
+_POINT_PATTERNS = [
+    # 模型专用 grounding 标记：<｜point｜>[[198,559]]<｜/point｜>
+    (u"<｜point｜>\\s*\\[\\[\\s*([0-9.]+)\\s*,\\s*([0-9.]+)\\s*\\]\\]\\s*<｜/point｜>", "px"),
+    # 像素对 [198, 559] / (198, 559)（含千位空格容错）
+    (u"[(\\[]\\s*([0-9]{2,4})\\s*,\\s*([0-9]{2,4})\\s*[)\\]]", "px"),
+    # 归一化对 (0.22, 0.55) / [0.22, 0.55]
+    (u"[(\\[]\\s*(0\\.[0-9]+)\\s*,\\s*(0\\.[0-9]+)\\s*[)\\]]", "norm"),
+]
+
+
+def _parse_points(text, img_w, img_h):
+    """从 VLM 回答里抽坐标点，统一换算为真实屏幕归一化 [x,y]。
+    像素值按镜像帧尺寸(img_w,img_h)归一；归一值 y 乘 (img_h/img_w)×(1080/2400)
+    修正镜像与真实屏的高度口径差。返回 [[x,y],...]（全部 ≤1.05 才采信）。"""
+    out = []
+    for pat, kind in _POINT_PATTERNS:
+        for m in re.finditer(pat, text or ""):
+            try:
+                x, y = float(m.group(1)), float(m.group(2))
+            except ValueError:
+                continue
+            if kind == "px":
+                if x > img_w * 1.2 or y > img_h * 1.2:
+                    continue
+                nx, ny = x / img_w, y / img_h
+            else:
+                nx, ny = x, y
+            ny = ny * (img_h / img_w) * (_REAL_W / _REAL_H)
+            if 0 <= nx <= 1.05 and 0 <= ny <= 1.05:
+                out.append([round(min(nx, 1.0), 3), round(min(ny, 1.0), 3)])
+        if out:
+            break   # 最具体的格式优先，取第一组命中即可
+    return out
+
+
 def _look(args):
     """grab_frame 原语取帧 → 视觉模型 → 画面描述。视觉未配置返回结构化错误（不抛穿）。"""
     if not _vision_cfg or not _vision_cfg.get("base_url"):
@@ -135,11 +174,23 @@ def _look(args):
     q = ((args or {}).get("question") or
          "描述当前屏幕：主要界面内容、可见文本、可交互控件（按钮/输入框/列表项）及其大致"
          "位置（上/下/左/右/中）。简明扼要，10 句以内。")
+    # 坐标系约定（关键）：发给 VLM 的是等比降采样帧，归一化坐标与真实屏幕恒一致；
+    # 不约定坐标系时模型会输出降采样图像素并错当屏幕像素（2026-09-29 实测脱靶根因）
+    q += "\n(坐标约定：如需给出某控件位置，给出它在图中的像素坐标 [x,y] 即可，" \
+         "系统会自动换算到真实屏幕。)"
     out = client.chat_vision(q, fr["jpeg_b64"])
     if out.get("ok"):
-        return {"ok": True, "description": out.get("text", ""),
+        resp = {"ok": True, "description": out.get("text", ""),
                 "grab_ms": fr.get("ms"), "frame_age_ms": fr.get("frame_age_ms"),
                 "vision_ms": out.get("latency_ms")}
+        # 程序化换算：把 VLM 的点位答案变成 tap_xy 可直接用的归一化坐标
+        pts = _parse_points(out.get("text", ""), fr.get("w") or 1, fr.get("h") or 1)
+        if pts:
+            resp["points"] = pts
+            resp["description"] = (resp["description"] +
+                                   "\n[系统换算] 可直接 tap_xy 的归一化坐标: %s"
+                                   % json.dumps(pts[0])).strip()
+        return resp
     return out
 
 
@@ -212,8 +263,10 @@ def _make_brain(body):
     if not cfg or not cfg.get("base_url"):
         raise BrainError("no brain configured (BYOK 未设置)")
     print("[task] brain: %s model=%s" % (cfg["base_url"], cfg["model"]), flush=True)
-    # thinking 默认 disabled（brain_client 注释：自适应思考与多轮工具循环不兼容）
+    # thinking 默认 disabled（brain_client 注释：自适应思考与多轮工具循环不兼容）；
+    # timeout 120s：部分网关偶发 >60s 停顿（2026-09-29 实测 discovery-api）
     return BrainClient(cfg["base_url"], cfg.get("api_key", ""), cfg.get("model", ""),
+                       timeout=120,
                        thinking=cfg.get("thinking") or {"type": "disabled"})
 
 
@@ -421,18 +474,25 @@ def _run(body, stop_flag=_controls):
     try:
         # verify 不进模型工具面（只作 loop 强制门控）：防模型绕过 task_done 自调校验刷假绿
         tools = _make_tools()
+        # 任务级工具白名单（only_tools）：封闭任务（如 DoD3 视觉夹具）硬性收窄工具面。
+        # prompt 约束挡不住漂移——r1790692433817 实证：模型受挫后自调 screenshot/observe/
+        # press/launch_app 烧穿墙钟。verify_fn 走注入通道不经 tools，过滤不影响校验
+        only = body.get("only_tools")
+        if only:
+            dropped = sorted(set(tools) - set(only))
+            tools = {k: v for k, v in tools.items() if k in set(only)}
+            print("[task] only_tools kept %s, dropped %s" % (sorted(tools), dropped), flush=True)
         brain = _make_brain(body)
 
         def on_step(step):
             steps.append(step)
             a = step.get("action", {})
             with _lock:
-                # status() 数据面：主界面「当前动作」行（P0 DoD1）
+                # status() 数据面：主界面「当前动作」行（P0 DoD1）+ 运行期步数实时可见
                 _state["last_action"] = {"step": step.get("step"), "tool": a.get("tool"),
                                          "args": a.get("args"),
                                          "ok": step.get("result", {}).get("ok")}
-            print("[task] step %d: %s -> ok=%s" % (step.get("step"), a.get("tool"),
-                  step.get("result", {}).get("ok")), flush=True)
+                _state["trajectory"] = steps
             if store is not None:
                 try:
                     store.log_step(state="device", observation={},
@@ -492,8 +552,10 @@ def _run(body, stop_flag=_controls):
                         tools=tools, brain=brain,
                         constraints=_group_constraints(body, objective),
                         # 默认 24 与内核 DEFAULT_MAX_STEPS 对齐（12 是实验期口径，
-                        # 便签类任务实测需 ~15 步，产品 UI 不传 max_steps 会撞墙）
+                        # 便签类任务实测需 ~15 步，产品 UI 不传 max_steps 会撞墙）；
+                        # wall_clock_s 可由 /task body 覆盖（视觉任务网关慢，需放宽）
                         config={"max_steps": body.get("max_steps", 24),
+                                "wall_clock_s": body.get("wall_clock_s", 900),
                                 "verify_tool": "verify_done"},
                         controls=_controls,
                         verify_fn=_verify_done,

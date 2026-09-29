@@ -36,6 +36,10 @@
         <!-- 八原语调试面板（原 MainActivity 调试形态，研究/排障用） -->
         <activity android:name=".DebugPanelActivity" android:exported="false" />
 
+        <!-- Canvas 盲区测试页（P1 DoD3 fixture）：自绘目标零语义，仅组件显式可达 -->
+        <activity android:name=".CanvasProbeActivity" android:exported="true"
+            android:label="CanvasProbe" />
+
         <!-- 授权门控弹层（S3 GateUI）：由无障碍服务在敏感操作前拉起 -->
         <activity
             android:name=".gate.GateActivity"
