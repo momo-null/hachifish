@@ -53,6 +53,19 @@ class MainActivity : Activity() {
         }
         switchTab(0)
         SettingsPage.onRunModeChanged = { tasksPage?.onResume() }
+        // 多窗口（真分屏）下提供一键切控制台页：S4 语义——分屏里 Hachimi 这一半是 agent 面板
+        if (isInMultiWindowMode) {
+            val tip = TextView(this).apply {
+                text = "▣ 分屏中 · 切到控制台视图"
+                textSize = 13f; setTextColor(Ds.PRIMARY)
+                background = Ds.round(this@MainActivity, 10, com.hachimi.app.ui.Ds.GRAY_BG)
+                setPadding(Ds.dp(this@MainActivity, 14), Ds.dp(this@MainActivity, 8),
+                    Ds.dp(this@MainActivity, 14), Ds.dp(this@MainActivity, 8))
+                setOnClickListener { startActivity(Intent(this@MainActivity, ConsoleActivity::class.java)) }
+            }
+            content.addView(tip, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+        }
     }
 
     override fun onResume() {

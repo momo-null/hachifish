@@ -41,6 +41,7 @@ class TasksPage(private val act: Activity) {
     private var seg: Ds.Seg? = null
     private lateinit var chipsHost: LinearLayout
     private lateinit var envHost: LinearLayout
+    private lateinit var splitTip: TextView
     private lateinit var recentHost: LinearLayout
     private lateinit var resultHost: LinearLayout
     private lateinit var startBtn: TextView
@@ -78,9 +79,9 @@ class TasksPage(private val act: Activity) {
             .also { segHost.addView(it.view) }
         box.addView(segHost, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        box.addView(Ds.small(act, "前台引导：悬浮叙述 + 实机操作；分屏：下半屏 agent 控制台").apply {
-            setPadding(0, Ds.dp(act, 4), 0, Ds.dp(act, 10))
-        })
+        splitTip = Ds.small(act, "").apply { setPadding(0, Ds.dp(act, 4), 0, Ds.dp(act, 10)) }
+        box.addView(splitTip)
+        renderSplitTip()
 
         // 任务输入卡（mockup：浅蓝描边白卡）
         val inputCard = LinearLayout(act).apply {
@@ -156,13 +157,26 @@ class TasksPage(private val act: Activity) {
     /** 执行模式持久化（设置页「默认模式」与主界面分段同一份事实）。 */
     private var runMode: Int
         get() = act.getSharedPreferences(PREFS, 0).getInt("run_mode", 0)
-        set(v) = act.getSharedPreferences(PREFS, 0).edit().putInt("run_mode", v).apply()
+        set(v) {
+            act.getSharedPreferences(PREFS, 0).edit().putInt("run_mode", v).apply()
+            renderSplitTip()
+        }
+
+    /** 分屏模式内联引导：系统分屏需手动挂载（Android 12 无公开 API 程序化拉起），
+     *  Hachimi 分到哪一半，那一半就用「控制台视图」当 agent 面板。 */
+    private fun renderSplitTip() {
+        if (!::splitTip.isInitialized) return
+        splitTip.text = if (runMode == 1)
+            "分屏：与目标 App 上下分屏（最近任务 → 点应用图标 → 分屏），Hachimi 那一半「控制台视图」"
+        else "前台引导：悬浮叙述 + 实机操作"
+    }
 
     // ---------------- 环境与刷新 ----------------
 
     fun onResume() {
         if (!::page.isInitialized) return
         seg?.select(runMode)
+        renderSplitTip()
         refreshChips()
         refreshEnv()
         refreshRecent()
@@ -229,6 +243,10 @@ class TasksPage(private val act: Activity) {
                 if (action != null) setOnClickListener { action() }
             })
         }
+        card.addView(Ds.small(act, "应用进程被杀（划掉后台/重装）后 ColorOS 不自动重连，" +
+                "点对应项重设一次即可；正常不杀进程则一直有效。").apply {
+            setPadding(0, Ds.dp(act, 8), 0, 0)
+        })
         envHost.addView(card)
         envHost.addView(View(act).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, Ds.dp(act, 10))
@@ -344,15 +362,18 @@ class TasksPage(private val act: Activity) {
             toast("内核启动中（首次约需 10 秒），稍后再试")
             return
         }
+        val cfg = BrainConfigStore.load(act)
+        if (cfg == null) {
+            toast("未配置模型端点（BYOK）：请先到 设置 → 通道（BYOK）填写并保存")
+            openSettings()
+            return
+        }
         startBtn.isEnabled = false
+        main.post { result.showStarting() }
+        beginPolling()   // start_task_json 同步阻塞至任务结束：轮询必须先于阻塞启动
         Thread {
             try {
                 // /task 路径的 Keystore → set_brain 注入段在直调路径复刻（约束一）
-                val cfg = BrainConfigStore.load(act)
-                if (cfg == null) {
-                    main.post { toast("未配置模型端点（BYOK）：请先到 设置 → 通道（BYOK）填写并保存") }
-                    return@Thread
-                }
                 bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
                 if (cfg.visionEnabled) {
                     bridge.callAttr("set_vision", cfg.visionBaseUrl, cfg.visionApiKey, cfg.visionModel)
@@ -365,13 +386,27 @@ class TasksPage(private val act: Activity) {
                     .put("objective", objective)
                     .put("done_when", doneInput.text.toString().trim())
                 if (runMode == 1) body.put("mode", "split")
+                // 让位：任务已受理，Hachimi 回桌面，agent 从桌面开始找应用/开应用
+                // （2026-09-30 用户反馈：Hachimi 一直占前台，agent 无从下手）
+                main.post {
+                    act.startActivity(Intent(Intent.ACTION_MAIN).apply {
+                        addCategory(Intent.CATEGORY_HOME)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
+                    if (runMode == 1) {
+                        toast("已开始。从最近任务把目标 App 与 Hachimi 上下分屏，" +
+                                "Hachimi 那一半点「控制台视图」")
+                    }
+                }
                 val r = JSONObject(bridge.callAttr("start_task_json", body.toString()).toString())
                 main.post {
-                    if (r.optBoolean("ok")) {
-                        toast("已启动 ${r.optString("run_id").take(14)}")
-                        beginPolling()
-                    } else {
+                    if (!r.optBoolean("ok")) {
+                        startRejected = true   // 让轮询立即退出（idle 宽限只服务真实启动）
+                        result.render(null)
                         toast(MainActivity.readableErrorStatic(r.optString("error")))
+                        // 失败时把人带回主界面看错误与结果区
+                        act.startActivity(Intent(act, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                     }
                     startBtn.isEnabled = true
                 }
@@ -396,16 +431,32 @@ class TasksPage(private val act: Activity) {
         }.start()
     }
 
-    /** 运行期轮询 bridge.status()：500ms → RunResultView 渲染（主界面实时状态，P0 DoD1）。 */
+    /**
+     * 运行期轮询 bridge.status()：500ms → RunResultView 渲染（主界面实时状态，P0 DoD1）。
+     * phase=idle 宽限 150s：start_task 同步阻塞下，内核收到任务前 phase 仍是 idle
+     * （内核冷启动/上轮收尾），不能立刻退出轮询。
+     */
+    @Volatile private var startRejected = false
+
     fun beginPolling() {
         if (!polling.compareAndSet(false, true)) return
+        startRejected = false
+        val idleDeadline = System.currentTimeMillis() + 150_000
         Thread {
             while (polling.get()) {
                 val bridge = KernelHostService.pyBridgeModule ?: break
                 try {
                     val s = JSONObject(bridge.callAttr("status_json").toString())
-                    main.post { result.render(s) }
-                    if (s.optString("phase") != "running") break
+                    val phase = s.optString("phase")
+                    if (phase == "idle") {
+                        if (startRejected || System.currentTimeMillis() > idleDeadline) {
+                            main.post { result.render(null) }
+                            break
+                        }
+                    } else {
+                        main.post { result.render(s) }
+                        if (phase != "running") break
+                    }
                 } catch (_: Exception) {
                     break
                 }

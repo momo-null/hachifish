@@ -25,6 +25,7 @@ import org.json.JSONObject
  * 悬浮叙事层（架构 §6 两种执行形态的 UI 组成，P1.5 视觉终态对齐 mockup S3/S4）：
  * - 浮条（前台引导模式）：顶部窄条，步骤/当前动作 + 暂停/停止。
  * - 停靠（分屏模式）：下半屏 agent 控制台——感知/决策/时间线（✓绿 →蓝 ■白 染色）。
+ * - 收起 → 缩成小药丸（可点回完整面板；运行期不再有「找不回」状态，2026-09-30 用户反馈）。
  * - 红框定位指示（mockup .ground）：tap 类 step 事件时在目标点位画红色虚线框
  *   呼吸动画 ~1.2s（画在独立触摸穿透窗，操作零干扰；tap_by_id 无坐标暂不画）。
  * 数据源 = Python bridge 叙事事件（register_narrative）；TYPE_APPLICATION_OVERLAY +
@@ -38,8 +39,10 @@ object NarrativePanel {
     private var context: Context? = null
     private var contentView: LinearLayout? = null
     private var barView: LinearLayout? = null
+    private var pillView: LinearLayout? = null
     private var docked = false
     private var paused = false
+    private var collapsed = false
     private var lastStatus = "idle"   // 跨 attach 保留：停靠/浮条切换后回放（start 事件先于 dock 到达时 console 否则停留 idle）
 
     // 浮条视图引用
@@ -56,6 +59,26 @@ object NarrativePanel {
     // 红框定位指示（.ground）
     private var frameView: View? = null
 
+    /** ConsoleActivity 可见时抑制 overlay（真分屏的下半屏就是控制台，双 UI 互相踩） */
+    @Volatile @JvmStatic var consoleVisible = false
+
+    /** 控制台页轮询快照：状态行 / 感知 / 决策 / 时间线（面板内序）。 */
+    @JvmStatic
+    @Synchronized
+    fun snapshot(): JSONObject {
+        val sb = StringBuilder()
+        for (line in timelineLines) {
+            if (sb.isNotEmpty()) sb.append('\n')
+            sb.append(line)
+        }
+        return JSONObject()
+            .put("status", lastStatus)
+            .put("docked", docked)
+            .put("perception", perception?.text?.toString() ?: "")
+            .put("decision", decision?.text?.toString() ?: "")
+            .put("timeline", sb.toString())
+    }
+
     /** Python 叙事事件入口（bridge.register_narrative 注入的 sink）。 */
     @JvmStatic
     fun push(json: String) {
@@ -64,6 +87,7 @@ object NarrativePanel {
                 val e = JSONObject(json)
                 when (e.optString("event")) {
                     "start" -> {
+                        collapsed = false
                         lastStatus = "run " + e.optString("run_id").take(14)
                         append("▶ 目标: " + e.optString("objective").take(40))
                         addTimeline("▶ " + e.optString("objective").take(36))
@@ -135,44 +159,98 @@ object NarrativePanel {
     @Synchronized
     fun dock() {
         docked = true
+        if (consoleVisible) return   // 真分屏控制台在场：overlay 降级退出
         val c = context ?: return
         main.post {
-            // 未显示时只记模式不自我挂出（mode 事件先于 show 到达的窗口期）；
-            // 已显示才按新模式重建
-            if (contentView != null) {
-                detach()
-                if (canOverlay(c)) attach(c, true)
-            }
+            if (contentView != null || pillView != null) detachAll()
+            if (canOverlay(c) && !collapsed) attach(c, true)
         }
     }
 
     @Synchronized
     fun undock() {
         docked = false
+        if (consoleVisible) return
         val c = context ?: return
         main.post {
-            if (contentView != null) {
-                detach()
-                if (canOverlay(c)) attach(c, false)
-            }
+            if (contentView != null || pillView != null) detachAll()
+            if (canOverlay(c) && !collapsed) attach(c, false)
         }
     }
 
     @Synchronized
     fun hide() {
-        main.post { detach(); removeGround() }
+        main.post { detachAll() }
+    }
+
+    /**
+     * 收起（用户点「收起」）：不再整体消失——缩成小药丸（单点回完整面板）。
+     * 2026-09-30 用户反馈「点收起就再也找不到了」。
+     */
+    @Synchronized
+    fun collapse() {
+        collapsed = true
+        val c = context ?: return
+        main.post {
+            detachAll()
+            if (canOverlay(c)) attachPill(c)
+        }
+    }
+
+    @Synchronized
+    fun expand() {
+        collapsed = false
+        val c = context ?: return
+        main.post {
+            detachAll()
+            if (canOverlay(c)) attach(c, docked)
+        }
     }
 
     /** run 收尾自动收起（2026-09-27 实测：残留 overlay 按钮条拦截目标 App 底部
      *  触摸——时钟 tab 栏被吞，烧穿 T3/T8/T14 预算）。新 run 的 /task 会重新 show。 */
     private fun scheduleHide(delayMs: Long) {
-        main.postDelayed({ hide() }, delayMs)
+        main.postDelayed({ detachAll() }, delayMs)
     }
 
     // ---------------- 视图构建 ----------------
 
     private fun canOverlay(c: Context): Boolean =
         android.provider.Settings.canDrawOverlays(c)
+
+    /** 小药丸：收起态的唯一驻留物，点击回完整面板（含状态缩写，一眼可辨）。 */
+    private fun attachPill(c: Context) {
+        val pill = LinearLayout(c).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ds.round(c, 18, 0xF21E2026.toInt())
+            setPadding(Ds.dp(c, 12), Ds.dp(c, 5), Ds.dp(c, 12), Ds.dp(c, 5))
+            setOnClickListener { expand() }
+        }
+        pill.addView(TextView(c).apply {
+            text = "▣ Hachimi ▸"
+            textSize = 11f; typeface = Typeface.MONOSPACE
+            setTextColor(Ds.ACCENT)
+        })
+        pillView = pill
+        try {
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = if (docked) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                          else Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            }
+            wm = c.getSystemService(WindowManager::class.java)
+            wm!!.addView(pill, params)
+        } catch (e: Exception) {
+            Log.w(TAG, "pill add: ${e.message}")
+            pillView = null
+        }
+    }
 
     /** 双窗结构：内容窗纯显示（NOT_TOUCHABLE，触摸穿透到目标 App——分屏并行语义），
      *  按钮条窗可触摸（仅按钮自身区域拦截）。 */
@@ -243,6 +321,9 @@ object NarrativePanel {
                 yOff = 0)
         }
         setAllStatus(lastStatus)
+        // 重挂（如收起→展开）时回放既有时间线，避免空白等待下一事件
+        if (dock) timeline?.text = colored(timelineLines.joinToString("\n"))
+        else logLine?.text = colored(logLine?.text?.toString() ?: "")
         Log.i(TAG, if (dock) "console docked (split mode, touch-through)" else "panel shown (compact)")
     }
 
@@ -269,13 +350,14 @@ object NarrativePanel {
         }
     }
 
-    private fun detach() {
+    private fun detachAll() {
         for (v in listOf(contentView, barView)) {
             try {
                 wm?.removeView(v)
             } catch (_: Exception) {}
         }
-        contentView = null; barView = null
+        try { pillView?.let { wm?.removeView(it) } } catch (_: Exception) {}
+        contentView = null; barView = null; pillView = null
         statusLine = null; logLine = null
         consoleStatus = null; perception = null; decision = null; timeline = null
     }
@@ -299,7 +381,7 @@ object NarrativePanel {
         }
         btn("停止", danger = true) { _ -> py("request_stop") }
         btn(if (docked) "浮条" else "停靠") { _ -> if (docked) undock() else dock() }
-        btn("收起") { _ -> hide() }
+        btn("收起") { _ -> collapse() }
         return row
     }
 

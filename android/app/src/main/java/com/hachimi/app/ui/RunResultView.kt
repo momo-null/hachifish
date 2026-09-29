@@ -28,6 +28,29 @@ class RunResultView(private val act: Activity) {
     private val box = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
     val view: View get() = box
 
+    /** 启动反馈卡（start_task 同步阻塞期间的主界面唯一可见信号——2026-09-30
+     *  用户实测「界面不动」根因：新 UI 丢了旧版启动提示，阻塞返回前无任何渲染）。 */
+    fun showStarting() {
+        box.removeAllViews()
+        val card = Ds.card(act)
+        card.addView(TextView(act).apply {
+            text = "▶"; textSize = 30f; gravity = android.view.Gravity.CENTER
+            setTextColor(Ds.PRIMARY)
+        })
+        card.addView(TextView(act).apply {
+            text = "正在启动任务…"
+            textSize = 17f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Ds.TEXT)
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, Ds.dp(act, 4), 0, 0)
+        })
+        card.addView(Ds.small(act,
+            "已发出指令，等待模型第一步（网关偶发 30~90 秒停顿属正常）。" +
+                    "目标 App 内的操作会实时显示在悬浮叙述条/控制台。").apply {
+            gravity = android.view.Gravity.CENTER; setPadding(0, Ds.dp(act, 8), 0, 0)
+        })
+        box.addView(card)
+    }
+
     fun render(s: JSONObject?) {
         box.removeAllViews()
         if (s == null) return

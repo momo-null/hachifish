@@ -70,7 +70,8 @@ class OnboardingActivity : Activity() {
             if (ProjectionHolder.isRunning) "已授权 · 录屏模式一次授权，连续取帧" else "视觉观察通道（可稍后在主界面开启）",
             ProjectionHolder.isRunning) { requestProjection() }
         step(card, 3, "电池优化白名单",
-            if (pm.isIgnoringBatteryOptimizations(packageName)) "已加入 · 防止系统回收无障碍服务"
+            if (pm.isIgnoringBatteryOptimizations(packageName))
+                "已加入 · ColorOS 另请在 应用管理→Hachimi 打开「允许自启动」"
             else "防止系统回收无障碍服务",
             pm.isIgnoringBatteryOptimizations(packageName)) {
             startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
@@ -78,7 +79,9 @@ class OnboardingActivity : Activity() {
         step(card, 4, "模型接入（BYOK）",
             if (cfg != null) "已配置 · ${cfg.model}" else "填入你自备的端点与密钥",
             cfg != null) { startActivity(Intent(this, SettingsActivity::class.java)) }
-        card.addView(Ds.small(this, "Key 仅存本机 Keystore，不落库").apply {
+        card.addView(Ds.small(this,
+            "Key 仅存本机 Keystore，不落库。服务保活说明：无障碍与录屏会话跟随应用进程，" +
+            "进程被杀（划掉后台/安装）后需重拨无障碍、重授权录屏；正常使用（Back 键退出）全程免维护。").apply {
             setPadding(0, Ds.dp(this@OnboardingActivity, 8), 0, 0)
         })
         stepsHost.addView(card)
