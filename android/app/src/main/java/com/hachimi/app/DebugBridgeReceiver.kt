@@ -53,21 +53,28 @@ class DebugBridgeReceiver : BroadcastReceiver() {
         }
 
         val t0 = System.currentTimeMillis()
-        val result: JSONObject = if (svc == null) {
+        // 仅 a11y 依赖类原语要求服务已绑定；配置/门控/取帧类在无障碍掉线时也必须可用
+        // （魅族 bootstrap 实录：set_brain 被 a11y 前置拦死，无障碍还没拨就配不了 BYOK）
+        val needsA11y = when (prim) {
+            "observe", "tap_by_id", "tap_xy", "type_text", "gesture",
+            "launch_app", "press", "screenshot" -> true
+            else -> false
+        }
+        val result: JSONObject = if (svc == null && needsA11y) {
             JSONObject().put("ok", false).put("error", "accessibility not bound")
         } else try {
             when (prim) {
-                "observe" -> svc.observe()
-                "tap_by_id" -> svc.tapById(args.optString("view_id"))
-                "tap_xy" -> svc.tapXY(args.optDouble("x", 0.5), args.optDouble("y", 0.9))
-                "type_text" -> svc.typeText(args.optString("text"))
-                "gesture" -> svc.gesture(
+                "observe" -> svc!!.observe()
+                "tap_by_id" -> svc!!.tapById(args.optString("view_id"))
+                "tap_xy" -> svc!!.tapXY(args.optDouble("x", 0.5), args.optDouble("y", 0.9))
+                "type_text" -> svc!!.typeText(args.optString("text"))
+                "gesture" -> svc!!.gesture(
                     args.optJSONArray("points")
                         ?: JSONArray().put(JSONArray().put(0.5).put(0.8)).put(JSONArray().put(0.5).put(0.3)),
                     args.optLong("duration_ms", 300L)
                 )
-                "launch_app" -> svc.launchApp(args.optString("package"))
-                "press" -> svc.press(args.optString("key", "back"))
+                "launch_app" -> svc!!.launchApp(args.optString("package"))
+                "press" -> svc!!.press(args.optString("key", "back"))
                 "projection_frame" -> ProjectionHolder.captureFrameJson(context)
                 "grab_frame" -> ProjectionHolder.grabFrameJson(
                     args.optInt("max_width", 768), args.optInt("quality", 60))
@@ -136,7 +143,7 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                 "teach_dump" -> TeachRecorder.dump(context)
                 "screenshot" -> run {
                     // 异步：立即回执，真实结果随回调追加（latency 含等待截图完成）
-                    svc.screenshot { r ->
+                    svc!!.screenshot { r ->
                         Log.i(TAG, JSONObject()
                             .put("prim", "screenshot_result")
                             .put("result", r)

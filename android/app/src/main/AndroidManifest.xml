@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- specialUse 类型 FGS 的配套权限（内核前台宿主；normal 级，零用户交互） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 前台引导模式悬浮叙述面板（S3）：TYPE_APPLICATION_OVERLAY 需要 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -68,8 +70,23 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- 内核宿主：specialUse 类型（Android 14+ 要求 FGS 必须带合法类型：
+             mediaProjection 未授权即炸、type=0/无类型也炸——2026-09-30 魅族
+             Android 16 三种死法实录；specialUse 无授权/无时限，aapt2 编译期
+             解析对旧平台无害），投影升格职责移交 ProjectionService -->
         <service
             android:name=".KernelHostService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="embedded-python-kernel-and-loopback-host" />
+        </service>
+
+        <!-- 录屏前台服务：仅在用户完成 MediaProjection 授权后由 ProjectionService.start
+             拉起（此时 project_media appop 在，类型校验必过） -->
+        <service
+            android:name=".ProjectionService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 

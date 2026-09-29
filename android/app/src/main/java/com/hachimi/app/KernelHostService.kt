@@ -31,10 +31,10 @@ class KernelHostService : Service() {
             context.startForegroundService(Intent(context, KernelHostService::class.java))
         }
 
-        /** 授权成功后调用：先以 mediaProjection 类型进前台（API 29+ 硬性要求），再取 projection。 */
+        /** 授权成功后调用：ProjectionService 以 mediaProjection 类型进前台再取 projection
+         *  （Android 14+：类型校验此刻必过；内核服务本身不带类型）。 */
         fun startProjection(context: Context, resultCode: Int, data: Intent) {
-            val i = Intent(context, KernelHostService::class.java)
-                .setAction(ACTION_PROJECTION)
+            val i = Intent(context, ProjectionService::class.java)
                 .putExtra(EXTRA_RC, resultCode)
                 .putExtra(EXTRA_DATA, data)
             context.startForegroundService(i)
@@ -62,7 +62,14 @@ class KernelHostService : Service() {
                 android.app.PendingIntent.FLAG_IMMUTABLE
             ))
             .build()
-        startForeground(NOTIFICATION_ID, notification)
+        // Android 14+：FGS 必须带类型（见 manifest 注释）。specialUse 无运行时授权
+        // 要求；API<34 用 two-arg（沿用 manifest）即可。投影升格移交 ProjectionService
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIFICATION_ID, notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         // TODO(M2'): KernelHost.attach(this) —— Chaquopy 解释器启动 + 知识层目录注入 + /health 回环 API
     }
 
@@ -71,16 +78,9 @@ class KernelHostService : Service() {
             ACTION_STOP -> {
                 ProjectionHolder.stop()
                 NarrativePanel.hide()
+                stopService(Intent(this, ProjectionService::class.java))
                 stopSelf()
                 return START_NOT_STICKY
-            }
-            ACTION_PROJECTION -> {
-                // mediaProjection 类型前台必须先于 getMediaProjection（API 29+）
-                startForeground(NOTIFICATION_ID, buildNotification(),
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-                val rc = intent.getIntExtra(EXTRA_RC, -1)
-                val data = intent.getParcelableExtra<Intent>(EXTRA_DATA)
-                if (data != null) ProjectionHolder.start(this, rc, data)
             }
             else -> startForeground(NOTIFICATION_ID, buildNotification())
         }
