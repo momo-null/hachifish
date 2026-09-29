@@ -1,16 +1,22 @@
 package com.hachimi.app.gate
 
 import android.app.Activity
+import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
-import android.widget.Button
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.Window
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.hachimi.app.ui.Ds
 
 /**
- * 授权门控弹层（架构 §4.4，交互原型 S3 GateUI）。
- * 由无障碍服务在敏感操作（文本输入/跨 App 跳转/删除类）前以 dialog 主题拉起。
+ * 授权门控弹层（架构 §4.4，交互原型 S3 GateUI 终态）：底部弹层——标题/请求正文/
+ * 三按钮（仅本次允许 / 总是允许「App」的op / 拒绝并停止）+ 红线副文案。
+ * 由无障碍服务在敏感操作（文本输入/跨 App 跳转）前以 dialog 主题拉起。
  * 结果码：10 仅本次允许 / 11 总是允许 / 12 拒绝。
- * M1' 后续：白名单（App × 操作类型）持久化；与内核的阻塞等待桥接。
  */
 class GateActivity : Activity() {
 
@@ -20,26 +26,54 @@ class GateActivity : Activity() {
         val opType = intent.getStringExtra(EXTRA_OP) ?: "?"
         val preview = intent.getStringExtra(EXTRA_PREVIEW) ?: ""
 
-        val pad = (20 * resources.displayMetrics.density).toInt()
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad) }
-        root.addView(TextView(this).apply {
-            text = "授权门控\n\nHachimi 请求在「$targetPkg」中执行 $opType" +
-                    (if (preview.isNotBlank()) "\n\n$preview" else "") +
-                    "\n\n此操作由 AI 发起，可随时停止"
+        // 底部弹层形态（mockup .gate：上两角圆角 18，遮罩由 dialog 主题提供）
+        window.apply {
+            setGravity(Gravity.BOTTOM)
+            setWindowAnimations(-1)
+            setBackgroundDrawableResource(android.R.color.transparent)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
+        val c = this
+        val sheet = LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ds.round(c, 18, Color.WHITE)
+            setPadding(Ds.dp(c, 20), Ds.dp(c, 18), Ds.dp(c, 20), Ds.dp(c, 20))
+        }
+        // 抓手条
+        sheet.addView(View(c).apply {
+            background = Ds.round(c, 2, Ds.CARD_BORDER)
+            layoutParams = LinearLayout.LayoutParams(Ds.dp(c, 36), Ds.dp(c, 4))
+            (layoutParams as LinearLayout.LayoutParams).gravity = Gravity.CENTER_HORIZONTAL
         })
-        root.addView(Button(this).apply {
-            text = "仅本次允许"
-            setOnClickListener { finishWith(RESULT_ALLOW_ONCE) }
+        sheet.addView(TextView(c).apply {
+            text = "🔐 授权门控"
+            textSize = 16f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Ds.TEXT)
+            setPadding(0, Ds.dp(c, 12), 0, Ds.dp(c, 4))
         })
-        root.addView(Button(this).apply {
-            text = "总是允许该应用的此类操作"
-            setOnClickListener { finishWith(RESULT_ALLOW_ALWAYS) }
+        sheet.addView(TextView(c).apply {
+            text = "Hachimi 请求在「$targetPkg」中执行 $opType" +
+                    (if (preview.isNotBlank()) "：\n$preview" else "")
+            textSize = 14f; setTextColor(Ds.TEXT)
+            setPadding(0, Ds.dp(c, 4), 0, Ds.dp(c, 4))
         })
-        root.addView(Button(this).apply {
-            text = "拒绝并停止"
-            setOnClickListener { finishWith(RESULT_DENY) }
+        sheet.addView(Ds.small(c, "此操作由 AI 发起 · 红色虚线框为当前定位目标 · 可随时停止").apply {
+            setPadding(0, Ds.dp(c, 2), 0, Ds.dp(c, 8))
         })
-        setContentView(root)
+        // 三按钮（mockup g1 主色 / g2 灰底主色字 / g3 红 tint）
+        sheet.addView(Ds.button(c, "仅本次允许") { finishWith(RESULT_ALLOW_ONCE) })
+        sheet.addView(Ds.button(c, "总是允许「$targetPkg」的$opType", primary = false) {
+            finishWith(RESULT_ALLOW_ALWAYS)
+        }.apply {
+            (layoutParams as LinearLayout.LayoutParams).topMargin = Ds.dp(c, 10)
+        })
+        sheet.addView(Ds.button(c, "拒绝并停止", primary = false, danger = true) {
+            finishWith(RESULT_DENY)
+        }.apply {
+            (layoutParams as LinearLayout.LayoutParams).topMargin = Ds.dp(c, 10)
+        })
+
+        setContentView(sheet)
     }
 
     private fun finishWith(code: Int) {

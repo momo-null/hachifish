@@ -1,24 +1,32 @@
 package com.hachimi.app
 
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
+import android.text.SpannableString
+import android.text.style.ForegroundColorSpan
 import android.util.Log
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.hachimi.app.ui.Ds
 import org.json.JSONObject
 
 /**
- * 悬浮叙事层（架构 §6 两种执行形态的 UI 组成）：
+ * 悬浮叙事层（架构 §6 两种执行形态的 UI 组成，P1.5 视觉终态对齐 mockup S3/S4）：
  * - 浮条（前台引导模式）：顶部窄条，步骤/当前动作 + 暂停/停止。
- * - 停靠（分屏模式）：下半屏 agent 控制台——感知描述（observe 摘要）/决策（当前工具）/
- *   时间线（最近步）。系统分屏无程序化公开 API，overlay 停靠视觉等价（v1 决策，帧预览后置）。
+ * - 停靠（分屏模式）：下半屏 agent 控制台——感知/决策/时间线（✓绿 →蓝 ■白 染色）。
+ * - 红框定位指示（mockup .ground）：tap 类 step 事件时在目标点位画红色虚线框
+ *   呼吸动画 ~1.2s（画在独立触摸穿透窗，操作零干扰；tap_by_id 无坐标暂不画）。
  * 数据源 = Python bridge 叙事事件（register_narrative）；TYPE_APPLICATION_OVERLAY +
  * FLAG_NOT_FOCUSABLE 不抢目标 App 输入。研究机经 adb appops 授予权限。
  */
@@ -44,6 +52,9 @@ object NarrativePanel {
     private var decision: TextView? = null
     private var timeline: TextView? = null
     private val timelineLines = ArrayDeque<String>()
+
+    // 红框定位指示（.ground）
+    private var frameView: View? = null
 
     /** Python 叙事事件入口（bridge.register_narrative 注入的 sink）。 */
     @JvmStatic
@@ -79,6 +90,17 @@ object NarrativePanel {
                         }
                         decision?.text = "决策: $tool " +
                                 e.optJSONObject("args")?.toString()?.take(90).orEmpty()
+                        // 红框定位指示：有归一化坐标的动作（tap_xy/gesture 首点）
+                        val args = e.optJSONObject("args")
+                        val x = args?.optDouble("x")
+                        val y = args?.optDouble("y")
+                        if ((tool == "tap_xy") && x != null && y != null &&
+                            !x.isNaN() && !y.isNaN()) {
+                            showGround(x, y)
+                        } else if (tool == "gesture") {
+                            val p0 = args?.optJSONArray("points")?.optJSONArray(0)
+                            if (p0 != null) showGround(p0.optDouble(0), p0.optDouble(1))
+                        }
                     }
                     "paused" -> append("⏸ 已暂停（面板可恢复）")
                     "finish" -> {
@@ -115,8 +137,12 @@ object NarrativePanel {
         docked = true
         val c = context ?: return
         main.post {
-            if (contentView != null) detach()
-            if (canOverlay(c)) attach(c, true)
+            // 未显示时只记模式不自我挂出（mode 事件先于 show 到达的窗口期）；
+            // 已显示才按新模式重建
+            if (contentView != null) {
+                detach()
+                if (canOverlay(c)) attach(c, true)
+            }
         }
     }
 
@@ -125,14 +151,16 @@ object NarrativePanel {
         docked = false
         val c = context ?: return
         main.post {
-            if (contentView != null) detach()
-            if (canOverlay(c)) attach(c, false)
+            if (contentView != null) {
+                detach()
+                if (canOverlay(c)) attach(c, false)
+            }
         }
     }
 
     @Synchronized
     fun hide() {
-        main.post { detach() }
+        main.post { detach(); removeGround() }
     }
 
     /** run 收尾自动收起（2026-09-27 实测：残留 overlay 按钮条拦截目标 App 底部
@@ -157,25 +185,27 @@ object NarrativePanel {
 
         contentView = LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xF2000000.toInt())
+            setBackgroundColor(0xF21E2026.toInt())
             setPadding(pad, pad / 2, pad, pad / 2)
         }.also { box ->
             if (dock) {
                 consoleStatus = TextView(c).apply {
-                    text = "Hachimi 控制台 · idle"
-                    setTextColor(0xFF9FD8FF.toInt()); textSize = 10f
+                    text = "AGENT 控制台 · idle · 分屏模式"
+                    setTextColor(Ds.ACCENT); textSize = 10f
+                    typeface = Typeface.MONOSPACE
                 }
                 perception = TextView(c).apply {
                     text = "感知: -"
-                    setTextColor(0xFFB0E0B0.toInt()); textSize = 11f; maxLines = 2
+                    setTextColor(Ds.GREEN_LOG); textSize = 11f; maxLines = 2
                 }
                 decision = TextView(c).apply {
                     text = "决策: -"
                     setTextColor(0xFFFFD9A0.toInt()); textSize = 11f; maxLines = 1
+                    typeface = Typeface.MONOSPACE
                 }
                 timeline = TextView(c).apply {
                     text = ""
-                    setTextColor(Color.WHITE); textSize = 11f; maxLines = 6
+                    setTextColor(Ds.DARK_TXT); textSize = 11f; maxLines = 6
                     typeface = Typeface.MONOSPACE
                 }
                 box.addView(consoleStatus)
@@ -185,12 +215,14 @@ object NarrativePanel {
             } else {
                 consoleStatus = null; perception = null; decision = null; timeline = null
                 statusLine = TextView(c).apply {
-                    text = "Hachimi · idle"
-                    setTextColor(0xFF9FD8FF.toInt()); textSize = 10f
+                    text = "▶ 前台引导 · idle"
+                    setTextColor(Ds.ACCENT); textSize = 10f
+                    typeface = Typeface.MONOSPACE
                 }
                 logLine = TextView(c).apply {
                     text = ""
-                    setTextColor(Color.WHITE); textSize = 11f; maxLines = 4
+                    setTextColor(Ds.DARK_TXT); textSize = 11f; maxLines = 4
+                    typeface = Typeface.MONOSPACE
                 }
                 box.addView(statusLine)
                 box.addView(logLine)
@@ -250,8 +282,13 @@ object NarrativePanel {
 
     private fun buttonsRow(c: Context): LinearLayout {
         val row = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
-        fun btn(label: String, onClick: (Button) -> Unit) = Button(c).apply {
+        fun btn(label: String, danger: Boolean = false, onClick: (Button) -> Unit) = Button(c).apply {
             text = label; textSize = 11f
+            // 暗底胶囊小按钮（mockup .ctrl）；停止=红字
+            setTextColor(if (danger) Ds.RED else Ds.DARK_TXT)
+            typeface = Typeface.DEFAULT_BOLD
+            background = Ds.round(c, 8, if (danger) 0x33EA6668.toInt() else Ds.DARK_SUB)
+            setPadding(Ds.dp(c, 12), 0, Ds.dp(c, 12), 0)
             setOnClickListener { v -> onClick(v as Button) }
             row.addView(this)
         }
@@ -260,7 +297,7 @@ object NarrativePanel {
             py(if (paused) "request_pause" else "request_resume")
             b.text = if (paused) "继续" else "暂停"
         }
-        btn("停止") { _ -> py("request_stop") }
+        btn("停止", danger = true) { _ -> py("request_stop") }
         btn(if (docked) "浮条" else "停靠") { _ -> if (docked) undock() else dock() }
         btn("收起") { _ -> hide() }
         return row
@@ -274,18 +311,38 @@ object NarrativePanel {
         if ((v.text.split("\n").size) > 4) {
             v.text = v.text.split("\n").takeLast(4).joinToString("\n")
         }
+        v.text = colored(v.text.toString())
     }
 
     private fun addTimeline(line: String) {
         if (timelineLines.size >= 6) timelineLines.removeFirst()
         timelineLines.addLast(line)
-        timeline?.text = timelineLines.joinToString("\n")
+        timeline?.text = colored(timelineLines.joinToString("\n"))
+    }
+
+    /** 日志/时间线逐行染色（mockup .log 语义）：✓ 绿 / → 蓝 / ✗ 红 / 其余白。 */
+    private fun colored(text: String): CharSequence {
+        val sb = SpannableString(text)
+        var idx = 0
+        for (line in text.split("\n")) {
+            if (line.isNotEmpty()) {
+                val color = when (line.first()) {
+                    '✓' -> Ds.GREEN_LOG
+                    '→' -> Ds.ACCENT
+                    '✗' -> Ds.RED
+                    else -> Ds.DARK_TXT
+                }
+                sb.setSpan(ForegroundColorSpan(color), idx, idx + line.length, 0)
+            }
+            idx += line.length + 1
+        }
+        return sb
     }
 
     private fun setAllStatus(s: String) {
         lastStatus = s
-        statusLine?.text = "Hachimi · $s"
-        consoleStatus?.text = "Hachimi 控制台 · $s" +
+        statusLine?.text = "▶ 前台引导 · $s"
+        consoleStatus?.text = "AGENT 控制台 · $s" +
                 (if (docked) " · 分屏模式" else "")
     }
 
@@ -296,5 +353,63 @@ object NarrativePanel {
         } catch (e: Exception) {
             Log.w(TAG, "py $method: ${e.message}")
         }
+    }
+
+    // ---------------- 红框定位指示（mockup .ground，1.2s 呼吸后自消） ----------------
+
+    private fun showGround(nx: Double, ny: Double) {
+        val c = context ?: return
+        main.post {
+            removeGround()
+            if (!canOverlay(c)) return@post
+            val v = GroundView(c, nx, ny)
+            try {
+                val params = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                    PixelFormat.TRANSLUCENT
+                )
+                c.getSystemService(WindowManager::class.java).addView(v, params)
+                frameView = v
+                main.postDelayed({ removeGround() }, 1200)
+            } catch (e: Exception) {
+                Log.w(TAG, "ground add: ${e.message}")
+            }
+        }
+    }
+
+    private fun removeGround() {
+        frameView?.let {
+            try {
+                it.context.getSystemService(WindowManager::class.java).removeView(it)
+            } catch (_: Exception) {}
+        }
+        frameView = null
+    }
+
+    /** 全屏透明窗上的目标框：红色虚线圆角框 + 呼吸透明度（模拟 target 锁定）。 */
+    private class GroundView(c: Context, nx: Double, ny: Double) : View(c) {
+        private val cx = (nx * c.resources.displayMetrics.widthPixels).toFloat()
+        private val cy = (ny * c.resources.displayMetrics.heightPixels).toFloat()
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = Ds.RED
+            strokeWidth = Ds.dp(c, 3).toFloat()
+            pathEffect = DashPathEffect(floatArrayOf(Ds.dp(c, 9).toFloat(), Ds.dp(c, 6).toFloat()), 0f)
+        }
+        private val anim = android.view.animation.AlphaAnimation(0.35f, 1f)
+            .apply { duration = 600; repeatCount = android.view.animation.Animation.INFINITE; repeatMode = android.view.animation.Animation.REVERSE }
+
+        override fun onDraw(canvas: Canvas) {
+            // 框尺寸对齐 mockup .ground（64px/330px 屏宽 ≈ 19%）→ 真机半宽 54dp
+            val half = Ds.dp(context, 54)
+            canvas.drawRoundRect(cx - half, cy - half, cx + half, cy + half,
+                Ds.dp(context, 20).toFloat(), Ds.dp(context, 20).toFloat(), paint)
+        }
+
+        init { startAnimation(anim) }
     }
 }

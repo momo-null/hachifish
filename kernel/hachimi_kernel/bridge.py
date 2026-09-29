@@ -607,6 +607,64 @@ def _strip_r(run_id):
     return run_id[1:] if run_id.startswith("r") else run_id
 
 
+def list_tasks_json(limit=20):
+    """主界面「最近任务」数据面：TaskStore 元数据倒序 + 最近 run 指标。
+    指标取 run.json（finish_run 落盘的 success/steps/brain_calls/起止时间）——
+    TaskStore meta 不回写运行态（研究线口径不动），UI 侧以 run.json 为准；
+    无 run 记录的 task（只建了元数据）state 保持 meta 原值。"""
+    out = []
+    try:
+        from hachimi_kernel.task_store import TaskStore
+        from hachimi_kernel import runtime_paths as P
+        for m in TaskStore.list()[:limit]:
+            tid = m.get("task_id")
+            run = None
+            try:
+                d = P.task_trajectory(tid).parent
+                run_files = sorted(d.glob("*.run.json"))
+                if run_files:
+                    with open(run_files[-1], encoding="utf-8") as f:
+                        run = json.load(f)
+            except Exception:
+                run = None
+            success = (run or {}).get("success")
+            state = m.get("state", "pending")
+            if success is True:
+                state = "done"
+            elif success is False:
+                state = "failed"
+            out.append({
+                "task_id": tid,
+                "objective": m.get("objective", ""),
+                "done_when": m.get("done_when", ""),
+                "state": state,
+                "success": success,
+                "created_at": m.get("created_at", ""),
+                "steps": (run or {}).get("steps", -1),
+                "wall_s": _run_wall_s(run),
+                "brain_calls": (run or {}).get("brain_calls", -1),
+                "runs": m.get("runs") or [],
+            })
+        return json.dumps({"ok": True, "tasks": out}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                           "tasks": out}, ensure_ascii=False)
+
+
+def _run_wall_s(run):
+    """run 起止 ISO 时间差（秒）；解析失败/缺字段返回 -1（UI 显示跳过）。"""
+    if not run:
+        return -1.0
+    s, e = run.get("start_ts"), run.get("end_ts")
+    if not s or not e:
+        return -1.0
+    try:
+        from datetime import datetime
+        return round((datetime.fromisoformat(e) - datetime.fromisoformat(s)).total_seconds(), 1)
+    except Exception:
+        return -1.0
+
+
 # ---------------- 状态面（回环端点数据源） ----------------
 
 def status():

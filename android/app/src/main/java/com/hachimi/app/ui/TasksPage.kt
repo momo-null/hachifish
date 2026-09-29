@@ -1,0 +1,425 @@
+package com.hachimi.app.ui
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
+import android.view.View
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.hachimi.app.BrainConfigStore
+import com.hachimi.app.DebugPanelActivity
+import com.hachimi.app.HachimiAccessibilityService
+import com.hachimi.app.KernelHostService
+import com.hachimi.app.ProjectionHolder
+import com.hachimi.app.MainActivity
+import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * S2 主界面（终态）：appbar 连通 chips + 执行模式分段（前台引导/分屏，真实切换
+ * /task body mode）+ 任务输入卡（一句话即任务 + 可折叠完成判据）+ 运行/结果区
+ * （RunResultView）+ 最近任务（真实历史，bridge.list_tasks_json）。
+ * 执行链路 = Chaquopy 直调（P0 语义不变）；环境未就绪时顶部出引导卡（P0 DoD5）。
+ */
+class TasksPage(private val act: Activity) {
+
+    private val main = Handler(Looper.getMainLooper())
+    private val polling = AtomicBoolean(false)
+
+    private lateinit var objInput: EditText
+    private lateinit var doneInput: EditText
+    private lateinit var doneToggle: TextView
+    private lateinit var segHost: LinearLayout
+    private var seg: Ds.Seg? = null
+    private lateinit var chipsHost: LinearLayout
+    private lateinit var envHost: LinearLayout
+    private lateinit var recentHost: LinearLayout
+    private lateinit var resultHost: LinearLayout
+    private lateinit var startBtn: TextView
+
+    val result = RunResultView(act)
+    private lateinit var page: ScrollView
+
+    val view: View
+        get() {
+            if (!::page.isInitialized) page = build()
+            return page
+        }
+
+    // ---------------- 构建 ----------------
+
+    private fun build(): ScrollView {
+        val pad = Ds.dp(act, 20)
+        val box = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        box.setPadding(pad, Ds.dp(act, 12), pad, Ds.dp(act, 20))
+
+        // appbar：logo + 连通 chips（绿点=已配置）
+        chipsHost = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
+        box.addView(Ds.appBar(act, "Hachimi", listOf(chipsHost)))
+        box.addView(Ds.small(act, "说一句话，把事办完 · v0.1").apply {
+            setPadding(0, 0, 0, Ds.dp(act, 10))
+        })
+
+        // 环境未就绪引导卡（就绪时 GONE——干净 S2；P0 DoD5 状态指示保留于此）
+        envHost = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(envHost)
+
+        // 执行模式分段（真实切换 /task body 的 mode）
+        segHost = LinearLayout(act)
+        seg = Ds.seg(act, listOf("前台引导", "分屏"), runMode) { pickMode(it) }
+            .also { segHost.addView(it.view) }
+        box.addView(segHost, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        box.addView(Ds.small(act, "前台引导：悬浮叙述 + 实机操作；分屏：下半屏 agent 控制台").apply {
+            setPadding(0, Ds.dp(act, 4), 0, Ds.dp(act, 10))
+        })
+
+        // 任务输入卡（mockup：浅蓝描边白卡）
+        val inputCard = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ds.round(act, 14, Color.WHITE, 2, Ds.ACCENT)
+            val p = Ds.dp(act, 14)
+            setPadding(p, p, p, p)
+        }
+        inputCard.addView(Ds.small(act, "目标"))
+        objInput = Ds.field(act, "例如：在便签里创建一条「买牛奶」的提醒", single = false).apply {
+            minLines = 2
+            gravity = Gravity.TOP
+            background = null
+            setPadding(0, Ds.dp(act, 6), 0, 0)
+        }
+        inputCard.addView(objInput)
+
+        // 完成判据（可选，折叠收进输入卡——弱探测语义对用户保持「可不管」）
+        doneToggle = Ds.small(act, "完成判据（可选）▸").apply {
+            setPadding(0, Ds.dp(act, 8), 0, 0)
+            setOnClickListener { toggleDone() }
+        }
+        inputCard.addView(doneToggle)
+        doneInput = Ds.field(act, "留空按引号文本/数字弱探测；填写则要求该文字出现在最终屏幕", single = false)
+            .apply { minLines = 1; visibility = View.GONE }
+        inputCard.addView(doneInput)
+
+        startBtn = Ds.button(act, "▶ 开始执行") { startTask() }
+        inputCard.addView(startBtn, Ds.vp(top = Ds.dp(act, 10)))
+        inputCard.addView(Ds.small(act, "桌面版 /chat 单入口语义：一句话即任务，自动建 task").apply {
+            setPadding(0, Ds.dp(act, 6), 0, 0)
+        })
+        box.addView(inputCard)
+
+        // 运行/结果区（S5）
+        resultHost = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        resultHost.addView(result.view)
+        box.addView(resultHost)
+
+        // 最近任务
+        val recentHead = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        recentHead.addView(Ds.h2(act, "最近任务").apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        recentHead.addView(Ds.small(act, "点按看详情").apply { setPadding(0, 0, 0, 0) })
+        box.addView(recentHead, Ds.vp(top = Ds.dp(act, 12)))
+        recentHost = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(recentHost)
+
+        // 页脚：研究/排障入口
+        box.addView(Ds.small(act, "八原语调试面板（研究/排障）").apply {
+            setPadding(0, Ds.dp(act, 16), 0, 0)
+            setOnClickListener { act.startActivity(Intent(act, DebugPanelActivity::class.java)) }
+        })
+
+        result.onRetry = { result.render(null); refreshRecent() }
+        result.onControl = { onControl(it) }
+        return ScrollView(act).apply { addView(box) }
+    }
+
+    private fun toggleDone() {
+        val show = doneInput.visibility == View.GONE
+        doneInput.visibility = if (show) View.VISIBLE else View.GONE
+        doneToggle.text = if (show) "完成判据（可选）▾" else "完成判据（可选）▸"
+    }
+
+    private fun pickMode(i: Int) {
+        runMode = i
+        seg?.select(i)
+        SettingsPage.onRunModeChanged?.invoke(i)   // 设置页「默认模式」双向同步
+    }
+
+    /** 执行模式持久化（设置页「默认模式」与主界面分段同一份事实）。 */
+    private var runMode: Int
+        get() = act.getSharedPreferences(PREFS, 0).getInt("run_mode", 0)
+        set(v) = act.getSharedPreferences(PREFS, 0).edit().putInt("run_mode", v).apply()
+
+    // ---------------- 环境与刷新 ----------------
+
+    fun onResume() {
+        if (!::page.isInitialized) return
+        seg?.select(runMode)
+        refreshChips()
+        refreshEnv()
+        refreshRecent()
+        refreshLastResult()
+    }
+
+    /**
+     * 回显上次任务结果（S5 语义补全）：不在运行期且页面没在轮询时，拉一次
+     * status()——已结束的 run（done/error）直接渲染结果卡，重开 App 能看到
+     * 上一单结局；phase=idle/无历史则清空结果区。
+     */
+    private fun refreshLastResult() {
+        if (polling.get()) return
+        val bridge = KernelHostService.pyBridgeModule ?: return
+        Thread {
+            try {
+                val s = JSONObject(bridge.callAttr("status_json").toString())
+                main.post {
+                    if (!polling.get() && s.optString("phase") != "running") result.render(s)
+                }
+            } catch (_: Exception) {}
+        }.start()
+    }
+
+    private fun refreshChips() {
+        chipsHost.removeAllViews()
+        val cfg = BrainConfigStore.load(act)
+        chipsHost.addView(Ds.chip(act, "规划模型", cfg != null), Ds.vp(left = Ds.dp(act, 4), w = LinearLayout.LayoutParams.WRAP_CONTENT))
+        chipsHost.addView(Ds.chip(act, "视觉模型", cfg?.visionEnabled == true), Ds.vp(left = Ds.dp(act, 4), w = LinearLayout.LayoutParams.WRAP_CONTENT))
+    }
+
+    /** 未就绪项 → 引导卡（全部就绪则整卡 GONE；形态收敛自 P0 环境卡终态）。 */
+    private fun refreshEnv() {
+        envHost.removeAllViews()
+        val rows = mutableListOf<Triple<String, Boolean, (() -> Unit)?>>()
+        val cfg = BrainConfigStore.load(act)
+        rows.add(Triple("无障碍通道", HachimiAccessibilityService.instance != null) {
+            act.startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        })
+        rows.add(Triple("悬浮窗权限", android.provider.Settings.canDrawOverlays(act)) {
+            act.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:${act.packageName}")))
+        })
+        rows.add(Triple("模型端点(BYOK)", cfg != null) { openSettings() })
+        if (cfg?.visionEnabled == true) {
+            rows.add(Triple("屏幕观察(录屏)", ProjectionHolder.isRunning) {
+                (act as? MainActivity)?.requestProjection()
+            })
+        }
+        rows.add(Triple("内核", KernelHostService.pyBridgeModule != null, null))
+        val unready = rows.filter { !it.second }
+        if (unready.isEmpty()) {
+            envHost.visibility = View.GONE
+            return
+        }
+        envHost.visibility = View.VISIBLE
+        val card = Ds.card(act)
+        card.addView(Ds.small(act, "环境未就绪（点击项去开启）：").apply { setPadding(0, 0, 0, Ds.dp(act, 4)) })
+        unready.forEach { (label, _, action) ->
+            card.addView(TextView(act).apply {
+                text = "○ $label${if (action != null) " · 去开启" else "（启动中，稍候自动复查）"}"
+                textSize = 13f; setTextColor(Ds.RED_TXT)
+                setPadding(0, Ds.dp(act, 4), 0, Ds.dp(act, 4))
+                if (action != null) setOnClickListener { action() }
+            })
+        }
+        envHost.addView(card)
+        envHost.addView(View(act).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, Ds.dp(act, 10))
+        })
+        if (KernelHostService.pyBridgeModule == null) {
+            main.postDelayed({ refreshEnv() }, 2000)
+        }
+    }
+
+    private var recentRetries = 0
+
+    private fun refreshRecent() {
+        // 内核冷启动（约 10s）期间 bridge 未挂：低频重试直到拿到首份数据
+        val bridge = KernelHostService.pyBridgeModule
+        if (bridge == null) {
+            if (recentRetries++ < 5) main.postDelayed({ refreshRecent() }, 2000)
+            return
+        }
+        recentRetries = 0
+        Thread {
+            try {
+                val r = JSONObject(bridge.callAttr("list_tasks_json", 8).toString())
+                val tasks = r.optJSONArray("tasks")
+                main.post { renderRecent(tasks) }
+            } catch (_: Exception) {}
+        }.start()
+    }
+
+    private fun renderRecent(tasks: org.json.JSONArray?) {
+        recentHost.removeAllViews()
+        if (tasks == null || tasks.length() == 0) {
+            recentHost.addView(Ds.emptyState(act, "▦", "还没有任务",
+                "在上面输入一句话开始第一个任务"))
+            return
+        }
+        val card = Ds.card(act)
+        for (i in 0 until tasks.length()) {
+            val t = tasks.optJSONObject(i) ?: continue
+            if (i > 0) card.addView(Ds.divider(act))
+            val ok = t.optBoolean("success")
+            val state = t.optString("state")
+            val glyph = when {
+                ok -> "✓"
+                state == "failed" -> "✗"
+                state == "pending" || state == "running" -> "⏸"
+                else -> "■"
+            }
+            val color = when {
+                ok -> Ds.GREEN_TXT
+                state == "failed" -> Ds.RED_TXT
+                state == "pending" || state == "running" -> Ds.ORANGE_TXT
+                else -> Ds.TEXT_2
+            }
+            val row = LinearLayout(act).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, Ds.dp(act, 8), 0, Ds.dp(act, 8))
+                setOnClickListener { showTaskDetail(t) }
+            }
+            row.addView(TextView(act).apply {
+                text = glyph; textSize = 14f; setTextColor(color)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 0, Ds.dp(act, 8), 0)
+            })
+            val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(act).apply {
+                text = t.optString("objective").ifEmpty { "(空目标)" }
+                textSize = 13.5f; setTextColor(Ds.TEXT)
+                maxLines = 1
+            })
+            val steps = t.optInt("steps", -1)
+            val wall = t.optDouble("wall_s", -1.0)
+            val meta = mutableListOf<String>()
+            if (steps >= 0) meta.add("$steps 步")
+            if (wall >= 0) meta.add("${wall.toInt()}s")
+            meta.add((t.optString("created_at").take(10)))
+            col.addView(Ds.small(act, meta.joinToString(" · ")).apply { setPadding(0, Ds.dp(act, 1), 0, 0) })
+            row.addView(col.apply {
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            card.addView(row)
+        }
+        recentHost.addView(card)
+    }
+
+    private fun showTaskDetail(t: JSONObject) {
+        AlertDialog.Builder(act)
+            .setTitle("任务详情")
+            .setMessage(
+                "目标：${t.optString("objective")}\n\n" +
+                        "判据：${t.optString("done_when").ifEmpty { "（弱探测）" }}\n" +
+                        "状态：${t.optString("state")} · 成功=${t.optBoolean("success")}\n" +
+                        "task_id：${t.optString("task_id")}\n" +
+                        "runs：${t.optJSONArray("runs")?.toString()?.ifEmpty { "-" }}")
+            .setPositiveButton("关闭", null)
+            .show()
+    }
+
+    private fun openSettings() {
+        act.startActivity(Intent(act, com.hachimi.app.SettingsActivity::class.java))
+    }
+
+    // ---------------- 任务控制（Chaquopy 直调，P0 语义原样迁移） ----------------
+
+    private fun startTask() {
+        val objective = objInput.text.toString().trim()
+        if (objective.isEmpty()) {
+            result.render(null)
+            toast("请先输入目标，例如：在便签里创建一条「买牛奶」的提醒")
+            return
+        }
+        val bridge = KernelHostService.pyBridgeModule
+        if (bridge == null) {
+            toast("内核启动中（首次约需 10 秒），稍后再试")
+            return
+        }
+        startBtn.isEnabled = false
+        Thread {
+            try {
+                // /task 路径的 Keystore → set_brain 注入段在直调路径复刻（约束一）
+                val cfg = BrainConfigStore.load(act)
+                if (cfg == null) {
+                    main.post { toast("未配置模型端点（BYOK）：请先到 设置 → 通道（BYOK）填写并保存") }
+                    return@Thread
+                }
+                bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
+                if (cfg.visionEnabled) {
+                    bridge.callAttr("set_vision", cfg.visionBaseUrl, cfg.visionApiKey, cfg.visionModel)
+                } else {
+                    bridge.callAttr("set_vision", "", "", "")
+                }
+                // 悬浮窗 addView 必须在主线程（面板已收起时 show 会真正重建窗口）
+                main.post { com.hachimi.app.NarrativePanel.show(act) }
+                val body = JSONObject()
+                    .put("objective", objective)
+                    .put("done_when", doneInput.text.toString().trim())
+                if (runMode == 1) body.put("mode", "split")
+                val r = JSONObject(bridge.callAttr("start_task_json", body.toString()).toString())
+                main.post {
+                    if (r.optBoolean("ok")) {
+                        toast("已启动 ${r.optString("run_id").take(14)}")
+                        beginPolling()
+                    } else {
+                        toast(MainActivity.readableErrorStatic(r.optString("error")))
+                    }
+                    startBtn.isEnabled = true
+                }
+            } catch (e: Exception) {
+                main.post {
+                    toast("启动失败：${e.javaClass.simpleName}: ${e.message}")
+                    startBtn.isEnabled = true
+                }
+            }
+        }.start()
+    }
+
+    private fun onControl(action: String) {
+        Thread {
+            try {
+                when (action) {
+                    "pause" -> KernelHostService.pyBridgeModule?.callAttr("request_pause")
+                    "resume" -> KernelHostService.pyBridgeModule?.callAttr("request_resume")
+                    "stop" -> KernelHostService.pyBridgeModule?.callAttr("request_stop")
+                }
+            } catch (_: Exception) {}
+        }.start()
+    }
+
+    /** 运行期轮询 bridge.status()：500ms → RunResultView 渲染（主界面实时状态，P0 DoD1）。 */
+    fun beginPolling() {
+        if (!polling.compareAndSet(false, true)) return
+        Thread {
+            while (polling.get()) {
+                val bridge = KernelHostService.pyBridgeModule ?: break
+                try {
+                    val s = JSONObject(bridge.callAttr("status_json").toString())
+                    main.post { result.render(s) }
+                    if (s.optString("phase") != "running") break
+                } catch (_: Exception) {
+                    break
+                }
+                Thread.sleep(500)
+            }
+            polling.set(false)
+        }.start()
+    }
+
+    private fun toast(msg: String) {
+        android.widget.Toast.makeText(act, msg, android.widget.Toast.LENGTH_LONG).show()
+    }
+
+    companion object {
+        const val PREFS = "hachimi_ui"
+    }
+}

@@ -40,7 +40,7 @@ def main():
         time.sleep(3)
 
     r = ast.literal_eval(req("/task", {"objective": OBJECTIVE, "done_when": "",
-                                       "max_steps": 24}))
+                                       "max_steps": 32}))
     print("[smoke] /task ->", r)
     if not r.get("ok"):
         print("[smoke] task rejected:", r.get("error"))

@@ -20,7 +20,7 @@
     <application
         android:label="@string/app_name"
         android:icon="@android:drawable/sym_def_app_icon"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/Hachimi.Light"
         android:allowBackup="false">
 
         <activity android:name=".MainActivity" android:exported="true">
@@ -35,6 +35,12 @@
 
         <!-- 八原语调试面板（原 MainActivity 调试形态，研究/排障用） -->
         <activity android:name=".DebugPanelActivity" android:exported="false" />
+
+        <!-- S1 首次初始化四步引导（权限引导仅首次出现） -->
+        <activity android:name=".OnboardingActivity" android:exported="false" />
+
+        <!-- S8 实验模式骨架（设置→实验→版本号连点 5 次进入） -->
+        <activity android:name=".ExperimentActivity" android:exported="false" />
 
         <!-- Canvas 盲区测试页（P1 DoD3 fixture）：自绘目标零语义，仅组件显式可达 -->
         <activity android:name=".CanvasProbeActivity" android:exported="true"

@@ -109,17 +109,18 @@ class KernelHostService : Service() {
             // 叙事面板：Python 步进事件 → 悬浮层（前台引导模式 UI 组成，架构 §6）
             bridgeMod.callAttr("register_narrative", NarrativePanel)
             pyBridgeModule = bridgeMod
-            NarrativePanel.show(this)
+            // P1.5：attach 不再 show——面板只在 run 开始时出现（直调/回环 /task 各自
+            // show），否则开机即挂浮条遮挡引导页/主界面
             startLoopback(py)
         } catch (e: Exception) {
             android.util.Log.e("HachimiKernel", "kernel attach failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
-    /** P1：视觉开关注入（与规划共用端点；关=传空串，bridge 关闭兜底，行为退 P0）。 */
+    /** P1 视觉注入（P1.5 v4：视觉独立端点；未配置=传空串，bridge 关闭兜底，退 P0）。 */
     private fun injectVision(bridge: com.chaquo.python.PyObject, cfg: BrainConfigStore.BrainConfig) {
         if (cfg.visionEnabled) {
-            bridge.callAttr("set_vision", cfg.baseUrl, cfg.apiKey, cfg.model)
+            bridge.callAttr("set_vision", cfg.visionBaseUrl, cfg.visionApiKey, cfg.visionModel)
         } else {
             bridge.callAttr("set_vision", "", "", "")
         }

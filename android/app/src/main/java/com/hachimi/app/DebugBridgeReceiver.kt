@@ -85,10 +85,14 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                     // BYOK 配置（debug 通道限定）：key 进 Keystore 加密文件，明文不落盘。
                     // vision_enabled 可选（--ez/--es "true"）：显式设定视觉开关（P1）；
                     // 不带此 extra 时沿用已存开关状态（3 参 save 的语义）。
-                    val ok = if (args.has("vision_enabled")) {
+                    // vision_enabled=true → 视觉字段沿用本次下发的规划端点（共用形态）；
+                    // 视觉独立端点走产品设置页（v4 双端点）
+                    val ok = if (args.optBoolean("vision_enabled")) {
+                        val u = args.optString("base_url")
+                        val k = args.optString("api_key")
+                        val m = args.optString("model")
                         BrainConfigStore.save(context, BrainConfigStore.BrainConfig(
-                            args.optString("base_url"), args.optString("api_key"),
-                            args.optString("model"), args.optBoolean("vision_enabled")))
+                            u, k, m, visionBaseUrl = u, visionApiKey = k, visionModel = m))
                     } else {
                         BrainConfigStore.save(
                             context,

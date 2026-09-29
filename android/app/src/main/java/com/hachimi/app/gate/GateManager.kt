@@ -20,10 +20,17 @@ object GateManager {
 
     data class Verdict(val granted: Boolean, val source: String, val choice: String)
 
-    /** 敏感操作判定：命中白名单直接放行；否则弹 GateUI 阻塞等待用户选择。 */
+    /** 敏感操作判定：命中白名单直接放行；否则弹 GateUI 阻塞等待用户选择。
+     *  级别（设置→执行，P1.5）：standard=type_text+launch_app 全确认；
+     *  relaxed=launch_app 放行（仅输入确认）。 */
     fun enforce(context: Context, pkg: String, op: String, preview: String = ""): Verdict {
         if (isWhitelisted(context, pkg, op)) {
             return Verdict(true, "whitelist", "allow_always")
+        }
+        val level = context.getSharedPreferences("hachimi_ui", Context.MODE_PRIVATE)
+            .getString("gate_level", "standard")
+        if (level == "relaxed" && op == "launch_app") {
+            return Verdict(true, "level", "relaxed")
         }
         val id = seq.incrementAndGet()
         val latch = CountDownLatch(1)

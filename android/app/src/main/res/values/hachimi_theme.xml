@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P1.5 UI 终态：单浅色主题（mockup 无 dark mode）；窗口底色=设计系统 PAGE。
+     仅此一个主题资源文件——布局仍全代码构建（零 XML 布局惯例不变）。 -->
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <color name="hachimi_page">#F4F3EE</color>
+
+    <style name="Hachimi.Light" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/hachimi_page</item>
+        <item name="android:statusBarColor">@color/hachimi_page</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:colorPrimary">#235F7E</item>
+        <item name="android:colorAccent">#235F7E</item>
+    </style>
+</resources>
