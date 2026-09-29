@@ -36,6 +36,13 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                          "base_url", "api_key", "model")) {
             intent.getStringExtra(k)?.let { args.put(k, it) }
         }
+        // vision_enabled 接受 --ez（布尔）或 --es "true/false"（独立 extra，勿并入字符串白名单）
+        if (intent.hasExtra("vision_enabled")) {
+            val s = intent.getStringExtra("vision_enabled")
+            val v = if (s != null) s.equals("true", ignoreCase = true)
+                    else intent.getBooleanExtra("vision_enabled", false)
+            args.put("vision_enabled", v)
+        }
         if (intent.hasExtra("x")) args.put("x", intent.getStringExtra("x")?.toDoubleOrNull() ?: intent.getDoubleExtra("x", 0.5))
         if (intent.hasExtra("y")) args.put("y", intent.getStringExtra("y")?.toDoubleOrNull() ?: intent.getDoubleExtra("y", 0.9))
         intent.getStringExtra("args")?.let { raw ->
@@ -62,6 +69,8 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                 "launch_app" -> svc.launchApp(args.optString("package"))
                 "press" -> svc.press(args.optString("key", "back"))
                 "projection_frame" -> ProjectionHolder.captureFrameJson(context)
+                "grab_frame" -> ProjectionHolder.grabFrameJson(
+                    args.optInt("max_width", 768), args.optInt("quality", 60))
                 "gate_show" -> {
                     context.startActivity(
                         Intent(context, GateActivity::class.java)
@@ -73,14 +82,23 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                     JSONObject().put("ok", true).put("note", "gate shown, 用户选择后写 gate_result.json")
                 }
                 "set_brain" -> {
-                    // BYOK 配置（debug 通道限定）：key 进 Keystore 加密文件，明文不落盘
-                    val ok = BrainConfigStore.save(
-                        context,
-                        args.optString("base_url"),
-                        args.optString("api_key"),
-                        args.optString("model")
-                    )
-                    JSONObject().put("ok", ok).put("note", "brain config stored (Keystore-encrypted)")
+                    // BYOK 配置（debug 通道限定）：key 进 Keystore 加密文件，明文不落盘。
+                    // vision_enabled 可选（--ez/--es "true"）：显式设定视觉开关（P1）；
+                    // 不带此 extra 时沿用已存开关状态（3 参 save 的语义）。
+                    val ok = if (args.has("vision_enabled")) {
+                        BrainConfigStore.save(context, BrainConfigStore.BrainConfig(
+                            args.optString("base_url"), args.optString("api_key"),
+                            args.optString("model"), args.optBoolean("vision_enabled")))
+                    } else {
+                        BrainConfigStore.save(
+                            context,
+                            args.optString("base_url"),
+                            args.optString("api_key"),
+                            args.optString("model")
+                        )
+                    }
+                    JSONObject().put("ok", ok)
+                        .put("note", "brain config stored (Keystore-encrypted)")
                 }
                 "gate_clear" -> {
                     // M4' 状态重置：清空授权白名单（实验组间口径一致）

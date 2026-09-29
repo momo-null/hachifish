@@ -21,6 +21,8 @@ class PrimitiveDispatcher {
             "gesture" -> svc.gesture(args.optJSONArray("points") ?: JSONArray(),
                 args.optLong("duration_ms", 300L))
             "screenshot" -> ProjectionHolder.captureFrameJson(svc)
+            "grab_frame" -> ProjectionHolder.grabFrameJson(
+                args.optInt("max_width", 768), args.optInt("quality", 60))
             "launch_app" -> svc.launchApp(args.optString("package"))
             "press" -> svc.press(args.optString("key", "back"))
             else -> JSONObject().put("ok", false).put("error", "unknown primitive: $name")

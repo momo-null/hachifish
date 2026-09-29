@@ -116,6 +116,15 @@ class KernelHostService : Service() {
         }
     }
 
+    /** P1：视觉开关注入（与规划共用端点；关=传空串，bridge 关闭兜底，行为退 P0）。 */
+    private fun injectVision(bridge: com.chaquo.python.PyObject, cfg: BrainConfigStore.BrainConfig) {
+        if (cfg.visionEnabled) {
+            bridge.callAttr("set_vision", cfg.baseUrl, cfg.apiKey, cfg.model)
+        } else {
+            bridge.callAttr("set_vision", "", "", "")
+        }
+    }
+
     private fun startLoopback(py: com.chaquo.python.Python) {
         if (loopback?.isAlive == true) return
         loopback = LoopbackServer(8071) { method, path, body ->
@@ -131,6 +140,7 @@ class KernelHostService : Service() {
                     val cfg = BrainConfigStore.load(this)
                     if (cfg != null) {
                         bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
+                        injectVision(bridge, cfg)
                     }
                     NarrativePanel.show(this)
                     200 to bridge.callAttr("start_task", body).toString()

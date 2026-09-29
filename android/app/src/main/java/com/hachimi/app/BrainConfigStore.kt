@@ -9,11 +9,12 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import org.json.JSONObject
 
 /**
- * BYOK 大脑配置存储（红线 R8）：base_url/model 明文 + api_key 经 Android Keystore
- * AES/GCM 加密后落 App 私有文件（brain_config.enc），明文 key 不落任何存储。
- * 读取仅限本应用（内核 /task 启动时注入）。
+ * BYOK 配置存储 v3（红线 R8）：一组端点（规划+视觉共用，模型需兼具两种能力时开
+ * 视觉开关）经 Android Keystore AES/GCM 加密后落 App 私有文件（brain_config.enc）。
+ * v1/v2（三字段 regex / 六字段 JSON）读入兼容：JSONObject + opt 缺省，无需迁移。
  */
 object BrainConfigStore {
 
@@ -21,11 +22,25 @@ object BrainConfigStore {
     private const val ALIAS = "hachimi_brain_key"
     private const val TAG = "HachimiBrain"
 
-    data class BrainConfig(val baseUrl: String, val apiKey: String, val model: String)
+    data class BrainConfig(
+        val baseUrl: String,
+        val apiKey: String,
+        val model: String,
+        val visionEnabled: Boolean = false
+    )
 
-    fun save(context: Context, baseUrl: String, apiKey: String, model: String): Boolean {
+    /** 兼容 v1 调用方（DebugBridgeReceiver set_brain）：保留已有视觉开关状态。 */
+    fun save(context: Context, baseUrl: String, apiKey: String, model: String): Boolean =
+        save(context, BrainConfig(baseUrl, apiKey, model, load(context)?.visionEnabled ?: false))
+
+    fun save(context: Context, cfg: BrainConfig): Boolean {
         return try {
-            val plain = """{"base_url":"$baseUrl","api_key":"$apiKey","model":"$model"}"""
+            val plain = JSONObject()
+                .put("base_url", cfg.baseUrl)
+                .put("api_key", cfg.apiKey)
+                .put("model", cfg.model)
+                .put("vision_enabled", cfg.visionEnabled)
+                .toString()
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, key(context))
             val iv = cipher.iv
@@ -35,7 +50,8 @@ object BrainConfigStore {
                 it.write(iv)
                 it.write(ct)
             }
-            Log.i(TAG, "brain config saved (model=$model, key encrypted)")
+            Log.i(TAG, "brain config saved (model=${cfg.model}, " +
+                    "vision=${cfg.visionEnabled}, key encrypted)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "save failed: ${e.message}")
@@ -56,14 +72,13 @@ object BrainConfigStore {
             val ct = all.copyOfRange(1 + ivLen, all.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, key(context), GCMParameterSpec(128, iv))
-            val plain = String(cipher.doFinal(ct), Charsets.UTF_8)
-            val re = Regex("\"base_url\":\"([^\"]*)\".*\"api_key\":\"([^\"]*)\".*\"model\":\"([^\"]*)\"")
-            val m = re.find(plain)
-            if (m == null) {
-                Log.w(TAG, "load: decrypted but pattern mismatch (${plain.length} chars)")
-                return null
-            }
-            BrainConfig(m.groupValues[1], m.groupValues[2], m.groupValues[3])
+            val o = JSONObject(String(cipher.doFinal(ct), Charsets.UTF_8))
+            BrainConfig(
+                baseUrl = o.optString("base_url"),
+                apiKey = o.optString("api_key"),
+                model = o.optString("model"),
+                visionEnabled = o.optBoolean("vision_enabled")
+            )
         } catch (e: Exception) {
             Log.e(TAG, "load failed: ${e.message}")
             null

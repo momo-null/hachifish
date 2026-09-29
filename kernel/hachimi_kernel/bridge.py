@@ -83,7 +83,64 @@ def _make_tools():
         return {"ok": True, "waited": seconds}
 
     tools["wait"] = {"description": "等待界面加载", "call": _wait}
+
+    # P1 视觉兜底：look 工具（显式问屏）+ observe 全盲自动兜底（树为空/失败时）。
+    # 视觉未配置（BYOK 不填视觉端点）时两者结构化降级，行为退回 P0（DoD4）。
+    tools["look"] = {"description": LOOK_SPEC["description"],
+                     "parameters": LOOK_SPEC["parameters"],
+                     "call": _look}
+
+    _plain_observe = tools["observe"]["call"]
+
+    def _observe(args):
+        r = _plain_observe(args or {})
+        tree = r.get("tree") or [] if isinstance(r, dict) else []
+        if (not r.get("ok") or not tree) and _vision_cfg and _vision_cfg.get("base_url"):
+            v = _look({})
+            if v.get("ok"):
+                r = dict(r)
+                r["ok"] = True
+                r["visual"] = v.get("description", "")
+                r["vision_fallback"] = True
+        return r
+
+    tools["observe"]["call"] = _observe
     return tools
+
+
+# look 的工具面描述（与 TOOL_SPECS 分离：look 由内核注入，非 Kotlin 原语）
+LOOK_SPEC = {
+    "name": "look",
+    "description": "截图并询问视觉模型，返回当前屏幕的画面描述（UI 树看不清的自绘界面/"
+                   "无控件 id 时用；正常情况优先 observe）",
+    "parameters": {"type": "object",
+                   "properties": {"question": {"type": "string",
+                    "description": "想从画面确认什么，不传则为通用描述"}},
+                   },
+}
+
+
+def _look(args):
+    """grab_frame 原语取帧 → 视觉模型 → 画面描述。视觉未配置返回结构化错误（不抛穿）。"""
+    if not _vision_cfg or not _vision_cfg.get("base_url"):
+        return {"ok": False, "error": "vision not configured (视觉模型未配置或已关闭)"}
+    if _bridge is None:
+        return {"ok": False, "error": "bridge not registered"}
+    fr = json.loads(_bridge.call("grab_frame", "{}"))
+    if not fr.get("ok"):
+        return {"ok": False, "error": "grab_frame: %s" % fr.get("error", "?")}
+    from hachimi_kernel.vision_client import VisionClient
+    client = VisionClient(_vision_cfg["base_url"], _vision_cfg.get("api_key", ""),
+                          _vision_cfg.get("model", ""))
+    q = ((args or {}).get("question") or
+         "描述当前屏幕：主要界面内容、可见文本、可交互控件（按钮/输入框/列表项）及其大致"
+         "位置（上/下/左/右/中）。简明扼要，10 句以内。")
+    out = client.chat_vision(q, fr["jpeg_b64"])
+    if out.get("ok"):
+        return {"ok": True, "description": out.get("text", ""),
+                "grab_ms": fr.get("ms"), "frame_age_ms": fr.get("frame_age_ms"),
+                "vision_ms": out.get("latency_ms")}
+    return out
 
 
 def _probe_terms(objective):
@@ -170,6 +227,17 @@ def set_brain(base_url, api_key=None, model=None):
     return {"ok": True}
 
 
+_vision_cfg = None   # P1 视觉兜底端点；None/空 base_url = 关闭（行为退 P0，DoD4）
+
+
+def set_vision(base_url, api_key=None, model=None):
+    """Kotlin 注入视觉模型配置（可选；base_url 为空即关闭视觉兜底）。"""
+    global _vision_cfg
+    _vision_cfg = ({"base_url": base_url, "api_key": api_key, "model": model}
+                   if base_url else None)
+    return {"ok": True, "vision_enabled": _vision_cfg is not None}
+
+
 def test_brain(base_url, api_key=None, model=None):
     """设置页「测试连通」（P0 DoD3/4）：走 BrainClient 真实链路发一个最小请求，
     与正式任务同一 URL 拼接/鉴权/thinking 语义——通过即任务链路可用。"""
@@ -183,6 +251,24 @@ def test_brain(base_url, api_key=None, model=None):
                 "reply": (reply.get("content") or "")[:80]}
     except BrainError as e:
         return {"ok": False, "latency_ms": latency(), "error": str(e)[:300]}
+    except Exception as e:
+        return {"ok": False, "latency_ms": latency(),
+                "error": ("%s: %s" % (type(e).__name__, e))[:300]}
+
+
+def test_vision(base_url, api_key=None, model=None, jpeg_b64=None):
+    """设置页「测试视觉模型」（P1）：真实发一张图（Kotlin 生成纯色 JPEG）问主色。
+    视觉链路（data URL 载荷）真机可用性以 ok 为准；回复文本回显给用户自行判读。"""
+    t0 = time.time()
+    latency = lambda: round((time.time() - t0) * 1000)
+    if not jpeg_b64:
+        return {"ok": False, "latency_ms": 0, "error": "no test image"}
+    try:
+        from hachimi_kernel.vision_client import VisionClient
+        client = VisionClient(base_url, api_key or "", model or "", timeout=30)
+        out = client.chat_vision("这张图片的主色是什么？用一个中文颜色词回答。", jpeg_b64)
+        out["latency_ms"] = latency()
+        return out
     except Exception as e:
         return {"ok": False, "latency_ms": latency(),
                 "error": ("%s: %s" % (type(e).__name__, e))[:300]}
@@ -247,6 +333,10 @@ def status_json():
 
 def test_brain_json(base_url, api_key=None, model=None):
     return json.dumps(test_brain(base_url, api_key, model), ensure_ascii=False)
+
+
+def test_vision_json(base_url, api_key=None, model=None, jpeg_b64=None):
+    return json.dumps(test_vision(base_url, api_key, model, jpeg_b64), ensure_ascii=False)
 
 
 def request_pause():

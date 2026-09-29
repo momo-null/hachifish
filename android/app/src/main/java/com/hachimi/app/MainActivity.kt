@@ -169,6 +169,13 @@ class MainActivity : Activity() {
         row("模型端点(BYOK)", cfg != null, cfg?.model ?: "未配置") {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        // P1：视觉兜底依赖录屏取帧；视觉能力开启时才显示这一行
+        if (cfg?.visionEnabled == true) {
+            row("屏幕观察(录屏)", ProjectionHolder.isRunning,
+                "运行中 · ${if (ProjectionHolder.hasFrame) "有帧" else "待帧"}") {
+                requestProjection()
+            }
+        }
         row("内核", KernelHostService.pyBridgeModule != null, "就绪", null)
 
         // 内核冷启动需数秒：未就绪时低频重查，直到 attach 完成
@@ -202,6 +209,12 @@ class MainActivity : Activity() {
                     return@Thread
                 }
                 bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
+                // P1：视觉开关（与规划共用端点；关=传空，行为退 P0）
+                if (cfg.visionEnabled) {
+                    bridge.callAttr("set_vision", cfg.baseUrl, cfg.apiKey, cfg.model)
+                } else {
+                    bridge.callAttr("set_vision", "", "", "")
+                }
                 // 悬浮窗 addView 必须在主线程（面板已收起时 show 会真正重建窗口）
                 runOnUiThread { NarrativePanel.show(this@MainActivity) }
                 val body = JSONObject()
@@ -349,6 +362,20 @@ class MainActivity : Activity() {
         else -> raw
     }
 
+    /** P1：录屏授权（视觉兜底的取帧前置；授权结果交给前台服务启动观察通道）。 */
+    private fun requestProjection() {
+        val pm = getSystemService(MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+        startActivityForResult(pm.createScreenCaptureIntent(), REQ_PROJECTION)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PROJECTION && resultCode == RESULT_OK && data != null) {
+            KernelHostService.startProjection(this, resultCode, data)
+            main.postDelayed({ refreshEnv() }, 800)
+        }
+    }
+
     private fun ui(block: () -> Unit) {
         if (isDestroyed || isFinishing) return
         runOnUiThread(block)
@@ -366,5 +393,9 @@ class MainActivity : Activity() {
 
     private fun spacer(h: Int): View = View(this).apply {
         layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h)
+    }
+
+    companion object {
+        private const val REQ_PROJECTION = 1002
     }
 }

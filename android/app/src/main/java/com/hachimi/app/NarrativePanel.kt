@@ -32,6 +32,7 @@ object NarrativePanel {
     private var barView: LinearLayout? = null
     private var docked = false
     private var paused = false
+    private var lastStatus = "idle"   // 跨 attach 保留：停靠/浮条切换后回放（start 事件先于 dock 到达时 console 否则停留 idle）
 
     // 浮条视图引用
     private var statusLine: TextView? = null
@@ -52,9 +53,10 @@ object NarrativePanel {
                 val e = JSONObject(json)
                 when (e.optString("event")) {
                     "start" -> {
+                        lastStatus = "run " + e.optString("run_id").take(14)
                         append("▶ 目标: " + e.optString("objective").take(40))
                         addTimeline("▶ " + e.optString("objective").take(36))
-                        setAllStatus("run " + e.optString("run_id").take(14))
+                        setAllStatus(lastStatus)
                     }
                     "mode" -> if (e.optBoolean("docked")) dock() else undock()
                     "step" -> {
@@ -98,33 +100,39 @@ object NarrativePanel {
     @Synchronized
     fun show(context: Context) {
         this.context = context.applicationContext
-        if (contentView != null) return
-        if (!canOverlay(context)) {
-            Log.w(TAG, "overlay permission missing (adb appops SYSTEM_ALERT_WINDOW)")
-            return
+        // 自投递主线程：调用方可能在任意线程（loopback HTTP / Python 桥线程），
+        // WindowManager.addView 需要带 Looper 的线程——在调用线程直接 add 会
+        // 留下「已赋值未挂载」的脏状态（2026-09-29 实录）
+        main.post {
+            if (contentView == null && canOverlay(this.context!!)) {
+                this.context?.let { attach(it, docked) }
+            }
         }
-        this.context?.let { attach(it, docked) }
     }
 
     @Synchronized
     fun dock() {
         docked = true
         val c = context ?: return
-        if (contentView != null) detach() else if (!canOverlay(c)) return
-        attach(c, true)
+        main.post {
+            if (contentView != null) detach()
+            if (canOverlay(c)) attach(c, true)
+        }
     }
 
     @Synchronized
     fun undock() {
         docked = false
         val c = context ?: return
-        if (contentView != null) detach() else if (!canOverlay(c)) return
-        attach(c, false)
+        main.post {
+            if (contentView != null) detach()
+            if (canOverlay(c)) attach(c, false)
+        }
     }
 
     @Synchronized
     fun hide() {
-        detach()
+        main.post { detach() }
     }
 
     /** run 收尾自动收起（2026-09-27 实测：残留 overlay 按钮条拦截目标 App 底部
@@ -202,6 +210,7 @@ object NarrativePanel {
                 gravity = if (dock) Gravity.BOTTOM else Gravity.TOP,
                 yOff = 0)
         }
+        setAllStatus(lastStatus)
         Log.i(TAG, if (dock) "console docked (split mode, touch-through)" else "panel shown (compact)")
     }
 
@@ -274,6 +283,7 @@ object NarrativePanel {
     }
 
     private fun setAllStatus(s: String) {
+        lastStatus = s
         statusLine?.text = "Hachimi · $s"
         consoleStatus?.text = "Hachimi 控制台 · $s" +
                 (if (docked) " · 分屏模式" else "")
