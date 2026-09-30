@@ -44,6 +44,10 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private var phase = ChatPhase.IDLE
     private var sending = false
     private var lastObjective = ""
+    /** 当前会话 task_id（K1a：start 事件捕获；后续轮同会话续发，闲聊/任务同源）。 */
+    private var currentTaskId: String? = null
+    /** 本轮是否已让位到桌面（首个 tool 步才让位——闲聊不跳桌面，K4）。 */
+    private var yieldedHome = false
 
     private val role = RoleStore.read(act)
 
@@ -197,6 +201,23 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     // ---------------- 事件消费（K4 转发器） ----------------
 
     override fun onNarrative(type: String, fields: Map<String, Any?>) {
+        // K1a：start 事件捕获会话 task_id（后续轮同会话续发）
+        if (type == "start") {
+            (fields["task_id"] as? String)?.takeIf { it.isNotBlank() }?.let {
+                currentTaskId = it
+            }
+        }
+        // K4：首个 tool 步才让位到桌面 + 弹浮窗（闲聊全程留在对话页）
+        if (type == "step" && !yieldedHome) {
+            yieldedHome = true
+            main.post {
+                NarrativePanel.show(act)
+                act.startActivity(Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+            }
+        }
         val item = ChatMapper.item(type, fields)
         val newPhase = ChatMapper.phase(type, fields)
         // 终态恢复输入；控制钮只在干活态出现
@@ -246,6 +267,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         input.isEnabled = false
         input.setText("")
         lastObjective = objective
+        yieldedHome = false
         items.add(ChatItem.UserMsg(objective))
         items.add(ChatItem.Thinking)
         phase = ChatPhase.THINKING
@@ -259,19 +281,15 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 } else {
                     bridge.callAttr("set_vision", "", "", "")
                 }
-                main.post { NarrativePanel.show(act) }   // P2 改为首个 step 才 show
+                // K1a 统一入口：message + 当前会话 task_id（首条不带，kernel 自动建；
+                // start 事件回传 task_id 续存）。闲聊/任务由大脑自决（K1b），
+                // HOME 让位与浮窗 show 挪到首个 step 事件（onNarrative，K4）。
                 val body = JSONObject()
-                    .put("objective", objective)
+                    .put("message", objective)
                     .put("done_when", "")
                     .put("max_steps", SettingsPage.maxSteps(act))
                     .put("wall_clock_s", SettingsPage.wallClockS(SettingsPage.maxSteps(act)))
-                // 让位：agent 从桌面开始（与 TasksPage 同语义）
-                main.post {
-                    act.startActivity(Intent(Intent.ACTION_MAIN).apply {
-                        addCategory(Intent.CATEGORY_HOME)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    })
-                }
+                currentTaskId?.let { body.put("task_id", it) }
                 val r = JSONObject(bridge.callAttr("start_task_json", body.toString()).toString())
                 if (!r.optBoolean("ok")) {
                     main.post {

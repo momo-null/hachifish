@@ -402,6 +402,49 @@ def _group_constraints(body, objective):
 _frozen_run = set()
 
 
+# ---- K1a 统一入口：会话历史（ProjectStore session jsonl，桌面 P2.2 同款） ----
+
+def _session_history(task_id, limit=40):
+    """同 task 跨轮历史 → user/assistant 交替消息列表（MiniLoop.history）。
+
+    读取失败/无历史返回空列表（首轮）。tool/system 角色不进模型上下文
+    （工具结果已在本轮 run 内自洽，历史只承载对话语义——桌面同构）。
+    """
+    try:
+        from hachimi_kernel.task_store import TaskStore, ProjectStore
+        meta = TaskStore.get(task_id)
+        if not meta:
+            return []
+        msgs = ProjectStore.read_session(meta.get("project_id", ""),
+                                         meta.get("session_id", ""), limit)
+        out = []
+        for m in msgs or []:
+            role = m.get("role")
+            content = (m.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                out.append({"role": role, "content": content})
+        return out
+    except Exception as e:
+        print("[task] session history unavailable: %s: %s" % (type(e).__name__, e), flush=True)
+        return []
+
+
+def _append_session(task_id, role, content):
+    """本轮 user/assistant 消息落盘（会话单一真源；失败不阻塞执行）。"""
+    if not task_id or not (content or "").strip():
+        return
+    try:
+        from hachimi_kernel.task_store import TaskStore, ProjectStore
+        meta = TaskStore.get(task_id)
+        if not meta:
+            return
+        ProjectStore.append_message(meta.get("project_id", ""),
+                                    meta.get("session_id", ""),
+                                    role, content, task_id=task_id)
+    except Exception as e:
+        print("[task] session append failed: %s: %s" % (type(e).__name__, e), flush=True)
+
+
 def _make_store(run_id, objective, done_when, task_id=None):
     """轨迹落盘器（桌面 schema 对齐：tasks/<task_id>/<date>_<run_id>.jsonl）。
     task_id 传入且存在时复用既有任务（「继续对话」= 同 task 追加 run）；
@@ -504,17 +547,28 @@ def _persona_block():
 
 def _run(body, stop_flag=_controls):
     steps = []
-    objective = body.get("objective", "")
+    # K1a 统一入口：message 优先（会话式）；无 message = 旧表单 objective 路径
+    message = (body.get("message") or "").strip()
+    objective = message or body.get("objective", "")
     done_when = body.get("done_when", "")
     run_id = _state["run_id"]
     # 「继续对话」：body 带 task_id = 同任务追加 run（内核自动携带上一轮轨迹背景）
     reuse = body.get("task_id") or None
     cont_ctx = _continuation_context(reuse) if reuse else ""
+    # 首条消息（无 task_id）由 _make_store 自动建 task（objective=首条消息，
+    # 桌面「先立会话、名字后回填」同语义）；有 task_id 恢复会话历史
     task_id, store = _make_store(run_id, objective, done_when, reuse)
+    history = _session_history(task_id) if (message and task_id) else []
     with _lock:
         if task_id:
             _state["task_id"] = task_id
-    _emit({"event": "start", "run_id": run_id, "objective": objective})
+    # 本轮 user 消息落盘（会话单一真源；统一入口形态才记）
+    if message and task_id:
+        _append_session(task_id, "user", message)
+    # start 带 task_id：前端捕获后续轮同会话续发（start_task 异步建 task，
+    # 返回值拿不到——事件通道是唯一可靠来源）
+    _emit({"event": "start", "run_id": run_id, "objective": objective,
+           "task_id": task_id or ""})
     if body.get("mode") == "split":
         _emit({"event": "mode", "run_id": run_id, "docked": True})
     else:
@@ -555,6 +609,8 @@ def _run(body, stop_flag=_controls):
                    "tool": a.get("tool"), "args": a.get("args"),
                    "ok": step.get("result", {}).get("ok"),
                    "error": step.get("result", {}).get("error"),
+                   # K2：进度分母（前端算 n/total；浮窗进度环同源）
+                   "total": int(body.get("max_steps", 24)),
                    "screen": _perception_summary(step.get("result"))
                              if a.get("tool") == "observe" else []})
             if stop_flag["stopped"]:
@@ -564,6 +620,10 @@ def _run(body, stop_flag=_controls):
 
         def on_finish(out, _steps):
             failures = sum(1 for s in steps if s.get("result", {}).get("ok") is False)
+            # K1a：本轮 assistant 回复落盘（chat=口播答案 / done=完成说明；
+            # incomplete 落 summary 供下一轮「上次没做完」上下文）
+            if message and task_id and (out.get("summary") or "").strip():
+                _append_session(task_id, "assistant", out["summary"])
             if store is not None:
                 try:
                     rec = store.finish_run(
@@ -572,19 +632,20 @@ def _run(body, stop_flag=_controls):
                         brain_model=(_brain_cfg or {}).get("model") if body.get("script") is None
                                     else "script",
                         exec_model="accessibility",
-                        success=out["status"] == "done",
+                        # chat = 对话轮（K1c 语义）：对话成功即成功，不算任务失败
+                        success=out["status"] in ("done", "chat"),
                         steps=out["steps"], brain_calls=out.get("brain_calls", 0),
                         decision_steps=out.get("brain_calls", 0),
                         action_count=out["steps"], retry_count=out["task_done_rejected"],
                         failures=failures, recoveries=0,
-                        reason=out.get("summary", "") if out["status"] != "done" else "")
+                        reason=out.get("summary", "") if out["status"] not in ("done", "chat") else "")
                     with _lock:
                         _runs[run_id] = {"task_id": task_id, "jsonl": str(store.path),
                                          "run": rec.to_dict()}
                 except Exception as e:
                     print("[task] run record failed: %s" % e, flush=True)
             with _lock:
-                _state["phase"] = "done" if out["status"] == "done" else "error"
+                _state["phase"] = "done" if out["status"] in ("done", "chat") else "error"
                 _state["summary"] = out
                 _state["trajectory"] = steps
             # K 闭环挂载点（桌面 tool_loop._finish → Curator 触发）。R9：实验期冻结——
@@ -595,7 +656,8 @@ def _run(body, stop_flag=_controls):
                 print("[task] CURATOR SUPPRESSED (experiment freeze)", flush=True)
             _emit({"event": "finish", "run_id": run_id, "status": out["status"],
                    "steps": out["steps"], "wall_clock_s": out.get("wall_clock_s"),
-                   "summary": out.get("summary", "")})
+                   "summary": out.get("summary", ""),
+                   "objective": objective})   # K3：前端终态面板回显标题
 
         # 完成判断（2026-09-30 对齐桌面 OmniAgent 语义）：仅在用户显式填写完成判据时
         # 启用机械校验（done_when 文本探测）；留空 = 信任大脑（模型自判完成），
@@ -605,6 +667,11 @@ def _run(body, stop_flag=_controls):
         if cont_ctx:
             constraints = ((constraints + "\n" + cont_ctx).strip()
                            if constraints else cont_ctx)
+
+        def on_reply(content):
+            # K3：口播/答案 → message 事件（手机端 assistant 气泡；穿插口播同型）
+            _emit({"event": "message", "run_id": run_id, "content": content})
+
         loop = MiniLoop(objective=objective,
                         done_when=done_when,
                         tools=tools, brain=brain,
@@ -618,6 +685,10 @@ def _run(body, stop_flag=_controls):
                                 "persona": _persona_block()},
                         controls=_controls,
                         verify_fn=verify,
+                        # K1a 统一入口：历史 + 本轮消息（闲聊/任务大脑自决，K1b）
+                        history=history,
+                        message=message,
+                        on_reply=on_reply,
                         on_step=on_step, on_finish=on_finish)
         loop.run()
     except Exception as e:
