@@ -1,7 +1,20 @@
 # Hachimi 对话式 UI + 大肥鱼角色化改造 Plan
 
 > 设计基准：`doc/ux_mockup_v3.html`（v0.5，12 屏）· 内核语义参照 `D:\code\AITolls\OmniAgent`（桌面版统一入口已验证）
-> 日期：2026-09-30 · 状态：P0 已实施 · rev4（K1b 扩为父项目 sdk_loop 机制移植清单；总工期 8.5 人日）
+> 日期：2026-09-30 · 状态：**P0–P5 全部实施完成**（提交 1b53f86 → d682bd1，六个 feat commit）· rev4
+
+## 实施记录（2026-09-30）
+
+| Phase | 提交 | 交付 |
+|---|---|---|
+| P0 地基 | `1b53f86` | K0 persona 接线（11 测）+ A1 素材 + A2 RoleStore/RoleDoc |
+| P1 对话壳 | `0ecd252` | ChatPage + ChatMapper（13 JVM 测）+ NarrativePanel 转发器 + 4-Tab |
+| P2 统一入口 | `c9f1011` | K1a/K1b/K1c + K2/K3（29 kernel 测，8 套全绿）+ ChatPage 统一接线 |
+| P3 悬浮层 | `01afed7` | V10 米白面板 / V11 大肥鱼球（进度环+拖动贴边）/ Gate 10s 超时 |
+| P4 角色设置 | `6464480` | RoleSettingsActivity 双区 + 设置角色入口 + BYOK 单端点+视觉开关 |
+| P5 引导收尾 | `d682bd1` | V1 欢迎首屏 + 3-Tab 终态（聊天默认） |
+
+验证：kernel 8 套测试全绿（PC 实跑，59 用例）；Android JVM 单测写好（RoleDoc 11 + ChatMapper 13，待 SDK 环境执行）；lint 全净；真机端到端延后（无 SDK/设备环境）。
 
 ## ⚠️ 验证策略（2026-09-30 定形：本环境无 Android SDK / 真机）
 
