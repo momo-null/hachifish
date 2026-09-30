@@ -4,21 +4,46 @@ import android.app.Activity
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.hachimi.app.ui.Ds
+import com.hachimi.app.ui.FishAssets
 
 /**
- * 授权门控弹层（架构 §4.4，交互原型 S3 GateUI 终态）：底部弹层——标题/请求正文/
- * 三按钮（仅本次允许 / 总是允许「App」的op / 拒绝并停止）+ 红线副文案。
- * 由无障碍服务在敏感操作（文本输入/跨 App 跳转）前以 dialog 主题拉起。
- * 结果码：10 仅本次允许 / 11 总是允许 / 12 拒绝。
+ * 授权门控弹层（P3 换皮 + 超时，redesign_plan A4 / V12）：
+ * - 大肥鱼疑问脸 +「主人，这个操作要你点头」——冷冰冰的权限弹窗变委屈萌请示
+ * - **10s 倒计时自动拒绝**（安全默认值：用户不在场时不放行敏感操作；
+ *   倒计时可见，拒绝语义沿用 gate=12 = 拒绝并停止）
+ * - 三级授权不变：10 仅本次允许 / 11 总是允许 / 12 拒绝并停止
+ * 由无障碍服务在敏感操作前以 dialog 主题拉起。
  */
 class GateActivity : Activity() {
+
+    private val timer = Handler(Looper.getMainLooper())
+    private var secondsLeft = TIMEOUT_S
+    private var countdownLabel: TextView? = null
+    private var timedOut = false
+
+    /** 每秒刷新倒计时；归零自动拒绝（幂等：手动选择后 timer 已清）。 */
+    private val tick = object : Runnable {
+        override fun run() {
+            if (isFinishing) return
+            secondsLeft--
+            if (secondsLeft <= 0) {
+                timedOut = true
+                finishWith(RESULT_DENY)
+                return
+            }
+            countdownLabel?.text = "$secondsLeft 秒未选择将自动拒绝"
+            timer.postDelayed(this, 1000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,7 +51,6 @@ class GateActivity : Activity() {
         val opType = intent.getStringExtra(EXTRA_OP) ?: "?"
         val preview = intent.getStringExtra(EXTRA_PREVIEW) ?: ""
 
-        // 底部弹层形态（mockup .gate：上两角圆角 18，遮罩由 dialog 主题提供）
         window.apply {
             setGravity(Gravity.BOTTOM)
             setWindowAnimations(-1)
@@ -40,49 +64,82 @@ class GateActivity : Activity() {
             background = Ds.round(c, 18, Color.WHITE)
             setPadding(Ds.dp(c, 20), Ds.dp(c, 18), Ds.dp(c, 20), Ds.dp(c, 20))
         }
-        // 抓手条
         sheet.addView(View(c).apply {
             background = Ds.round(c, 2, Ds.CARD_BORDER)
             layoutParams = LinearLayout.LayoutParams(Ds.dp(c, 36), Ds.dp(c, 4))
             (layoutParams as LinearLayout.LayoutParams).gravity = Gravity.CENTER_HORIZONTAL
         })
-        sheet.addView(TextView(c).apply {
-            text = "🔐 授权门控"
-            textSize = 16f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Ds.TEXT)
-            setPadding(0, Ds.dp(c, 12), 0, Ds.dp(c, 4))
+        // 头部：大肥鱼疑问脸 + 请示文案（V12 语义）
+        val head = LinearLayout(c).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, Ds.dp(c, 12), 0, 0)
+        }
+        head.addView(ImageView(c).apply {
+            setImageResource(FishAssets.EMPTY)
+            adjustViewBounds = true
+            maxHeight = Ds.dp(c, 64)
+        }, LinearLayout.LayoutParams(Ds.dp(c, 64), LinearLayout.LayoutParams.WRAP_CONTENT))
+        val headText = LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = Ds.dp(c, 12)
+            setPadding(p, 0, 0, 0)
+        }
+        headText.addView(TextView(c).apply {
+            text = "主人，这个操作要你点头"
+            textSize = 15f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Ds.TEXT)
         })
+        headText.addView(Ds.small(c, "大肥鱼不会自作主张，敏感操作必先请示"))
+        head.addView(headText, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        sheet.addView(head)
+        // 操作详情（透明三行：操作 / 用途红线 / 定位说明）
         sheet.addView(TextView(c).apply {
-            text = "Hachimi 请求在「$targetPkg」中执行 $opType" +
-                    (if (preview.isNotBlank()) "：\n$preview" else "")
-            textSize = 14f; setTextColor(Ds.TEXT)
-            setPadding(0, Ds.dp(c, 4), 0, Ds.dp(c, 4))
+            text = "即将执行：在「$targetPkg」中 $opType" +
+                    (if (preview.isNotBlank()) "\n内容：$preview" else "")
+            textSize = 13f; setTextColor(Ds.TEXT)
+            setLineSpacing(Ds.dp(c, 2).toFloat(), 1f)
+            setPadding(0, Ds.dp(c, 10), 0, Ds.dp(c, 2))
         })
         sheet.addView(Ds.small(c, "此操作由 AI 发起 · 红色虚线框为当前定位目标 · 可随时停止").apply {
-            setPadding(0, Ds.dp(c, 2), 0, Ds.dp(c, 8))
+            setPadding(0, 0, 0, Ds.dp(c, 8))
         })
-        // 三按钮（mockup g1 主色 / g2 灰底主色字 / g3 红 tint）
-        sheet.addView(Ds.button(c, "仅本次允许") { finishWith(RESULT_ALLOW_ONCE) })
-        sheet.addView(Ds.button(c, "总是允许「$targetPkg」的$opType", primary = false) {
+        // 三级授权（V12 文案）
+        sheet.addView(Ds.button(c, "允许一次") { finishWith(RESULT_ALLOW_ONCE) })
+        sheet.addView(Ds.button(c, "本次任务都允许「$targetPkg」的$opType", primary = false) {
             finishWith(RESULT_ALLOW_ALWAYS)
         }.apply {
             (layoutParams as LinearLayout.LayoutParams).topMargin = Ds.dp(c, 10)
         })
-        sheet.addView(Ds.button(c, "拒绝并停止", primary = false, danger = true) {
+        sheet.addView(Ds.button(c, "拒绝并停止任务", primary = false, danger = true) {
             finishWith(RESULT_DENY)
         }.apply {
             (layoutParams as LinearLayout.LayoutParams).topMargin = Ds.dp(c, 10)
         })
+        countdownLabel = TextView(c).apply {
+            text = "$secondsLeft 秒未选择将自动拒绝"
+            textSize = 11f; setTextColor(Ds.TEXT_3)
+            gravity = Gravity.CENTER
+            setPadding(0, Ds.dp(c, 8), 0, 0)
+        }
+        sheet.addView(countdownLabel)
 
         setContentView(sheet)
+        timer.postDelayed(tick, 1000)
+    }
+
+    override fun onDestroy() {
+        timer.removeCallbacks(tick)   // 手动选择/系统回收都清倒计时，防泄漏与双触发
+        super.onDestroy()
     }
 
     private fun finishWith(code: Int) {
-        // 结果落盘（调试桥/harness 经 run-as 读取）——M1' DoD⑥ 白名单记忆的前置
+        timer.removeCallbacks(tick)
         try {
             val choice = when (code) {
                 RESULT_ALLOW_ONCE -> "allow_once"
                 RESULT_ALLOW_ALWAYS -> "allow_always"
-                else -> "deny"
+                else -> if (timedOut) "deny_timeout" else "deny"   // 超时拒绝留痕可观测
             }
             val pkg = intent.getStringExtra(EXTRA_PACKAGE) ?: "?"
             openFileOutput("gate_result.json", MODE_PRIVATE).use {
@@ -90,7 +147,6 @@ class GateActivity : Activity() {
                     .toByteArray())
             }
         } catch (_: Exception) {}
-        // 阻塞桥回调：唤醒 GateManager.enforce 等待中的原语线程
         val req = intent.getLongExtra(EXTRA_REQUEST, -1)
         if (req >= 0) GateManager.resolve(req, code)
         setResult(code)
@@ -105,5 +161,6 @@ class GateActivity : Activity() {
         const val RESULT_ALLOW_ONCE = 10
         const val RESULT_ALLOW_ALWAYS = 11
         const val RESULT_DENY = 12
+        const val TIMEOUT_S = 10
     }
 }

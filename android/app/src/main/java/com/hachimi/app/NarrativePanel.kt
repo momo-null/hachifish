@@ -75,6 +75,14 @@ object NarrativePanel {
     private var statusLine: TextView? = null
     private var logLine: TextView? = null
 
+    // P3 V10 面板 / V11 球视图引用与进度态
+    private var actionLine: TextView? = null     // 当前动作行（口播优先，tool 次之）
+    private var progressFill: View? = null
+    private var lastProgressN = 0
+    private var lastProgressTotal = 0
+    private var ring: RingDrawable? = null
+    private var ballBadge: TextView? = null
+
     // 停靠控制台视图引用
     private var consoleStatus: TextView? = null
     private var perception: TextView? = null
@@ -150,6 +158,14 @@ object NarrativePanel {
                         }
                         decision?.text = "决策: $tool " +
                                 e.optJSONObject("args")?.toString()?.take(90).orEmpty()
+                        // P3：进度（K2 total）+ 当前动作行 + 球进度环/角标
+                        val total = e.optInt("total", 0)
+                        if (total > 0) {
+                            lastProgressTotal = total
+                            lastProgressN = e.optInt("step", lastProgressN)
+                        }
+                        actionLine?.text = "▸ $tool"
+                        updateProgressUi()
                         // 红框定位指示：有归一化坐标的动作（tap_xy/gesture 首点）
                         val args = e.optJSONObject("args")
                         val x = args?.optDouble("x")
@@ -163,9 +179,21 @@ object NarrativePanel {
                         }
                     }
                     "paused" -> append("⏸ 已暂停（面板可恢复）")
+                    "message" -> {
+                        // K3 口播：当前动作行优先显示口播（比工具名好懂）
+                        val content = e.optString("content").trim()
+                        if (content.isNotEmpty()) actionLine?.text = content.take(60)
+                    }
                     "finish" -> {
-                        append("■ 完成 ${e.optString("status")} · ${e.optInt("steps")}步")
-                        addTimeline("■ ${e.optString("status")} · ${e.optInt("steps")}步")
+                        val st = e.optString("status")
+                        append("■ 完成 $st · ${e.optInt("steps")}步")
+                        addTimeline("■ $st · ${e.optInt("steps")}步")
+                        // V10/V11 终态：进度满环 + 动作行收尾语
+                        actionLine?.text = if (st == "done") "✓ 办好了~" else "■ $st"
+                        if (lastProgressTotal > 0) {
+                            lastProgressN = lastProgressTotal
+                            updateProgressUi()
+                        }
                         scheduleHide(2500)
                     }
                     "error" -> {
@@ -254,38 +282,120 @@ object NarrativePanel {
     private fun canOverlay(c: Context): Boolean =
         android.provider.Settings.canDrawOverlays(c)
 
-    /** 小药丸：收起态的唯一驻留物，点击回完整面板（含状态缩写，一眼可辨）。 */
+    /** 小药丸 → V11 大肥鱼球：54dp 进度环 + 头像 + 步数角标；可拖动贴边，点按展开。 */
     private fun attachPill(c: Context) {
-        val pill = LinearLayout(c).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = Ds.round(c, 18, 0xF21E2026.toInt())
-            setPadding(Ds.dp(c, 12), Ds.dp(c, 5), Ds.dp(c, 12), Ds.dp(c, 5))
-            setOnClickListener { expand() }
+        val size = Ds.dp(c, 54)
+        ring = RingDrawable(Ds.PRIMARY, Ds.CARD_BORDER).apply {
+            progress = if (lastProgressTotal > 0)
+                lastProgressN.toFloat() / lastProgressTotal else 0f
         }
-        pill.addView(TextView(c).apply {
-            text = "▣ Hachimi ▸"
-            textSize = 11f; typeface = Typeface.MONOSPACE
-            setTextColor(Ds.ACCENT)
+        val ball = android.widget.FrameLayout(c).apply {
+            background = ring
+        }
+        ball.addView(android.widget.ImageView(c).apply {
+            setImageBitmap(com.hachimi.app.ui.FishAssets.circle(c, com.hachimi.app.ui.FishAssets.AVATAR, 44))
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                Ds.dp(c, 44), Ds.dp(c, 44), Gravity.CENTER)
         })
-        pillView = pill
+        ballBadge = TextView(c).apply {
+            text = if (lastProgressN > 0) "$lastProgressN" else "•"
+            textSize = 9f; typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            background = Ds.round(c, 9, Ds.PRIMARY)
+            val p = Ds.dp(c, 4)
+            setPadding(p, 0, p, 0)
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                Ds.dp(c, 18), Gravity.TOP or Gravity.END)
+        }
+        ball.addView(ballBadge)
+        // 拖动贴边 + 点按展开（超 touchSlop 判拖动，否则点击）
+        val slop = android.view.ViewConfiguration.get(c).scaledTouchSlop
+        val down = FloatArray(2)
+        val moved = booleanArrayOf(false)
+        ball.setOnTouchListener { _, ev ->
+            val lp = pillParams ?: return@setOnTouchListener false
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    down[0] = ev.rawX; down[1] = ev.rawY; moved[0] = false
+                    true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dx = ev.rawX - down[0]; val dy = ev.rawY - down[1]
+                    if (!moved[0] && (Math.abs(dx) > slop || Math.abs(dy) > slop)) moved[0] = true
+                    if (moved[0]) {
+                        lp.x = (ev.rawX - size / 2f).toInt().coerceAtLeast(0)
+                        lp.y = (ev.rawY - size / 2f).toInt().coerceAtLeast(0)
+                        try { wm?.updateViewLayout(ball, lp) } catch (_: Exception) {}
+                    }
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    if (!moved[0]) expand()
+                    else {  // 吸附左右边缘（半出屏钳制）
+                        val w = c.resources.displayMetrics.widthPixels
+                        lp.x = if (lp.x + size / 2 < w / 2) 0 else (w - size)
+                        try { wm?.updateViewLayout(ball, lp) } catch (_: Exception) {}
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+        pillView = ball
         try {
             val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
+                size, size,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = if (docked) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                          else Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                // 球态改为坐标定位（可拖动）；初始贴右上（不挡目标 App 底部操作区）
+                gravity = Gravity.TOP or Gravity.START
+                x = c.resources.displayMetrics.widthPixels - size - Ds.dp(c, 16)
+                y = c.resources.displayMetrics.heightPixels / 3
             }
+            pillParams = params
             wm = c.getSystemService(WindowManager::class.java)
-            wm!!.addView(pill, params)
+            wm!!.addView(ball, params)
         } catch (e: Exception) {
             Log.w(TAG, "pill add: ${e.message}")
             pillView = null
         }
+    }
+
+    private var pillParams: WindowManager.LayoutParams? = null
+
+    /** V11 进度环：底环浅色 + 主色扫过弧 + 内圆白底（invalidateSelf 随步刷新）。 */
+    private class RingDrawable(private val ringColor: Int, private val trackColor: Int) :
+        android.graphics.drawable.Drawable() {
+        var progress = 0f
+            set(v) { field = v.coerceIn(0f, 1f); invalidateSelf() }
+        private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            style = android.graphics.Paint.Style.STROKE
+        }
+        private val fill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+        }
+
+        override fun draw(canvas: Canvas) {
+            val w = bounds.width().toFloat(); val h = bounds.height().toFloat()
+            val stroke = Math.min(w, h) * 0.06f
+            val r = Math.min(w, h) / 2 - stroke / 2
+            val cx = w / 2; val cy = h / 2
+            paint.strokeWidth = stroke
+            paint.color = trackColor
+            canvas.drawCircle(cx, cy, r, paint)
+            paint.color = ringColor
+            val rect = android.graphics.RectF(cx - r, cy - r, cx + r, cy + r)
+            canvas.drawArc(rect, -90f, 360f * progress, false, paint)
+            canvas.drawCircle(cx, cy, r - stroke, fill)
+        }
+        override fun setAlpha(alpha: Int) {}
+        override fun setColorFilter(cf: android.graphics.ColorFilter?) {}
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
     }
 
     /** 双窗结构：内容窗纯显示（NOT_TOUCHABLE，触摸穿透到目标 App——分屏并行语义），
@@ -299,7 +409,9 @@ object NarrativePanel {
 
         contentView = LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xF21E2026.toInt())
+            // P3 V10：浮条=米白卡片（白底描边圆角）；停靠台保留暗色（高级模式）
+            background = if (dock) Ds.round(c, 10, 0xF21E2026.toInt())
+                        else Ds.round(c, 16, Color.WHITE, 1, Ds.CARD_BORDER)
             setPadding(pad, pad / 2, pad, pad / 2)
         }.also { box ->
             if (dock) {
@@ -328,18 +440,65 @@ object NarrativePanel {
                 box.addView(timeline)
             } else {
                 consoleStatus = null; perception = null; decision = null; timeline = null
+                // V10 头行：呼吸头像 + 当前动作（口播优先，tool 次之）
+                val head = LinearLayout(c).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                head.addView(android.widget.ImageView(c).apply {
+                    setImageBitmap(com.hachimi.app.ui.FishAssets.circle(
+                        c, com.hachimi.app.ui.FishAssets.AVATAR, 28))
+                    // 呼吸动画（mockup .fish-avatar fishpulse）：alpha 0.6↔1 循环
+                    startAnimation(android.view.animation.AlphaAnimation(0.6f, 1f).apply {
+                        duration = 900
+                        repeatCount = android.view.animation.Animation.INFINITE
+                        repeatMode = android.view.animation.Animation.REVERSE
+                    })
+                }, LinearLayout.LayoutParams(Ds.dp(c, 28), Ds.dp(c, 28)))
+                val headText = LinearLayout(c).apply {
+                    orientation = LinearLayout.VERTICAL
+                    val p = Ds.dp(c, 10)
+                    setPadding(p, 0, 0, 0)
+                }
+                actionLine = TextView(c).apply {
+                    text = "准备中…"
+                    setTextColor(Ds.TEXT); textSize = 13f
+                    typeface = Typeface.DEFAULT_BOLD
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }
                 statusLine = TextView(c).apply {
                     text = "▶ 前台引导 · idle"
-                    setTextColor(Ds.ACCENT); textSize = 10f
+                    setTextColor(Ds.TEXT_2); textSize = 10f
                     typeface = Typeface.MONOSPACE
                 }
+                headText.addView(actionLine)
+                headText.addView(statusLine)
+                head.addView(headText, LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                box.addView(head)
+                // 进度条（mockup .float-progress）：n/total（K2 total 事件字段）
+                val track = android.widget.FrameLayout(c).apply {
+                    background = Ds.round(c, 2, Ds.GRAY_BG)
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, Ds.dp(c, 3)).apply {
+                        topMargin = pad / 2
+                    }
+                }
+                progressFill = View(c).apply {
+                    background = Ds.round(c, 2, Ds.PRIMARY)
+                    layoutParams = android.widget.FrameLayout.LayoutParams(
+                        0, android.widget.FrameLayout.LayoutParams.MATCH_PARENT)
+                }
+                track.addView(progressFill)
+                box.addView(track)
                 logLine = TextView(c).apply {
                     text = ""
-                    setTextColor(Ds.DARK_TXT); textSize = 11f; maxLines = 4
+                    setTextColor(Ds.TEXT_2); textSize = 11f; maxLines = 3
                     typeface = Typeface.MONOSPACE
                 }
-                box.addView(statusLine)
                 box.addView(logLine)
+                updateProgressUi()
             }
             // 内容窗让位按钮条：停靠=条在底（内容其上），浮条=条在顶（内容其下）
             addWindow(box, WindowManager.LayoutParams.MATCH_PARENT,
@@ -393,8 +552,9 @@ object NarrativePanel {
             } catch (_: Exception) {}
         }
         try { pillView?.let { wm?.removeView(it) } } catch (_: Exception) {}
-        contentView = null; barView = null; pillView = null
+        contentView = null; barView = null; pillView = null; pillParams = null
         statusLine = null; logLine = null
+        actionLine = null; progressFill = null; ring = null; ballBadge = null
         consoleStatus = null; perception = null; decision = null; timeline = null
     }
 
@@ -402,10 +562,10 @@ object NarrativePanel {
         val row = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
         fun btn(label: String, danger: Boolean = false, onClick: (Button) -> Unit) = Button(c).apply {
             text = label; textSize = 11f
-            // 暗底胶囊小按钮（mockup .ctrl）；停止=红字
-            setTextColor(if (danger) Ds.RED else Ds.DARK_TXT)
+            // 浅色胶囊小按钮（P3 V10 米白风）；停止=红
+            setTextColor(if (danger) Ds.RED else Ds.PRIMARY)
             typeface = Typeface.DEFAULT_BOLD
-            background = Ds.round(c, 8, if (danger) 0x33EA6668.toInt() else Ds.DARK_SUB)
+            background = Ds.round(c, 8, if (danger) Ds.RED_TINT else Ds.GRAY_BG)
             setPadding(Ds.dp(c, 12), 0, Ds.dp(c, 12), 0)
             setOnClickListener { v -> onClick(v as Button) }
             row.addView(this)
@@ -426,10 +586,44 @@ object NarrativePanel {
     private fun append(line: String) {
         val v = logLine ?: return
         v.text = (if (v.text.isNotEmpty()) v.text.toString() + "\n" else "") + line
-        if ((v.text.split("\n").size) > 4) {
-            v.text = v.text.split("\n").takeLast(4).joinToString("\n")
+        if ((v.text.split("\n").size) > 3) {
+            v.text = v.text.split("\n").takeLast(3).joinToString("\n")
         }
-        v.text = colored(v.text.toString())
+        v.text = coloredLight(v.text.toString())
+    }
+
+    /** 进度 UI 同步（P3）：V10 进度条填充 + V11 球进度环与步数角标。 */
+    private fun updateProgressUi() {
+        val ratio = if (lastProgressTotal > 0)
+            lastProgressN.toFloat() / lastProgressTotal else 0f
+        progressFill?.let { fill ->
+            fill.post {
+                val parent = fill.parent as? android.view.ViewGroup ?: return@post
+                fill.layoutParams.width = (parent.width * ratio).toInt().coerceAtLeast(0)
+                fill.requestLayout()
+            }
+        }
+        ring?.progress = ratio
+        ballBadge?.text = if (lastProgressN > 0) "$lastProgressN" else "•"
+    }
+
+    /** 浅底逐行染色（V10 米白面板）：✓ 绿 / → 蓝 / ✗ 红 / 其余灰。 */
+    private fun coloredLight(text: String): CharSequence {
+        val sb = SpannableString(text)
+        var idx = 0
+        for (line in text.split("\n")) {
+            if (line.isNotEmpty()) {
+                val color = when (line.first()) {
+                    '✓' -> Ds.GREEN_TXT
+                    '→' -> Ds.PRIMARY
+                    '✗' -> Ds.RED_TXT
+                    else -> Ds.TEXT_2
+                }
+                sb.setSpan(ForegroundColorSpan(color), idx, idx + line.length, 0)
+            }
+            idx += line.length + 1
+        }
+        return sb
     }
 
     private fun addTimeline(line: String) {
