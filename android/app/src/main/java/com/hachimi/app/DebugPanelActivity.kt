@@ -97,7 +97,7 @@ class DebugPanelActivity : Activity() {
         dbg("③ tap_xy(0.5,0.9)") { svc.tapXY(0.5, 0.9) }
         dbg("④ type_text（替换上方输入框内容）") {
             testInput.requestFocus()
-            svc.typeText("Hachimi M1' 测试 123")
+            svc.typeText("Hachifish M1' 测试 123")
         }
         dbg("⑤ gesture 上滑") {
             svc.gesture(JSONArray().put(JSONArray().put(0.5).put(0.8)).put(JSONArray().put(0.5).put(0.3)))
@@ -144,7 +144,7 @@ class DebugPanelActivity : Activity() {
     private fun refresh() {
         val connected = HachimiAccessibilityService.instance != null
         status.text = "无障碍通道: ${if (connected) "已连接 ✓" else "未开启"}\n" +
-                "设备: Android ${android.os.Build.VERSION.SDK_INT} · Hachimi v0.1"
+                "设备: Android ${android.os.Build.VERSION.SDK_INT} · Hachifish v0.1"
         if (::debugBox.isInitialized) rebuildDebugButtons()
     }
 

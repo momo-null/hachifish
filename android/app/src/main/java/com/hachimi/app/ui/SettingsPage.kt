@@ -216,7 +216,7 @@ class SettingsPage(private val act: Activity) {
         val lab = Ds.card(act)
         lab.addView(prefRow("实验模式", "连点版本号 5 次开启（研究者入口）", null))
         lab.addView(TextView(act).apply {
-            text = "Hachimi v0.1 · P1.5 UI 终态"
+            text = "Hachifish v0.1 · P1.5 UI 终态"
             textSize = 12f; setTextColor(Ds.TEXT_3); setPadding(0, Ds.dp(act, 8), 0, 0)
             setOnClickListener {
                 if (++taps >= 5) {

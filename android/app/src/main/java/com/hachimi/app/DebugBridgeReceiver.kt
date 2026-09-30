@@ -83,7 +83,7 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                         Intent(context, GateActivity::class.java)
                             .putExtra(GateActivity.EXTRA_PACKAGE, args.optString("package", "org.fossify.notes"))
                             .putExtra(GateActivity.EXTRA_OP, args.optString("op", "type_text"))
-                            .putExtra(GateActivity.EXTRA_PREVIEW, args.optString("preview", "Hachimi M1' gate 测试"))
+                            .putExtra(GateActivity.EXTRA_PREVIEW, args.optString("preview", "Hachifish M1' gate 测试"))
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
                     JSONObject().put("ok", true).put("note", "gate shown, 用户选择后写 gate_result.json")

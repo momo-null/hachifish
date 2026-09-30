@@ -31,7 +31,7 @@ class OnboardingActivity : Activity() {
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         box.setPadding(pad, Ds.dp(this, 12), pad, Ds.dp(this, 20))
 
-        box.addView(Ds.appBar(this, "Hachimi",
+        box.addView(Ds.appBar(this, "Hachifish",
             listOf(Ds.tag(this, "v0.1 · 初始化", Ds.TEXT_2, Ds.GRAY_BG))))
 
         // —— P5 欢迎首屏（V1：大肥鱼「没吃饱」自嘲萌开场，四步授权之前）——
@@ -126,7 +126,7 @@ class OnboardingActivity : Activity() {
             ProjectionHolder.isRunning) { requestProjection() }
         step(card, 3, "电池优化白名单",
             if (pm.isIgnoringBatteryOptimizations(packageName))
-                "已加入 · ColorOS 另请在 应用管理→Hachimi 打开「允许自启动」"
+                "已加入 · ColorOS 另请在 应用管理→Hachifish 打开「允许自启动」"
             else "防止系统回收无障碍服务",
             pm.isIgnoringBatteryOptimizations(packageName)) {
             startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))

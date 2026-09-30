@@ -63,7 +63,7 @@ class TasksPage(private val act: Activity) {
 
         // appbar：logo + 连通 chips（绿点=已配置）
         chipsHost = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
-        box.addView(Ds.appBar(act, "Hachimi", listOf(chipsHost)))
+        box.addView(Ds.appBar(act, "Hachifish", listOf(chipsHost)))
         box.addView(Ds.small(act, "说一句话，把事办完 · v0.1").apply {
             setPadding(0, 0, 0, Ds.dp(act, 10))
         })
@@ -168,7 +168,7 @@ class TasksPage(private val act: Activity) {
     private fun renderSplitTip() {
         if (!::splitTip.isInitialized) return
         splitTip.text = if (runMode == 1)
-            "分屏：与目标 App 上下分屏（最近任务 → 点应用图标 → 分屏），Hachimi 那一半「控制台视图」"
+            "分屏：与目标 App 上下分屏（最近任务 → 点应用图标 → 分屏），Hachifish 那一半「控制台视图」"
         else "前台引导：悬浮叙述 + 实机操作"
     }
 
@@ -426,8 +426,8 @@ class TasksPage(private val act: Activity) {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     })
                     if (runMode == 1) {
-                        toast("已开始。从最近任务把目标 App 与 Hachimi 上下分屏，" +
-                                "Hachimi 那一半点「控制台视图」")
+                        toast("已开始。从最近任务把目标 App 与 Hachifish 上下分屏，" +
+                                "Hachifish 那一半点「控制台视图」")
                     }
                 }
                 val r = JSONObject(bridge.callAttr("start_task_json", body.toString()).toString())
