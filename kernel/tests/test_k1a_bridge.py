@@ -146,6 +146,19 @@ def main():
     finishes = [e for e in sink.events if e["event"] == "finish"]
     check("任务轮 chat 收尾", finishes and finishes[0]["status"] == "chat")
 
+    # ---- 4) K6：会话消息回放（V13 切换/冷启动数据面） ----
+    r = json.loads(bridge.session_messages_json(tid))
+    check("session_messages ok", r["ok"])
+    roles = [m["role"] for m in r["messages"]]
+    check("回放 user/assistant 严格交替且以 user 开头",
+          all(r0 == ("user" if i % 2 == 0 else "assistant") for i, r0 in enumerate(roles)))
+    check("回放内容含三轮 user",
+          sum(1 for m in r["messages"] if m["role"] == "user"
+              and m["content"] in ("你好，你是谁？", "那我是谁？", "帮我看看现在屏幕")) == 3)
+    check("回放带时间戳", all(m.get("ts") for m in r["messages"]))
+    r_bad = json.loads(bridge.session_messages_json("t_nonexistent"))
+    check("不存在 task 返回 ok:false", r_bad["ok"] is False)
+
     print("\n%d failed" % len(fails))
     sys.exit(1 if fails else 0)
 

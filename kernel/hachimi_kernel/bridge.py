@@ -362,6 +362,30 @@ def status_json():
     return json.dumps(status(), ensure_ascii=False)
 
 
+def session_messages_json(task_id):
+    """K6 会话消息回放（V13 会话切换 / 冷启动恢复数据面）。
+
+    同 task 的 session jsonl → [{"role","content","ts"}]（仅 user/assistant，
+    保序）；工具过程不在其中（回放为对话语义，与 _session_history 注入同源）。
+    task 不存在/读失败返回 ok:false（UI 保持空态，不崩）。
+    """
+    try:
+        from hachimi_kernel.task_store import TaskStore, ProjectStore
+        meta = TaskStore.get(task_id)
+        if not meta:
+            return json.dumps({"ok": False, "error": "task not found"}, ensure_ascii=False)
+        msgs = ProjectStore.read_session(meta.get("project_id", ""),
+                                         meta.get("session_id", "")) or []
+        return json.dumps({"ok": True, "messages": [
+            {"role": m.get("role"), "content": m.get("content"), "ts": m.get("ts")}
+            for m in msgs
+            if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
+        ]}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
 def test_brain_json(base_url, api_key=None, model=None):
     return json.dumps(test_brain(base_url, api_key, model), ensure_ascii=False)
 

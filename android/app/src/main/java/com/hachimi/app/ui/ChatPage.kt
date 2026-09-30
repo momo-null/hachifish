@@ -48,6 +48,12 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private var currentTaskId: String? = null
     /** 本轮是否已让位到桌面（首个 tool 步才让位——闲聊不跳桌面，K4）。 */
     private var yieldedHome = false
+    // V13 会话列表：面板视图 + 冷启动恢复标记
+    private var sessionsPanel: LinearLayout? = null
+    private var sessionsList: LinearLayout? = null
+    private var restoreDone = false
+
+    private val prefs get() = act.getSharedPreferences(PREFS_NAME, 0)
 
     private val role = RoleStore.read(act)
 
@@ -99,6 +105,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         btnStop = controlBtn("⏹") { bridgeCall("request_stop") }
         btnPause.visibility = View.GONE; btnStop.visibility = View.GONE
         header.addView(btnPause); header.addView(btnStop)
+        header.addView(controlBtn("🗂") { openSessions() })
         view.addView(header)
 
         // ---- 消息流 / 空状态 ----
@@ -111,6 +118,10 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         emptyBox = buildEmpty()
         body.addView(emptyBox, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // V13 会话面板（body 内覆盖层；GONE 起）
+        sessionsPanel = buildSessionsPanel()
+        body.addView(sessionsPanel, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         view.addView(body, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -201,10 +212,11 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     // ---------------- 事件消费（K4 转发器） ----------------
 
     override fun onNarrative(type: String, fields: Map<String, Any?>) {
-        // K1a：start 事件捕获会话 task_id（后续轮同会话续发）
+        // K1a：start 事件捕获会话 task_id（后续轮同会话续发 + 冷启动恢复锚点）
         if (type == "start") {
             (fields["task_id"] as? String)?.takeIf { it.isNotBlank() }?.let {
                 currentTaskId = it
+                prefs.edit().putString("last_task_id", it).apply()
             }
         }
         // K4：首个 tool 步才让位到桌面 + 弹浮窗（闲聊全程留在对话页）
@@ -328,9 +340,217 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private fun toast(msg: String) =
         Toast.makeText(act, msg, Toast.LENGTH_LONG).show()
 
-    fun onResume() { NarrativePanel.addListener(this) }
+    fun onResume() {
+        NarrativePanel.addListener(this)
+        maybeRestoreLastSession()
+    }
 
     fun onPause() { NarrativePanel.removeListener(this) }
+
+    // ---------------- V13 会话列表 ----------------
+
+    /** 会话面板（body 覆盖层）：标题行（新建/关闭）+ 可滚动会话行。 */
+    private fun buildSessionsPanel(): LinearLayout = LinearLayout(act).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(Ds.PAGE)
+        visibility = View.GONE
+    }.also { panel ->
+        val head = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.WHITE)
+            val p = Ds.dp(act, 14)
+            setPadding(p, p / 2, p / 2, p / 2)
+        }
+        head.addView(TextView(act).apply {
+            text = "会话"; textSize = 15f; setTextColor(Ds.TEXT)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        head.addView(TextView(act).apply {
+            text = "＋ 新建会话"; textSize = 12f; setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            background = Ds.round(act, 9, Ds.PRIMARY)
+            setPadding(Ds.dp(act, 14), Ds.dp(act, 8), Ds.dp(act, 14), Ds.dp(act, 8))
+            setOnClickListener { newSession() }
+        })
+        head.addView(TextView(act).apply {
+            text = "✕"; textSize = 15f; setTextColor(Ds.TEXT_2)
+            setPadding(Ds.dp(act, 14), 0, 0, 0)
+            setOnClickListener { sessionsPanel?.visibility = View.GONE }
+        })
+        panel.addView(head, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        sessionsList = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = Ds.dp(act, 10)
+            setPadding(p, p, p, p)
+        }
+        panel.addView(android.widget.ScrollView(act).apply { addView(sessionsList) },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+
+    private fun openSessions() {
+        if (sending) { toast("任务进行中，先停止再切换会话"); return }
+        sessionsPanel?.visibility = View.VISIBLE
+        sessionsList?.removeAllViews()
+        sessionsList?.addView(Ds.small(act, "读取中…"))
+        val bridge = KernelHostService.pyBridgeModule
+        if (bridge == null) {
+            sessionsList?.removeAllViews()
+            sessionsList?.addView(Ds.small(act, "内核启动中（首次约需 10 秒），稍后再试"))
+            return
+        }
+        Thread {
+            try {
+                val r = JSONObject(bridge.callAttr("list_tasks_json", 30).toString())
+                val arr = r.optJSONArray("tasks") ?: org.json.JSONArray()
+                main.post {
+                    if (sessionsPanel?.visibility != View.VISIBLE) return@post
+                    sessionsList?.removeAllViews()
+                    for (i in 0 until arr.length()) {
+                        val lp = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                            topMargin = Ds.dp(act, 8)
+                        }
+                        sessionsList?.addView(sessionRow(arr.getJSONObject(i)), lp)
+                    }
+                    if (arr.length() == 0) sessionsList?.addView(Ds.small(act, "还没有会话"))
+                }
+            } catch (e: Exception) {
+                main.post {
+                    sessionsList?.removeAllViews()
+                    sessionsList?.addView(Ds.small(act, "读取会话失败：${e.javaClass.simpleName}"))
+                }
+            }
+        }.start()
+    }
+
+    /** 单条会话行：状态符 + 首条消息 + 相对时间·步数；当前会话描边高亮。 */
+    private fun sessionRow(t: JSONObject): View {
+        val tid = t.optString("task_id")
+        val label = SessionUi.stateLabel(t.optString("state"), t.optBoolean("success"))
+        val glyphColor = when {
+            label.startsWith("✓") -> Ds.GREEN_TXT
+            label.startsWith("✗") -> Ds.RED_TXT
+            label.startsWith("▶") -> Ds.PRIMARY
+            else -> Ds.TEXT_3
+        }
+        val current = tid == currentTaskId
+        return LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ds.round(act, 12, Color.WHITE,
+                if (current) 2 else 1, if (current) Ds.PRIMARY else Ds.CARD_BORDER)
+            val p = Ds.dp(act, 12)
+            setPadding(p, p, p, p)
+            setOnClickListener { switchSession(tid) }
+        }.also { row ->
+            row.addView(TextView(act).apply {
+                text = label.take(1); textSize = 13f; setTextColor(glyphColor)
+            })
+            val col = LinearLayout(act).apply {
+                orientation = LinearLayout.VERTICAL
+                val p = Ds.dp(act, 10)
+                setPadding(p, 0, 0, 0)
+            }
+            col.addView(TextView(act).apply {
+                text = t.optString("objective").ifEmpty { "（无标题）" }
+                textSize = 13f; setTextColor(Ds.TEXT)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            col.addView(TextView(act).apply {
+                text = SessionUi.subtitle(
+                    SessionUi.relativeTime(t.optString("created_at")), t.optInt("steps", -1))
+                textSize = 10f; setTextColor(Ds.TEXT_2)
+                setPadding(0, Ds.dp(act, 2), 0, 0)
+            })
+            row.addView(col, LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            if (current) row.addView(Ds.tag(act, "当前", Ds.PRIMARY, Color.parseColor("#E8F1FA")))
+        }
+    }
+
+    /** 切换会话：last_task_id 落盘 + session_messages 回放为消息流。 */
+    private fun switchSession(tid: String) {
+        prefs.edit().putString("last_task_id", tid).apply()
+        currentTaskId = tid
+        items.clear()
+        sessionsPanel?.visibility = View.GONE
+        refresh()
+        Thread {
+            val bridge = KernelHostService.pyBridgeModule ?: return@Thread
+            try {
+                val r = JSONObject(bridge.callAttr("session_messages_json", tid).toString())
+                main.post {
+                    if (r.optBoolean("ok")) {
+                        val arr = r.optJSONArray("messages") ?: org.json.JSONArray()
+                        for (i in 0 until arr.length()) {
+                            val m = arr.getJSONObject(i)
+                            when (m.optString("role")) {
+                                "user" -> items.add(ChatItem.UserMsg(m.optString("content")))
+                                "assistant" -> items.add(ChatItem.AssistantMsg(m.optString("content")))
+                            }
+                        }
+                    }
+                    phase = ChatPhase.IDLE
+                    headerStatus.text = phase.label
+                    sending = false
+                    input.isEnabled = true
+                    refresh()
+                }
+            } catch (_: Exception) {}
+        }.start()
+    }
+
+    /** 新建会话：清空当前流 + last_task_id 移除（下条消息自动建新 task）。 */
+    private fun newSession() {
+        prefs.edit().remove("last_task_id").apply()
+        currentTaskId = null
+        items.clear()
+        sending = false
+        input.isEnabled = true
+        phase = ChatPhase.IDLE
+        headerStatus.text = phase.label
+        sessionsPanel?.visibility = View.GONE
+        refresh()
+    }
+
+    /** 冷启动恢复（V13）：last_task_id 存在且流为空 → session_messages 回放。
+     *  内核未就绪时保留重试（restoreDone 不置位，下次 onResume 再试）。 */
+    private fun maybeRestoreLastSession() {
+        if (restoreDone || items.isNotEmpty()) return
+        val last = prefs.getString("last_task_id", null)
+        if (last.isNullOrBlank()) { restoreDone = true; return }
+        val bridge = KernelHostService.pyBridgeModule ?: return   // 内核冷启动中：下次再试
+        restoreDone = true
+        Thread {
+            try {
+                val r = JSONObject(bridge.callAttr("session_messages_json", last).toString())
+                if (!r.optBoolean("ok")) return@Thread
+                val arr = r.optJSONArray("messages") ?: return@Thread
+                main.post {
+                    if (items.isNotEmpty()) return@post   // 用户已抢先发消息
+                    currentTaskId = last
+                    for (i in 0 until arr.length()) {
+                        val m = arr.getJSONObject(i)
+                        when (m.optString("role")) {
+                            "user" -> items.add(ChatItem.UserMsg(m.optString("content")))
+                            "assistant" -> items.add(ChatItem.AssistantMsg(m.optString("content")))
+                        }
+                    }
+                    refresh()
+                }
+            } catch (_: Exception) {}
+        }.start()
+    }
+
+    companion object {
+        private const val PREFS_NAME = "hachimi_ui"
+    }
 
     // ---------------- Adapter（消息流多类型渲染） ----------------
 
