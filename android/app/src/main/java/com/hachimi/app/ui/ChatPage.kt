@@ -51,6 +51,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private var sessionsPanel: LinearLayout? = null
     private var sessionsList: LinearLayout? = null
     private var restoreDone = false
+    /** 冷启动恢复的内核就绪轮询次数（上限 30 次 ≈ 30s）。 */
+    private var restoreRetries = 0
 
     private val prefs get() = act.getSharedPreferences(PREFS_NAME, 0)
 
@@ -607,36 +609,20 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         }.start()
     }
 
-    /** 切换会话：last_task_id 落盘 + session_messages 回放为消息流。 */
+    /** 切换会话：last_task_id 落盘 + 会话回放（对话消息 + 执行轨迹）。 */
     private fun switchSession(tid: String) {
         prefs.edit().putString("last_task_id", tid).apply()
         currentTaskId = tid
         items.clear()
         sessionsPanel?.visibility = View.GONE
         refresh()
-        Thread {
-            val bridge = KernelHostService.pyBridgeModule ?: return@Thread
-            try {
-                val r = JSONObject(bridge.callAttr("session_messages_json", tid).toString())
-                main.post {
-                    if (r.optBoolean("ok")) {
-                        val arr = r.optJSONArray("messages") ?: org.json.JSONArray()
-                        for (i in 0 until arr.length()) {
-                            val m = arr.getJSONObject(i)
-                            when (m.optString("role")) {
-                                "user" -> items.add(ChatItem.UserMsg(m.optString("content")))
-                                "assistant" -> items.add(ChatItem.AssistantMsg(m.optString("content")))
-                            }
-                        }
-                    }
-                    phase = ChatPhase.IDLE
-                    headerStatus.text = phase.label
-                    sending = false
-                    input.isEnabled = true
-                    refresh()
-                }
-            } catch (_: Exception) {}
-        }.start()
+        replaySession(tid) {
+            phase = ChatPhase.IDLE
+            headerStatus.text = phase.label
+            sending = false
+            input.isEnabled = true
+            refresh()
+        }
     }
 
     /** 新建会话：清空当前流 + last_task_id 移除（下条消息自动建新 task）。 */
@@ -655,31 +641,115 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     /** 冷启动恢复（V13）：last_task_id 存在且流为空 → session_messages 回放。
      *  内核未就绪时保留重试（restoreDone 不置位，下次 onResume 再试）。 */
     private fun maybeRestoreLastSession() {
-        if (restoreDone || items.isNotEmpty()) return
+        if (restoreDone || act.isDestroyed) return
+        if (items.isNotEmpty()) { restoreDone = true; return }   // 用户已抢先发消息
         val last = prefs.getString("last_task_id", null)
         if (last.isNullOrBlank()) { restoreDone = true; return }
-        val bridge = KernelHostService.pyBridgeModule ?: return   // 内核冷启动中：下次再试
+        // 内核 attach 约需 10s，首次 onResume 常赶在就绪之前：轮询到就绪为止
+        // （上限 ~30s），不必等用户再切一次前后台才回放出来。
+        if (KernelHostService.pyBridgeModule == null) {
+            if (restoreRetries++ < 30) main.postDelayed({ maybeRestoreLastSession() }, 1000)
+            return
+        }
         restoreDone = true
+        currentTaskId = last
+        replaySession(last, keepIfUserTyped = true) { refresh() }
+    }
+
+    // ---------------- 会话回放（对话消息 + 执行轨迹） ----------------
+
+    /**
+     * 回放一条会话：session_messages_json（对话）+ task_trace_json（执行轨迹）。
+     * 语义（用户需求）：闲聊轮（run 无任何工具步骤）只出对话气泡，保持对话感；
+     * 跑过任务的 run 还原成 tool 卡 + 终态面板，与执行现场视觉一致。
+     * 交错顺序：按 ts 把消息排在对应 run 之前（用户先说，后跟这轮的轨迹）。
+     */
+    private fun replaySession(tid: String, keepIfUserTyped: Boolean = false, after: () -> Unit) {
+        val bridge = KernelHostService.pyBridgeModule ?: return
         Thread {
-            try {
-                val r = JSONObject(bridge.callAttr("session_messages_json", last).toString())
-                if (!r.optBoolean("ok")) return@Thread
-                val arr = r.optJSONArray("messages") ?: return@Thread
-                main.post {
-                    if (items.isNotEmpty()) return@post   // 用户已抢先发消息
-                    currentTaskId = last
-                    for (i in 0 until arr.length()) {
-                        val m = arr.getJSONObject(i)
-                        when (m.optString("role")) {
-                            "user" -> items.add(ChatItem.UserMsg(m.optString("content")))
-                            "assistant" -> items.add(ChatItem.AssistantMsg(m.optString("content")))
-                        }
-                    }
-                    refresh()
-                }
-            } catch (_: Exception) {}
+            val msgs = try {
+                JSONObject(bridge.callAttr("session_messages_json", tid).toString())
+                    .optJSONArray("messages") ?: org.json.JSONArray()
+            } catch (_: Exception) { org.json.JSONArray() }
+            val trace = try {
+                JSONObject(bridge.callAttr("task_trace_json", tid).toString())
+            } catch (_: Exception) { null }
+            main.post {
+                if (keepIfUserTyped && items.isNotEmpty()) return@post   // 用户已抢先发消息
+                items.clear()
+                appendReplay(msgs, trace)
+                after()
+            }
         }.start()
     }
+
+    private fun appendReplay(msgs: org.json.JSONArray, trace: JSONObject?) {
+        var mi = 0
+        fun flushBefore(ts: String) {
+            while (mi < msgs.length() &&
+                (ts.isBlank() || msgs.getJSONObject(mi).optString("ts") <= ts)) {
+                val m = msgs.getJSONObject(mi++)
+                when (m.optString("role")) {
+                    "user" -> items.add(ChatItem.UserMsg(m.optString("content")))
+                    "assistant" -> items.add(ChatItem.AssistantMsg(m.optString("content")))
+                }
+            }
+        }
+        val runs = trace?.optJSONArray("runs")
+        if (runs == null || runs.length() == 0) { flushBefore(""); return }
+        for (i in 0 until runs.length()) {
+            val r = runs.getJSONObject(i)
+            val run = r.optJSONObject("run")
+            flushBefore(run?.optString("start_ts") ?: "")
+            var shown = 0
+            val lines = r.optJSONArray("lines")
+            if (lines != null) {
+                for (j in 0 until lines.length()) {
+                    val ln = lines.getJSONObject(j)
+                    val tool = ln.optJSONObject("action")?.optString("tool") ?: continue
+                    if (tool.isBlank()) continue
+                    val res = ln.optJSONObject("result")
+                    addToolCard(
+                        tool,
+                        if (res == null || !res.has("ok")) null else res.optBoolean("ok"),
+                        res?.optString("error")?.takeIf { it.isNotBlank() },
+                        if (ln.has("step")) ln.optInt("step") else null
+                    )
+                    shown++
+                }
+            }
+            // 本轮窗口内的消息（用户消息可能晚于 start_ts 落盘）排在终态面板之前
+            flushBefore(run?.optString("end_ts") ?: "")
+            // 终态面板：仅真跑过步骤的 run 出（纯闲聊轮不出，保持对话语义）
+            if (shown > 0 && run != null) {
+                if (run.optBoolean("success")) {
+                    items.add(ChatItem.DonePanel("", run.optInt("steps", shown), wallClockS(run)))
+                } else {
+                    items.add(ChatItem.FailPanel(
+                        run.optString("reason").takeIf { it.isNotBlank() } ?: "任务未成功完成"))
+                }
+            }
+        }
+        flushBefore("")
+    }
+
+    /** 追加一张 tool 卡：连续 observe 折叠（与执行现场同一降噪规则）。 */
+    private fun addToolCard(tool: String, ok: Boolean?, error: String?, step: Int?) {
+        val last = items.lastOrNull()
+        if (tool.contains("observe") && last is ChatItem.ToolCard
+            && last.tool.contains("observe") && last.count > 0) {
+            items[items.size - 1] = last.copy(count = last.count + 1)
+        } else {
+            items.add(ChatItem.ToolCard(step, tool, ok, error))
+        }
+    }
+
+    /** run 起止 ISO → 耗时秒（解析失败返回 null，面板自动省略耗时）。 */
+    private fun wallClockS(run: JSONObject): Double? = try {
+        val s = java.time.OffsetDateTime.parse(run.optString("start_ts"))
+        val e = java.time.OffsetDateTime.parse(run.optString("end_ts"))
+        java.time.Duration.between(s, e).toMillis() / 1000.0
+    } catch (_: Exception) { null }
 
     companion object {
         private const val PREFS_NAME = "hachimi_ui"
@@ -832,16 +902,22 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             val p = Ds.dp(act, 14)
             setPadding(p, p, p, p)
         }.also { card ->
-            card.layoutParams = ViewGroup.LayoutParams(
-                Ds.dp(act, 300), ViewGroup.LayoutParams.WRAP_CONTENT)
+            // 宽度按屏幕比例：全程 dp 单位（screenDp 与 Ds.dp 混算会把 px 当 dp，
+            // 2.75x 屏上卡片被压成 ~125dp 窄条，真机实录），封顶 320dp。
+            val screenDp = (act.resources.displayMetrics.widthPixels /
+                act.resources.displayMetrics.density).toInt()
+            val cardW = (screenDp - 24).coerceAtMost(320)
+            card.layoutParams = ViewGroup.LayoutParams(Ds.dp(act, cardW), ViewGroup.LayoutParams.WRAP_CONTENT)
             val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            head.addView(TextView(act).apply {
-                text = "✓"; textSize = 16f
-                gravity = Gravity.CENTER
-                setTextColor(Ds.GREEN_TXT)
-                background = Ds.round(act, 14, Color.parseColor("#1452C41A"))
-                layoutParams = LinearLayout.LayoutParams(Ds.dp(act, 28), Ds.dp(act, 28))
-            })
+            // 与 V4 失败态同构（设计图 ux_mockup_v3 .fail-panel-header）：大肥鱼居左，
+            // 标题 + 台词在右，gap 10dp；成功/失败两态视觉一致。
+            // 尺寸 64dp：设计图规范为 56dp，用户定放大一档增强角色存在感（内容区 292dp，
+            // 文字仍余 218dp，不挤）。
+            head.addView(ImageView(act).apply {
+                setImageResource(FishAssets.DONE)
+                adjustViewBounds = true
+                maxHeight = Ds.dp(act, 64)
+            }, LinearLayout.LayoutParams(Ds.dp(act, 64), LinearLayout.LayoutParams.WRAP_CONTENT))
             head.addView(LinearLayout(act).apply {
                 orientation = LinearLayout.VERTICAL
                 val p2 = Ds.dp(act, 10)
@@ -876,14 +952,26 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                     topMargin = Ds.dp(act, 12)
                 }
             })
-            card.addView(ImageView(act).apply {
-                setImageResource(FishAssets.DONE)
-                adjustViewBounds = true
-                maxHeight = Ds.dp(act, 90)
-            }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.END; topMargin = Ds.dp(act, 8)
-            })
+            // 成功态轨迹入口：对话流只保留对话语义（回放不含工具过程，内核口径），
+            // 执行细节统一交给 TaskDetailActivity（task_trace_json，每轮 run 一节）。
+            // 无会话 task_id 时不给入口（点了也查不到）。
+            currentTaskId?.let { tid ->
+                card.addView(TextView(act).apply {
+                    text = "查看完整轨迹"; textSize = 12f; setTextColor(Ds.PRIMARY)
+                    gravity = Gravity.CENTER
+                    background = Ds.round(act, 10, Color.WHITE, 1, Ds.CARD_BORDER)
+                    val p2 = Ds.dp(act, 12)
+                    setPadding(p2, Ds.dp(act, 8), p2, Ds.dp(act, 8))
+                    setOnClickListener {
+                        act.startActivity(Intent(act, com.hachimi.app.TaskDetailActivity::class.java)
+                            .putExtra("task_id", tid))
+                    }
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        topMargin = Ds.dp(act, 8)
+                    }
+                })
+            }
         }
 
         /** 失败面板（V4）：fish_fail + 人话错误 + 重试。 */
@@ -893,12 +981,16 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             val p = Ds.dp(act, 14)
             setPadding(p, p, p, p)
         }.also { card ->
-            card.layoutParams = ViewGroup.LayoutParams(
-                Ds.dp(act, 300), ViewGroup.LayoutParams.WRAP_CONTENT)
+            // 同 doneRow：全程 dp 单位，避免 dp/px 混算压窄卡片
+            val screenDp = (act.resources.displayMetrics.widthPixels /
+                act.resources.displayMetrics.density).toInt()
+            val cardW = (screenDp - 24).coerceAtMost(320)
+            card.layoutParams = ViewGroup.LayoutParams(Ds.dp(act, cardW), ViewGroup.LayoutParams.WRAP_CONTENT)
             val head = LinearLayout(act).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
+            // 设计图 .fail-panel-header img 规范 56dp；与完成态同步放大到 64dp（用户定）
             head.addView(ImageView(act).apply {
                 setImageResource(FishAssets.FAIL)
                 adjustViewBounds = true
