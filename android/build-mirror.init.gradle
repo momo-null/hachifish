@@ -1,0 +1,39 @@
+// 构建网络适配（临时，-I 引用，不进项目配置）：仓库重定向到阿里云镜像。
+// 背景：本机直连 repo.maven.apache.org / dl.google.com 超时（2026-09-30 实录）。
+def redirect(repo) {
+    def u = repo.url.toString()
+    if (u.startsWith('https://repo.maven.apache.org') || u.startsWith('https://repo1.maven.org')) {
+        repo.url = 'https://maven.aliyun.com/repository/central'
+    } else if (u.startsWith('https://dl.google.com/dl/android/maven2') || u.startsWith('https://maven.google.com')) {
+        repo.url = 'https://maven.aliyun.com/repository/google'
+    } else if (u.startsWith('https://plugins.gradle.org/m2')) {
+        repo.url = 'https://maven.aliyun.com/repository/gradle-plugin'
+    }
+}
+
+// settings 阶段：pluginManagement / dependencyResolutionManagement 的仓库同样重定向
+beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        all { repo -> if (repo instanceof MavenArtifactRepository) redirect(repo) }
+    }
+    if (settings.dependencyResolutionManagement != null) {
+        settings.dependencyResolutionManagement.repositories {
+            all { repo -> if (repo instanceof MavenArtifactRepository) redirect(repo) }
+        }
+    }
+}
+
+allprojects {
+    buildscript {
+        repositories {
+            all { repo ->
+                if (repo instanceof MavenArtifactRepository) redirect(repo)
+            }
+        }
+    }
+    repositories {
+        all { repo ->
+            if (repo instanceof MavenArtifactRepository) redirect(repo)
+        }
+    }
+}

@@ -1,7 +1,16 @@
 # Hachimi 对话式 UI + 大肥鱼角色化改造 Plan
 
 > 设计基准：`doc/ux_mockup_v3.html`（v0.5，12 屏）· 内核语义参照 `D:\code\AITolls\OmniAgent`（桌面版统一入口已验证）
-> 日期：2026-09-30 · 状态：待评审 · rev4（K1b 扩为父项目 sdk_loop 机制移植清单；总工期 8.5 人日）
+> 日期：2026-09-30 · 状态：P0 已实施 · rev4（K1b 扩为父项目 sdk_loop 机制移植清单；总工期 8.5 人日）
+
+## ⚠️ 验证策略（2026-09-30 定形：本环境无 Android SDK / 真机）
+
+| 层 | 验证方式 | 状态 |
+|---|---|---|
+| **kernel（Python）** | PC 单元测试 = **主验收面**。纯 stdlib 直接跑：`py -3 tests/test_xxx.py`。每个 K 项先写测试再改代码，与现有 5 套测试（mini_loop/bridge×2/task_trace/vision）共回归 | ✅ 可执行 |
+| **Android 纯逻辑** | 抽无 Android 依赖的纯函数（如 `RoleDoc`）→ JVM 单测（`./gradlew testDebugUnitTest`，junit 已接入） | ✅ 已写好，待 SDK 环境执行 |
+| **Android UI/系统层** | IDE linter + 代码审查；编译验证需 JDK17+SDK（本机已备 `.tools/jdk-17…-jre` + 镜像 init 脚本，SDK 待装） | ⏸ 语法级验证 |
+| **真机端到端** | 延后：悬浮层三态、无障碍操作、Chaquopy 桥 | ⏸ P3 后集中补 |
 
 ---
 

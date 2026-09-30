@@ -279,7 +279,14 @@ class MiniLoop(object):
 
     def _system_prompt(self):
         names = ", ".join(sorted(list(self.tools.keys()) + ["task_done"]))
-        p = ("目标: %s\n完成判据: %s\n" % (self.objective, self.done_when))
+        p = ""
+        # 角色卡注入（K0，redesign_plan）：稳定人格设定置于 prompt 首位（桌面语义：
+        # character.md 随 system prompt 注入，命中前缀缓存）。文本由调用方传入
+        # （bridge 读文件），loop 保持纯函数、无磁盘依赖；空文本零注入。
+        persona = (self.config.get("persona") or "").strip()
+        if persona:
+            p += "# 助手人格设定\n%s\n\n" % persona
+        p += ("目标: %s\n完成判据: %s\n" % (self.objective, self.done_when))
         if self.constraints:
             p += "约束: %s\n" % self.constraints
         p += "可用工具: %s\n%s" % (names, SYSTEM_RULES)

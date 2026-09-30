@@ -34,6 +34,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        RoleStore.ensure(this)   // A2：角色配置 → filesDir/character.md 幂等同步（K0 注入生效前提）
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ds.PAGE)

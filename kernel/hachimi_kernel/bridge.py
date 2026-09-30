@@ -486,6 +486,22 @@ def _perception_summary(result):
         return []
 
 
+def _persona_block():
+    """角色卡注入（K0，redesign_plan）：character.md 随 system prompt 注入。
+
+    knowledge_inject.load_character_text 已做截断管控与异常兜底（不存在/异常
+    返回空串 = 零注入，不影响主任务执行）；此处再兜一层，保证接线失败绝不
+    拖垮任务。内容 run 内由 MiniLoop._system_prompt 逐次拼接（同一文本，
+    前缀缓存友好）。
+    """
+    try:
+        from hachimi_kernel.knowledge_inject import load_character_text
+        return load_character_text()
+    except Exception as e:
+        print("[task] persona unavailable: %s" % e, flush=True)
+        return ""
+
+
 def _run(body, stop_flag=_controls):
     steps = []
     objective = body.get("objective", "")
@@ -598,7 +614,8 @@ def _run(body, stop_flag=_controls):
                         # wall_clock_s 可由 /task body 覆盖（视觉任务网关慢，需放宽）
                         config={"max_steps": body.get("max_steps", 24),
                                 "wall_clock_s": body.get("wall_clock_s", 900),
-                                "verify_tool": "verify_done"},
+                                "verify_tool": "verify_done",
+                                "persona": _persona_block()},
                         controls=_controls,
                         verify_fn=verify,
                         on_step=on_step, on_finish=on_finish)
