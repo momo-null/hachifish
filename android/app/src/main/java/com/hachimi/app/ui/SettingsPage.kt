@@ -21,10 +21,11 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
 /**
- * S7 设置（终态四分组）：①通道 BYOK——规划/视觉双端点（视觉留空=关闭，存储 v4）；
- * ②执行——默认模式（与主界面分段双向同步）+ 授权门控级别；③知识——诚实占位
- * （能力默认关 K0 红线，随 P2 上线）；④实验——版本号连点 5 次入口（研究者）。
- * 「测试连通/测试视觉」先保存再测（测的=存的），链路与正式任务一致（P0 语义）。
+ * 设置页（P4 起：角色分组置顶 + 模型配置简化）：
+ * ⓪角色——大肥鱼×我（点击进 RoleSettingsActivity，人设/称呼/头像）；
+ * ①通道 BYOK——单端点三栏 + 「启用视觉」开关（on=与主模型共用端点，2026-09-30
+ *   用户定简化形态；存储 v4 零改动，vision_* 落盘继承主端点值）；
+ * ②执行——默认模式 + 门控级别；③知识占位；④实验连点入口。
  */
 class SettingsPage(private val act: Activity) {
 
@@ -33,13 +34,13 @@ class SettingsPage(private val act: Activity) {
     private lateinit var planUrl: EditText
     private lateinit var planKey: EditText
     private lateinit var planModel: EditText
-    private lateinit var visUrl: EditText
-    private lateinit var visKey: EditText
-    private lateinit var visModel: EditText
     private lateinit var maxStepsField: EditText
     private lateinit var resultView: TextView
+    private var roleNameLabel: TextView? = null
+    private var roleDescLabel: TextView? = null
     private var modeSeg: Ds.Seg? = null
     private var gateSeg: Ds.Seg? = null
+    private var visSeg: Ds.Seg? = null
     private var taps = 0
 
     /** 主界面分段 ↔ 设置页「默认模式」双向同步钩子（TasksPage 注册）。 */
@@ -70,9 +71,12 @@ class SettingsPage(private val act: Activity) {
             return page
         }
 
-    /** 回前台重读偏好回显（默认模式/门控级别可能已被主界面或系统侧改动）。 */
+    /** 回前台重读偏好回显（角色卡文案/默认模式/门控级别可能已被其他页改动）。 */
     fun onResume() {
         if (!::page.isInitialized) return
+        val role = com.hachimi.app.RoleStore.read(act)
+        roleNameLabel?.text = role.roleName
+        roleDescLabel?.text = "角色卡 · 称呼你为「${role.userName}」"
         modeSeg?.select(act.getSharedPreferences(TasksPage.PREFS, 0).getInt("run_mode", 0))
         gateSeg?.select(if (gateLevel(act) == "relaxed") 1 else 0)
     }
@@ -85,22 +89,56 @@ class SettingsPage(private val act: Activity) {
         box.setPadding(pad, Ds.dp(act, 12), pad, Ds.dp(act, 20))
 
         box.addView(Ds.appBar(act, "设置", listOf()))
-        box.addView(Ds.small(act, "三通道语义延续桌面版；能力默认关，需显式开启").apply {
-            setPadding(0, 0, 0, Ds.dp(act, 12))
-        })
 
-        // —— ① 通道（BYOK）——
-        box.addView(Ds.h2(act, "通道（BYOK）"))
+        // —— ⓪ 角色（置顶入口）——
+        val roleCard = Ds.card(act)
+        val role = com.hachimi.app.RoleStore.read(act)
+        val roleRow = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setOnClickListener {
+                act.startActivity(Intent(act, com.hachimi.app.RoleSettingsActivity::class.java))
+            }
+        }
+        roleRow.addView(android.widget.ImageView(act).apply {
+            setImageBitmap(com.hachimi.app.ui.FishAssets.circle(
+                act, com.hachimi.app.ui.FishAssets.AVATAR, 36))
+        }, LinearLayout.LayoutParams(Ds.dp(act, 36), Ds.dp(act, 36)))
+        val roleCol = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = Ds.dp(act, 12)
+            setPadding(p, 0, 0, 0)
+        }
+        roleNameLabel = TextView(act).apply {
+            text = role.roleName; textSize = 14f; setTextColor(Ds.TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        roleCol.addView(roleNameLabel)
+        roleDescLabel = Ds.small(act, "角色卡 · 称呼你为「${role.userName}」")
+        roleCol.addView(roleDescLabel)
+        roleRow.addView(roleCol, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        roleRow.addView(TextView(act).apply {
+            text = "›"; textSize = 16f; setTextColor(Ds.TEXT_3)
+        })
+        roleCard.addView(roleRow)
+        box.addView(roleCard)
+
+        // —— ① 通道（BYOK：单端点 + 视觉开关）——
+        box.addView(sectionTitle("通道（BYOK）", topPad = 14))
         val ch = Ds.card(act)
-        ch.addView(sectionLabel("规划模型"))
+        ch.addView(sectionLabel("模型端点"))
         planUrl = field(ch, "https://api.example.com/v1")
         planKey = field(ch, "sk-…")
         planModel = field(ch, "例如 deepseek-v4-flash-vision")
         ch.addView(divider(ch))
-        ch.addView(sectionLabel("视觉模型（可选）"))
-        visUrl = field(ch, "留空 = 视觉能力关闭")
-        visKey = field(ch, "sk-…")
-        visModel = field(ch, "模型需支持图片输入")
+        ch.addView(sectionLabel("启用视觉（与主模型共用端点）"))
+        visSeg = Ds.seg(act, listOf("关", "开"), 0) { visSeg?.select(it) }
+        ch.addView(visSeg!!.view, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        ch.addView(Ds.small(act, "开 = 视觉观察走主端点（模型需支持图片输入）；关 = 纯无障碍树。").apply {
+            setPadding(0, Ds.dp(act, 4), 0, 0)
+        })
         // 步数上限（2026-09-30 用户反馈：默认写死的 24 改为可配置）
         ch.addView(divider(ch))
         ch.addView(sectionLabel("步数上限（每任务）"))
@@ -233,28 +271,25 @@ class SettingsPage(private val act: Activity) {
         planUrl.setText(cfg.baseUrl)
         planKey.setText(cfg.apiKey)
         planModel.setText(cfg.model)
-        visUrl.setText(cfg.visionBaseUrl)
-        visKey.setText(cfg.visionApiKey)
-        visModel.setText(cfg.visionModel)
+        visSeg?.select(if (cfg.visionEnabled) 1 else 0)
         show(true, "已加载本机保存的配置（${cfg.model} · " +
-                if (cfg.visionEnabled) "视觉 ${cfg.visionModel}）" else "视觉关）")
+                if (cfg.visionEnabled) "视觉开）" else "视觉关）")
     }
 
     private fun collect(): BrainConfig? {
         val url = planUrl.text.toString().trim()
         val m = planModel.text.toString().trim()
-        val vUrl = visUrl.text.toString().trim()
-        val vModel = visModel.text.toString().trim()
         if (url.isEmpty() || m.isEmpty()) {
-            show(false, "规划端点和模型名不能为空")
+            show(false, "端点和模型名不能为空")
             return null
         }
-        if (vUrl.isNotEmpty() && vModel.isEmpty()) {
-            show(false, "视觉模型名不能为空（视觉端点留空 = 关闭视觉能力）")
-            return null
+        val key = planKey.text.toString().trim()
+        // 简化形态（P4 用户定）：视觉开关 on = vision_* 继承主端点；off = 空（视觉关）
+        return if (visSeg?.current == "开") {
+            BrainConfig(url, key, m, visionBaseUrl = url, visionApiKey = key, visionModel = m)
+        } else {
+            BrainConfig(url, key, m)
         }
-        return BrainConfig(url, planKey.text.toString().trim(), m,
-            visionBaseUrl = vUrl, visionApiKey = visKey.text.toString().trim(), visionModel = vModel)
     }
 
     private fun save(): Boolean {
@@ -298,7 +333,7 @@ class SettingsPage(private val act: Activity) {
     private fun testVision() {
         val cfg = collect() ?: return
         if (!BrainConfigStore.save(act, cfg)) { show(false, "保存失败"); return }
-        if (!cfg.visionEnabled) { show(false, "视觉端点为空（视觉能力关闭）——填写视觉端点后再测"); return }
+        if (!cfg.visionEnabled) { show(false, "视觉开关为关——先开启「启用视觉」再测"); return }
         val bridge = KernelHostService.pyBridgeModule
         if (bridge == null) { show(false, "内核未就绪（首次启动约需 10 秒），稍后再试。"); return }
         resultView.text = "生成测试图并发送（最长 60 秒）…"
