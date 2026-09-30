@@ -60,7 +60,8 @@ object ChatMapper {
      *
      * @param type 事件名（start/message/step/finish/error）
      * @param e   事件字段（已解 Map；数值类型由解析层归一为 String/Int/Boolean/Double）
-     * @return null = 事件不产生消息条目（如 start 只驱动相位）
+     * @return null = 事件不产生消息条目（start 只驱动相位；finish status=chat 的
+     *         终态已由 message 事件出过气泡，不重复出面板）
      */
     fun item(type: String, e: Map<String, Any?>): ChatItem? = when (type) {
         "message" -> (e["content"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
@@ -71,14 +72,15 @@ object ChatMapper {
             ok = e["ok"] as? Boolean,
             error = e["error"] as? String
         )
-        "finish" -> if ((e["status"] as? String) == "done") {
-            ChatItem.DonePanel(
+        "finish" -> when (e["status"] as? String) {
+            "done" -> ChatItem.DonePanel(
                 summary = (e["summary"] as? String) ?: "",
                 steps = (e["steps"] as? Number)?.toInt() ?: 0,
                 wallClockS = (e["wall_clock_s"] as? Number)?.toDouble()
             )
-        } else {
-            ChatItem.FailPanel(
+            // chat = 对话轮终态：气泡已由 message 事件渲染，无面板
+            "chat" -> null
+            else -> ChatItem.FailPanel(
                 reason = (e["summary"] as? String)?.takeIf { it.isNotBlank() }
                     ?: (e["status"] as? String) ?: "未完成"
             )
@@ -93,8 +95,12 @@ object ChatMapper {
     fun phase(type: String, e: Map<String, Any?>): ChatPhase? = when (type) {
         "start" -> ChatPhase.THINKING
         "step" -> ChatPhase.WORKING
-        "message" -> null   // P2：闲聊回复不改变工作相位语义
-        "finish" -> if ((e["status"] as? String) == "done") ChatPhase.DONE else ChatPhase.FAILED
+        "message" -> null   // 口播不改变工作相位语义
+        "finish" -> when (e["status"] as? String) {
+            "done" -> ChatPhase.DONE
+            "chat" -> ChatPhase.IDLE   // 对话轮结束：回待命（非任务完成/失败）
+            else -> ChatPhase.FAILED
+        }
         "error" -> ChatPhase.FAILED
         else -> null
     }

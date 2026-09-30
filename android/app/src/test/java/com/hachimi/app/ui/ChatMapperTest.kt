@@ -53,6 +53,15 @@ class ChatMapperTest {
     }
 
     @Test
+    fun `finish chat is dialogue-final not failure`() {
+        // 逻辑自洽走查修复：闲聊终态 status=chat——气泡已由 message 事件渲染，
+        // 无面板；相位回 IDLE（非 FAILED，防"这次没办好"误报）
+        assertNull(ChatMapper.item("finish", mapOf<String, Any?>(
+            "status" to "chat", "summary" to "主人你好呀")))
+        assertEquals(ChatPhase.IDLE, ChatMapper.phase("finish", mapOf("status" to "chat")))
+    }
+
+    @Test
     fun `finish incomplete maps to fail panel with summary as reason`() {
         val item = ChatMapper.item("finish", mapOf<String, Any?>(
             "status" to "incomplete", "summary" to "墙钟预算耗尽")) as ChatItem.FailPanel

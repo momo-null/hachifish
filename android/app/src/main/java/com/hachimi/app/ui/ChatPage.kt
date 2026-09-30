@@ -212,6 +212,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     // ---------------- 事件消费（K4 转发器） ----------------
 
     override fun onNarrative(type: String, fields: Map<String, Any?>) {
+        if (act.isDestroyed) return   // Activity 已销毁：不再碰 UI（listener 常驻的代价防护）
         // K1a：start 事件捕获会话 task_id（后续轮同会话续发 + 冷启动恢复锚点）
         if (type == "start") {
             (fields["task_id"] as? String)?.takeIf { it.isNotBlank() }?.let {
@@ -236,7 +237,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         if (newPhase != null) {
             phase = newPhase
             headerStatus.text = phase.label
-            val working = phase == ChatPhase.THINKING || phase == ChatPhase.WORKING
+            // 控制钮仅任务执行态显示（闲聊 brain 单次调用不可中断，按钮无意义）
+            val working = phase == ChatPhase.WORKING
             btnPause.visibility = if (working) View.VISIBLE else View.GONE
             btnStop.visibility = if (working) View.VISIBLE else View.GONE
             if (phase == ChatPhase.IDLE || phase == ChatPhase.DONE || phase == ChatPhase.FAILED) {
@@ -345,7 +347,13 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         maybeRestoreLastSession()
     }
 
-    fun onPause() { NarrativePanel.removeListener(this) }
+    /**
+     * 事件订阅**常驻**（逻辑自洽走查修复）：首个 step 让位桌面是主流程
+     * （HOME 跳转触发 Activity.onPause）——若此处移除 listener，执行期间
+     * 的 step/finish 全丢，回 App 只见永久"思考中"（K4 闭环断链）。
+     * 页面随 MainActivity 单实例常驻；销毁防护见 onNarrative isDestroyed。
+     */
+    fun onPause() { /* listener 常驻，不移除 */ }
 
     // ---------------- V13 会话列表 ----------------
 
