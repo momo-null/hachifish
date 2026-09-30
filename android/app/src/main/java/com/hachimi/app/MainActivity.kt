@@ -52,8 +52,15 @@ class MainActivity : Activity() {
         Ds.systemBars(this, root)
         // 内核随 App 启动（幂等；harness 依赖不变）
         KernelHostService.start(this)
-        // 首次初始化引导（权限引导仅首次出现）
-        if (!getSharedPreferences(TasksPage.PREFS, 0).getBoolean("onboarding_done", false)) {
+        // 首次初始化引导（权限引导仅首次出现）；例外：覆盖安装/重装后系统会禁用
+        // 无障碍服务，此时 prefs 里 onboarding_done 仍为 true 但通道已断——
+        // 必须重弹引导页让用户重拨（代码注释里"安装后需重拨无障碍"的产品化闭环）。
+        // 无障碍态查系统 ENABLED_ACCESSIBILITY_SERVICES 而非 service.instance：
+        // 冷启动时服务未必已 bind，instance 竞态会漏判。
+        val accOn = android.provider.Settings.Secure.getString(
+            contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            ?.contains("$packageName/") == true
+        if (!getSharedPreferences(TasksPage.PREFS, 0).getBoolean("onboarding_done", false) || !accOn) {
             startActivity(Intent(this, OnboardingActivity::class.java))
         }
         switchTab(0)
