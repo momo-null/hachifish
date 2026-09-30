@@ -327,7 +327,7 @@
       <div class="onboard-features">
         <div class="onboard-feature">
           <div class="onboard-feature-icon">📁</div>
-          <div class="onboard-feature-text">文件整理、批量操作</div>
+          <div class="onboard-feature-text">打开 App 替你点完目标</div>
         </div>
         <div class="onboard-feature">
           <div class="onboard-feature-icon">📱</div>
@@ -372,9 +372,9 @@
         <h2 class="empty-title">今天还没有任务</h2>
         <p class="empty-sub">主人，给大肥鱼派个活？</p>
         <div class="empty-suggestions">
-          <div class="empty-suggestion">📁 帮我整理一下桌面文件</div>
-          <div class="empty-suggestion">📷 把相册截图归类</div>
-          <div class="empty-suggestion">📱 打开便签写点东西</div>
+          <div class="empty-suggestion">📱 打开便签，写一条「买牛奶」提醒</div>
+          <div class="empty-suggestion">⏰ 打开时钟，定一个 7:30 的闹钟</div>
+          <div class="empty-suggestion">💬 问问大肥鱼你能帮我做什么</div>
         </div>
       </div>
       <div class="input-area">
@@ -403,7 +403,7 @@
         </div>
         <div class="chat-header-info">
           <div class="chat-header-name">大肥鱼</div>
-          <div class="chat-header-status">正在干活 · 整理桌面</div>
+          <div class="chat-header-status">正在干活 · 写便签提醒</div>
         </div>
         <div class="chat-header-actions">
           <button class="chat-header-btn">🗂</button>
@@ -438,34 +438,34 @@
         <div class="msg-row user">
           <div class="msg-avatar">主</div>
           <div class="msg-body">
-            <div class="msg-bubble">帮我把桌面整理一下</div>
+            <div class="msg-bubble">打开便签，写一条「买牛奶」提醒</div>
             <div class="msg-time">14:30 · 已读</div>
           </div>
         </div>
         <div class="msg-row assistant">
           <div class="msg-avatar"><img src="../assets/big_fish/avatar.png" alt="" onerror="this.outerHTML='🐋'"></div>
           <div class="msg-body">
-            <div class="msg-bubble">收到！先看看桌面上都有啥～</div>
+            <div class="msg-bubble">收到！先打开便签看看界面～</div>
             <div class="msg-time">14:30</div>
           </div>
         </div>
         <div class="tool-card">
           <div class="tool-header">
-            <div class="tool-icon file">📁</div>
-            <span class="tool-name">list_directory</span>
+            <div class="tool-icon app">🚀</div>
+            <span class="tool-name">launch_app</span>
             <span class="tool-badge done">DONE</span>
           </div>
-          <div class="tool-detail">/sdcard/Desktop</div>
-          <div class="tool-result">✓ 扫描完成：23 个文件 · 0.3s</div>
+          <div class="tool-detail">便签</div>
+          <div class="tool-result">✓ 已打开 · 0.8s</div>
         </div>
         <div class="tool-card">
           <div class="tool-header">
-            <div class="tool-icon file">📦</div>
-            <span class="tool-name">move_files</span>
+            <div class="tool-icon app">⌨</div>
+            <span class="tool-name">type_text</span>
             <span class="tool-badge running">RUNNING</span>
           </div>
-          <div class="tool-detail">按类型分类移动 · 19/23</div>
-          <div class="progress-bar"><div class="progress-fill" style="width:82%;"></div></div>
+          <div class="tool-detail">「买牛奶」 · 第 3/6 步</div>
+          <div class="progress-bar"><div class="progress-fill" style="width:50%;"></div></div>
         </div>
       </div>
       <div class="input-area">
@@ -478,7 +478,7 @@
   </div>
   <div class="cap">
     <b>V3 · 主对话 · 执行中</b>
-    <div class="d">大肥鱼以头像形式出现在每条消息左侧，是对话参与者。头部状态实时更新（"正在干活·整理桌面"）。欢迎卡展示能力标签。</div>
+    <div class="d">大肥鱼以头像形式出现在每条消息左侧，是对话参与者。头部状态实时更新（"正在干活·写便签提醒"）。欢迎卡展示能力标签。</div>
     <span class="m">对话式</span><span class="m">核心态</span>
   </div>
 </div>
@@ -505,7 +505,7 @@
         <div class="msg-row user">
           <div class="msg-avatar">主</div>
           <div class="msg-body">
-            <div class="msg-bubble">把相册里截图都移到工作文件夹</div>
+            <div class="msg-bubble">打开时钟，定一个 7:30 的闹钟</div>
             <div class="msg-time">14:32 · 已读</div>
           </div>
         </div>
@@ -515,8 +515,8 @@
             <span class="tool-name">move_files</span>
             <span class="tool-badge error">ERROR</span>
           </div>
-          <div class="tool-detail">移动截图到 /system/work</div>
-          <div class="tool-result err">✗ 失败：目标路径无写入权限</div>
+          <div class="tool-detail">在闹钟页设置 07:30</div>
+          <div class="tool-result err">✗ 失败：未找到时间设置控件，页面布局与预期不符</div>
         </div>
       </div>
       <div class="fail-panel">
@@ -570,17 +570,17 @@
         <div class="msg-row assistant">
           <div class="msg-avatar"><img src="../assets/big_fish/avatar.png" alt="" onerror="this.outerHTML='🐋'"></div>
           <div class="msg-body">
-            <div class="msg-bubble">最后 4 个文件也归类好了，正在汇总…</div>
+            <div class="msg-bubble">写好啦，保存中～</div>
             <div class="msg-time">14:31</div>
           </div>
         </div>
         <div class="tool-card">
           <div class="tool-header">
-            <div class="tool-icon file">📦</div>
-            <span class="tool-name">move_files</span>
+            <div class="tool-icon app">⌨</div>
+            <span class="tool-name">type_text</span>
             <span class="tool-badge done">DONE</span>
           </div>
-          <div class="tool-result">✓ 已移动 19 个文件 · 8.2s</div>
+          <div class="tool-result">✓ 「买牛奶」已写入并保存 · 6.2s</div>
         </div>
         <div style="flex:1;"></div>
       </div>
@@ -589,14 +589,12 @@
           <div class="done-icon">✓</div>
           <div>
             <div class="done-title">办好了~</div>
-            <div class="done-sub">23 个文件 · 用时 23.5s · 新学会 1 个技能</div>
+            <div class="done-sub">便签提醒已创建 · 用时 18.5s · 新学会 1 个技能</div>
           </div>
         </div>
         <div class="done-summary">
-          桌面已整理完毕：<br>
-          <b>文档</b> 7 个 → 整理/文档<br>
-          <b>图片</b> 12 个 → 整理/图片<br>
-          <b>其他</b> 4 个 → 整理/其他
+          便签「买牛奶」已创建：<br>
+          <b>打开</b> 便签 → <b>新建</b> → <b>写入</b>「买牛奶」→ <b>保存</b>
         </div>
         <div class="done-actions">
           <button class="done-btn primary">再来一单</button>
@@ -696,7 +694,7 @@
             <span class="knowledge-badge active">ACTIVE</span>
             <span class="knowledge-title">桌面-文件分类</span>
           </div>
-          <div class="knowledge-preview">识别桌面文件类型，自动归类到对应文件夹。</div>
+          <div class="knowledge-preview">便签类任务的打开/新建/输入/保存路径，自动沉淀复用。</div>
           <div class="knowledge-stats">
             <span>使用 5 次</span>
             <span>成功率 100%</span>
@@ -978,7 +976,7 @@
         <div style="aspect-ratio:1; background:#E0DFD8; border-radius:8px;"></div>
         <div style="aspect-ratio:1; background:#E0DFD8; border-radius:8px;"></div>
       </div>
-      <div class="fish-ball-hint">整理中 · 68% · 点我展开</div>
+      <div class="fish-ball-hint">干活中 · 3/6 步 · 点我展开</div>
       <div class="fish-ball">
         <div class="fish-ball-inner">
           <img src="../assets/big_fish/avatar.png" alt="" onerror="this.outerHTML='🐋'">
@@ -1071,7 +1069,7 @@
             <div style="display:flex; align-items:center; gap:10px; background:#fff; border:1.5px solid #185FA5; border-radius:12px; padding:12px; margin-bottom:8px;">
               <span style="color:#185FA5; font-size:13px;">💬</span>
               <div style="flex:1; min-width:0;">
-                <div style="font-size:13px; color:#1A1B1C; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">帮我整理一下桌面文件</div>
+                <div style="font-size:13px; color:#1A1B1C; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">打开便签，写一条「买牛奶」提醒</div>
                 <div style="font-size:10px; color:#888780;">2 小时前 · 8 步</div>
               </div>
               <span style="font-size:10px; font-weight:700; color:#185FA5; background:#E8F1FA; border-radius:4px; padding:2px 6px;">当前</span>
@@ -1093,7 +1091,7 @@
             <div style="display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #E4E3DD; border-radius:12px; padding:12px;">
               <span style="color:#9AA0A6; font-size:13px;">·</span>
               <div style="flex:1; min-width:0;">
-                <div style="font-size:13px; color:#1A1B1C; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">把相册截图归类</div>
+                <div style="font-size:13px; color:#1A1B1C; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">问问大肥鱼你能帮我做什么</div>
                 <div style="font-size:10px; color:#888780;">上周 · 待命</div>
               </div>
             </div>

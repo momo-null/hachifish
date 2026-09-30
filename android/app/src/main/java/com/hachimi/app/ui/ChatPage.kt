@@ -198,7 +198,12 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             setPadding(0, Ds.dp(act, 4), 0, Ds.dp(act, 16))
             gravity = Gravity.CENTER
         })
-        listOf("帮我整理一下桌面文件", "打开便签写点东西", "把相册截图归类").forEach { s ->
+        // 建议 chips 按八原语真实能力筛选（诚实口径：不承诺不稳的链路）
+        listOf(
+            "打开便签，写一条「买牛奶」提醒",
+            "打开时钟，定一个 7:30 的闹钟",
+            "问问大肥鱼你能帮我做什么"
+        ).forEach { s ->
             box.addView(TextView(act).apply {
                 text = s; textSize = 13f; setTextColor(Ds.PRIMARY)
                 gravity = Gravity.CENTER
@@ -313,7 +318,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             setPadding(0, Ds.dp(act, 12), 0, Ds.dp(act, 10))
         })
         val tags = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("📁 文件整理", "📱 App 操作", "✉️ 发消息").forEach { t ->
+        listOf("📱 App 操作", "⌨ 替你输入", "🔍 看屏幕找控件").forEach { t ->
             tags.addView(Ds.tag(act, t, Ds.PRIMARY, Color.parseColor("#E8F1FA")).apply {
                 (layoutParams as LinearLayout.LayoutParams).rightMargin = Ds.dp(act, 6)
             })

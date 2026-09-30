@@ -65,8 +65,8 @@ class OnboardingActivity : Activity() {
         })
         // V1 功能列表三项（mockup onboard-features）
         listOf(
-            Triple("📁", "文件整理、批量操作"),
-            Triple("📱", "替你操作 App 完成任务"),
+            Triple("📱", "打开 App 替你点完目标"),
+            Triple("⌨", "输入文字、设置提醒"),
             Triple("🧠", "越用越懂你，自动学习")
         ).forEach { (glyph, text) ->
             val row = LinearLayout(this).apply {
