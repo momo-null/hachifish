@@ -12,6 +12,7 @@
 | P2 统一入口 | `c9f1011` | K1a/K1b/K1c + K2/K3（29 kernel 测，8 套全绿）+ ChatPage 统一接线 |
 | P3 悬浮层 | `01afed7` | V10 米白面板 / V11 大肥鱼球（进度环+拖动贴边）/ Gate 10s 超时 |
 | P4 角色设置 | `6464480` | RoleSettingsActivity 双区 + 设置角色入口 + BYOK 单端点+视觉开关 |
+| P4b 会话列表 | `91884f4` | V13 会话面板（浏览/切换/冷启动恢复）+ K6 session_messages_json + SessionUi 纯函数 |
 | P5 引导收尾 | `d682bd1` | V1 欢迎首屏 + 3-Tab 终态（聊天默认） |
 
 验证：kernel 8 套测试全绿（PC 实跑，59 用例）；Android JVM 单测写好（RoleDoc 11 + ChatMapper 13，待 SDK 环境执行）；lint 全净；真机端到端延后（无 SDK/设备环境）。
@@ -275,6 +276,15 @@ ChatPage (LinearLayout)
   - 我区：头像预览（圆形裁剪）、[从相册选择]（`ACTION_GET_CONTENT`）/[拍照]（`MediaStore.ACTION_IMAGE_CAPTURE`）、恢复默认；称呼输入
   - 保存 → `RoleStore.write()` → 同步 `character.md` → Toast "下次对话生效"
 - 头像处理：选图 → `ContentResolver` 读 → 中心裁方 → 圆形 BitmapShader → 压至 256px → 存 `filesDir/user_avatar.png`
+
+### A7. 会话列表（V13，2026-09-30 P4b 补齐）
+
+> 缺口：统一入口下「一个会话 = 一个 task」，P5 摘除任务 Tab 后历史无浏览/切换入口，冷启动也丢上次会话。
+
+- **V13 设计**（mockup 已补）：聊天头部 🗂 → body 内覆盖面板；行 = 状态符（✓/✗/▶/·）+ 首条消息 + 相对时间·步数；当前会话描边高亮 +「当前」tag；「＋新建会话」
+- **K6 kernel**：`session_messages_json(task_id)` → `[{role,content,ts}]` 回放源（与 _session_history 同源 session jsonl，仅 user/assistant）；5 项端到端测试
+- **ChatPage**：切换 = last_task_id 落盘 + 回放消息流；运行中禁止切换（防事件流串台）；冷启动 maybeRestoreLastSession（内核未就绪保留重试）；start 事件持续刷新 last_task_id
+- **SessionUi 纯函数**：stateLabel / relativeTime / subtitle + 6 JVM 测
 
 ### A6. 引导页改造（OnboardingActivity）
 
