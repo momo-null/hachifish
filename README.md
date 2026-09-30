@@ -1,6 +1,6 @@
-# Hachimi · 手机端 GUI Agent
+# Hachifish · 手机端 GUI Agent
 
-> **Hachimi** 是 [OmniAgent](https://github.com/momo-null/OmniAgent) 的手机端实现：说一句话，agent 通过官方无障碍通道在真机上把事办完——真实 App、真实环境，不 root、零自有服务器（BYOK）。
+> **Hachifish** 是 [OmniAgent](https://github.com/momo-null/OmniAgent) 的手机端实现：说一句话，agent 通过官方无障碍通道在真机上把事办完——真实 App、真实环境，不 root、零自有服务器（BYOK）。
 
 ## 它能做什么
 
@@ -52,7 +52,7 @@ cd android
 gradle assembleDebug -PhachimiPython=<python3.12 路径> --no-daemon
 ```
 
-首次运行需在系统设置中开启 Hachimi 无障碍服务，并在 App 内配置模型端点（`harness/config.example.json` 是 PC 侧 harness 的配置模板）。
+首次运行需在系统设置中开启 Hachifish 无障碍服务，并在 App 内配置模型端点（`harness/config.example.json` 是 PC 侧 harness 的配置模板）。
 
 ## 许可
 
