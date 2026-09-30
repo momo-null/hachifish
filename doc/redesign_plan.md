@@ -255,6 +255,7 @@ ChatPage (LinearLayout)
 
 ### A5. 角色设置页（SettingsPage「角色」组 + RoleSettingsActivity）
 
+- **模型配置区简化（2026-09-30 用户定）**：主形态 = 单端点三栏 + 「启用视觉（与主模型共用端点）」开关；开关 on → `vision_*` 落盘继承主端点值，off → 视觉三栏清空（视觉关，观察兜底退 P0）。存储层 BrainConfigStore v4 零改动（已兼容共用形态）；独立视觉端点折叠为「高级」入口（后置增强）
 - 设置首页新增「角色」分组置顶：头像卡（fish_avatar + roleName + "称呼你为「user_name」"）→ 点击进 RoleSettingsActivity
 - RoleSettingsActivity（对应 V9）：
   - 大肥鱼区：角色名输入、人设 prompt 输入（500 字计数）、「恢复默认」

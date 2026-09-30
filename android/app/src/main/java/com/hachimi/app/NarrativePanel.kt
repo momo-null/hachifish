@@ -45,6 +45,32 @@ object NarrativePanel {
     private var collapsed = false
     private var lastStatus = "idle"   // 跨 attach 保留：停靠/浮条切换后回放（start 事件先于 dock 到达时 console 否则停留 idle）
 
+    // ---------------- 事件转发器（K4 第一步：ChatPage 消费同一叙事流） ----------------
+
+    /** 叙事事件订阅者（主线程回调；ChatPage/未来会话列表页挂载）。 */
+    interface Listener {
+        fun onNarrative(type: String, fields: Map<String, Any?>)
+    }
+
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<Listener>()
+
+    @JvmStatic fun addListener(l: Listener) { listeners.addIfAbsent(l) }
+    @JvmStatic fun removeListener(l: Listener) { listeners.remove(l) }
+
+    /** JSONObject → 归一化字段 Map（数值/布尔保持原生类型，供 ChatMapper 纯函数消费）。 */
+    private fun toFields(e: org.json.JSONObject): Map<String, Any?> {
+        val out = HashMap<String, Any?>()
+        for (k in e.keys()) {
+            val v = e.opt(k) ?: continue
+            out[k] = when {
+                v is org.json.JSONArray -> v.toString()
+                v is org.json.JSONObject -> v.toString()
+                else -> v   // String / Int / Boolean / Double 原样
+            }
+        }
+        return out
+    }
+
     // 浮条视图引用
     private var statusLine: TextView? = null
     private var logLine: TextView? = null
@@ -85,6 +111,16 @@ object NarrativePanel {
         main.post {
             try {
                 val e = JSONObject(json)
+                val type = e.optString("event")
+                // K4 转发器：解析后先分发给订阅页（ChatPage 消息流），浮窗渲染照旧
+                if (listeners.isNotEmpty()) {
+                    val fields = toFields(e)
+                    for (l in listeners) {
+                        try { l.onNarrative(type, fields) } catch (ex: Exception) {
+                            Log.w(TAG, "listener: ${ex.message}")
+                        }
+                    }
+                }
                 when (e.optString("event")) {
                     "start" -> {
                         collapsed = false

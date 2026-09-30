@@ -40,6 +40,8 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // P1 对话流列表（redesign_plan 决策：聊天列表必须回收复用；androidx 同族走评审惯例）
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
     // TODO(M2' 后续): 回环 HTTP 服务端选型（NanoHTTPD vs 手写 ServerSocket），走 android/ 依赖评审
     // JVM 单测（redesign_plan：无真机环境，纯函数逻辑用单测覆盖；
     // junit 仅进 test classpath，不触 R7 kernel 白名单）

@@ -10,16 +10,18 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.hachimi.app.ui.ChatPage
 import com.hachimi.app.ui.Ds
 import com.hachimi.app.ui.KnowledgePage
 import com.hachimi.app.ui.SettingsPage
 import com.hachimi.app.ui.TasksPage
 
 /**
- * 产品主壳（S2 终态）：底部 3-Tab（任务/知识/设置）单容器切换。
+ * 产品主壳（P1 起为 4-Tab：聊天/任务/知识/设置，聊天默认——chat 为主助手形态，
+ * redesign_plan A3）。P5 移除旧任务 Tab 后回到 3-Tab 终态。
  * - 内核随 App 启动（幂等；harness 依赖：MainActivity 拉起 KernelHostService——红线，
  *   重写时不可动）。
- * - 任务执行链路 = Chaquopy 直调，全部逻辑在 TasksPage（本壳只管导航与宿主回调）。
+ * - 任务执行链路 = Chaquopy 直调（TasksPage 保留 + ChatPage 复刻同链路）。
  * - 首次进入进 OnboardingActivity（S1 四步授权；「权限引导仅首次出现」）。
  * - readableErrorStatic：人话错误映射单一来源（DoD4），各页共用。
  */
@@ -27,6 +29,7 @@ class MainActivity : Activity() {
 
     private lateinit var content: FrameLayout
     private lateinit var navBar: LinearLayout
+    private var chatPage: ChatPage? = null
     private var tasksPage: TasksPage? = null
     private var knowledgePage: KnowledgePage? = null
     private var settingsPage: SettingsPage? = null
@@ -73,20 +76,29 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         when (currentTab) {
-            0 -> tasksPage?.onResume()
-            1 -> knowledgePage?.onResume()
-            2 -> settingsPage?.onResume()
+            0 -> { chatPage?.onResume(); tasksPage?.onResume() }
+            1 -> tasksPage?.onResume()
+            2 -> knowledgePage?.onResume()
+            else -> settingsPage?.onResume()
         }
     }
 
-    // ---------------- 底部导航（mockup .nav：▦ 任务 / ◈ 知识 / ⚙ 设置） ----------------
+    override fun onPause() {
+        super.onPause()
+        // 事件订阅与可见性同步（K4 转发器生命周期；后台时浮窗继续消费事件）
+        chatPage?.onPause()
+    }
+
+    // ---------------- 底部导航（P1：💬 聊天默认 / ▦ 任务 / ◈ 知识 / ⚙ 设置） ----------------
 
     private fun buildNavBar(): LinearLayout {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.WHITE)
         }
-        val spec = listOf(Triple("▦", "任务", 0), Triple("◈", "知识", 1), Triple("⚙", "设置", 2))
+        val spec = listOf(
+            Triple("💬", "聊天", 0), Triple("▦", "任务", 1),
+            Triple("◈", "知识", 2), Triple("⚙", "设置", 3))
         spec.forEach { (glyph, label, tab) ->
             val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -110,8 +122,9 @@ class MainActivity : Activity() {
         currentTab = tab
         content.removeAllViews()
         val page: View = when (tab) {
-            0 -> (tasksPage ?: TasksPage(this).also { tasksPage = it }).view
-            1 -> (knowledgePage ?: KnowledgePage(this).also { knowledgePage = it }).view
+            0 -> (chatPage ?: ChatPage(this).also { chatPage = it }).view
+            1 -> (tasksPage ?: TasksPage(this).also { tasksPage = it }).view
+            2 -> (knowledgePage ?: KnowledgePage(this).also { knowledgePage = it }).view
             else -> (settingsPage ?: SettingsPage(this).also { settingsPage = it }).view
         }
         content.addView(page, FrameLayout.LayoutParams(
@@ -124,8 +137,9 @@ class MainActivity : Activity() {
             label.setTextColor(if (on) Ds.PRIMARY else Ds.TEXT_3)
             label.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
-        if (tab == 0) tasksPage?.onResume()
-        if (tab == 1) knowledgePage?.onResume()
+        if (tab == 0) chatPage?.onResume()
+        if (tab == 1) tasksPage?.onResume()
+        if (tab == 2) knowledgePage?.onResume()
     }
 
     private fun LinearLayout.cells(): List<LinearLayout> =
