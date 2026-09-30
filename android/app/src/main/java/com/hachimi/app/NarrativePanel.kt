@@ -39,7 +39,7 @@ object NarrativePanel {
     private var context: Context? = null
     private var contentView: LinearLayout? = null
     private var barView: LinearLayout? = null
-    private var pillView: LinearLayout? = null
+    private var pillView: View? = null
     private var docked = false
     private var paused = false
     private var collapsed = false

@@ -9,23 +9,41 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 授权门控管理（架构 §4.4）：敏感操作（type_text / launch_app）执行前强制询问。
- * 白名单按「App × 操作类型」持久化（gate_whitelist.json），allow_always 后不再询问。
- * 阻塞桥：原语线程 latch 等待 GateActivity 用户选择（超时视为拒绝，任务可停止）。
+ *
+ * 作用域（2026-09-30 用户改）：**不按包名持久化**，改为「当前任务内总放行」。
+ * - allow_once：仅本次放行
+ * - allow_always：当前任务内所有敏感操作都不再问（下次新任务自动重置）
+ * - deny：拒绝
+ * 任务开始时由 UI 层调 [beginTask] 重置。
+ * 阻塞桥：原语线程 latch 等待 GateActivity 用户选择（超时视为拒绝）。
  */
 object GateManager {
 
     private const val TAG = "HachimiGate"
-    private const val FILE = "gate_whitelist.json"
     private val seq = AtomicLong(0)
+
+    /** 当前任务是否已被用户「本次任务都允许」——内存态，任务开始时重置。 */
+    @Volatile
+    private var sessionOpen: Boolean = false
 
     data class Verdict(val granted: Boolean, val source: String, val choice: String)
 
-    /** 敏感操作判定：命中白名单直接放行；否则弹 GateUI 阻塞等待用户选择。
-     *  级别（设置→执行，P1.5）：standard=type_text+launch_app 全确认；
-     *  relaxed=launch_app 放行（仅输入确认）。 */
+    /** 新任务开始：重置总放行开关（旧任务的 allow_always 不带到新任务）。 */
+    fun beginTask() {
+        sessionOpen = false
+        Log.i(TAG, "gate session reset (new task)")
+    }
+
+    /** 调试用：强制打开当前任务总放行（对应 DebugBridge gate_allow）。 */
+    fun debugOpenSession() {
+        sessionOpen = true
+    }
+
+    /** 敏感操作判定：当前任务已总放行则直接通过；否则弹 GateUI 阻塞等待用户选择。
+     *  级别：relaxed 时 launch_app 不询问（仅 type_text 问）。 */
     fun enforce(context: Context, pkg: String, op: String, preview: String = ""): Verdict {
-        if (isWhitelisted(context, pkg, op)) {
-            return Verdict(true, "whitelist", "allow_always")
+        if (sessionOpen) {
+            return Verdict(true, "session", "allow_always")
         }
         val level = context.getSharedPreferences("hachimi_ui", Context.MODE_PRIVATE)
             .getString("gate_level", "standard")
@@ -34,7 +52,7 @@ object GateManager {
         }
         val id = seq.incrementAndGet()
         val latch = CountDownLatch(1)
-        var choice = RESULT_NAMES[GateActivity.RESULT_DENY]!! // 超时/异常默认拒绝
+        var choice = RESULT_NAMES[GateActivity.RESULT_DENY]!!
         pending.put(id, { c -> choice = RESULT_NAMES[c] ?: "deny"; latch.countDown() })
         try {
             val i = Intent(context, GateActivity::class.java)
@@ -45,7 +63,6 @@ object GateManager {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(i)
         } catch (e: Exception) {
-            // 弹层失败（如后台启动被系统拦）→ 放行并记录（研究机可观测，不卡死任务）
             Log.e(TAG, "gate activity failed: ${e.message}")
             pending.remove(id)
             return Verdict(true, "fallback", "activity_error")
@@ -53,44 +70,16 @@ object GateManager {
         val got = latch.await(90, TimeUnit.SECONDS)
         pending.remove(id)
         Log.i(TAG, "gate pkg=$pkg op=$op choice=$choice timeout=${!got}")
-        if (choice == "allow_always") remember(context, pkg, op)
+        if (choice == "allow_always") {
+            sessionOpen = true
+            Log.i(TAG, "session opened (all ops allowed this task)")
+        }
         return Verdict(choice.startsWith("allow"), if (got) "user" else "timeout", choice)
     }
 
     /** GateActivity 用户选择回调（按请求 id 定向）。 */
     fun resolve(requestId: Long, resultCode: Int) {
         pending.remove(requestId)?.invoke(resultCode)
-    }
-
-    // ---------------- 白名单（App × 操作类型） ----------------
-
-    fun isWhitelisted(context: Context, pkg: String, op: String): Boolean =
-        load(context).contains("$pkg|$op")
-
-    fun remember(context: Context, pkg: String, op: String) {
-        val key = "$pkg|$op"
-        val entries = load(context).toMutableSet()
-        if (entries.add(key)) {
-            context.openFileOutput(FILE, Context.MODE_PRIVATE).use {
-                it.write(org.json.JSONArray(entries).toString().toByteArray())
-            }
-            Log.i(TAG, "whitelist + $key (${entries.size} entries)")
-        }
-    }
-
-    fun clear(context: Context) {
-        context.deleteFile(FILE)
-    }
-
-    private fun load(context: Context): Set<String> = try {
-        val f = context.getFileStreamPath(FILE)
-        if (!f.exists()) emptySet()
-        else {
-            val arr = org.json.JSONArray(f.readBytes().decodeToString())
-            (0 until arr.length()).map { arr.getString(it) }.toSet()
-        }
-    } catch (_: Exception) {
-        emptySet()
     }
 
     private val pending = HashMap<Long, (Int) -> Unit>()

@@ -49,7 +49,7 @@ class RoleSettingsActivity : Activity() {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ds.PAGE)
-            setPadding(pad, Ds.dp(this, 12), pad, Ds.dp(this, 24))
+            setPadding(pad, Ds.dp(this@RoleSettingsActivity, 12), pad, Ds.dp(this@RoleSettingsActivity, 24))
         }
 
         // 返回行 + 标题
@@ -74,7 +74,7 @@ class RoleSettingsActivity : Activity() {
         })
         box.addView(head)
         box.addView(Ds.small(this, "大肥鱼 × 我 —— 改完保存，下一轮对话生效").apply {
-            setPadding(0, Ds.dp(this, 4), 0, Ds.dp(this, 12))
+            setPadding(0, Ds.dp(this@RoleSettingsActivity, 4), 0, Ds.dp(this@RoleSettingsActivity, 12))
         })
 
         // —— 大肥鱼区 ——
@@ -86,19 +86,19 @@ class RoleSettingsActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         avatarRow.addView(ImageView(this).apply {
-            setImageBitmap(FishAssets.circle(this, FishAssets.AVATAR, 56))
+            setImageBitmap(FishAssets.circle(this@RoleSettingsActivity, FishAssets.AVATAR, 56))
         }, LinearLayout.LayoutParams(Ds.dp(this, 56), Ds.dp(this, 56)))
         avatarRow.addView(TextView(this).apply {
             text = "默认女仆装形象（更多形象敬请期待）"
             textSize = 12f; setTextColor(Ds.TEXT_2)
-            val p = Ds.dp(this, 12)
+            val p = Ds.dp(this@RoleSettingsActivity, 12)
             setPadding(p, 0, 0, 0)
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         fishCard.addView(avatarRow)
         fishCard.addView(label("角色名"))
         roleNameField = field(fishCard, role.roleName, "给它起个名字")
         fishCard.addView(Ds.small(this, "显示在聊天头部和消息旁").apply {
-            setPadding(0, 0, 0, Ds.dp(this, 10))
+            setPadding(0, 0, 0, Ds.dp(this@RoleSettingsActivity, 10))
         })
         fishCard.addView(label("人设提示词"))
         personaField = EditText(this).apply {
@@ -113,7 +113,7 @@ class RoleSettingsActivity : Activity() {
         }
         fishCard.addView(personaField, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        personaCount = Ds.small(this, "").apply { setPadding(0, Ds.dp(this, 4), 0, 0) }
+        personaCount = Ds.small(this, "").apply { setPadding(0, Ds.dp(this@RoleSettingsActivity, 4), 0, 0) }
         fishCard.addView(personaCount)
         personaField.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -150,16 +150,18 @@ class RoleSettingsActivity : Activity() {
         pickRow.addView(Ds.button(this@RoleSettingsActivity, "恢复默认", primary = false) {
             pendingAvatarPath = null
             avatarPreview?.setImageBitmap(userAvatarBitmap(RoleStore.read(this@RoleSettingsActivity)))
-        }.apply {
-            (layoutParams as LinearLayout.LayoutParams).leftMargin = Ds.dp(this@RoleSettingsActivity, 8)
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            // 显式 LP 里设 leftMargin：不能在对 button 的 apply 里改 layoutParams——
+            // 那会在 addView 前访问 null LP → `as LinearLayout.LayoutParams` NPE。
+            leftMargin = Ds.dp(this@RoleSettingsActivity, 8)
+        })
         btnCol.addView(pickRow)
         btnCol.addView(Ds.small(this, "自动裁剪为圆形 · 仅存本机（filesDir），不上传").apply {
-            setPadding(0, Ds.dp(this, 4), 0, 0)
+            setPadding(0, Ds.dp(this@RoleSettingsActivity, 4), 0, 0)
         })
         avatarRow2.addView(btnCol, LinearLayout.LayoutParams(
             0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-            leftMargin = Ds.dp(this, 12)
+            leftMargin = Ds.dp(this@RoleSettingsActivity, 12)
         })
         meCard.addView(avatarRow2)
         meCard.addView(label("对我的称呼"))
@@ -240,7 +242,7 @@ class RoleSettingsActivity : Activity() {
     private fun label(text: String): TextView = TextView(this).apply {
         this.text = text; textSize = 12f; setTextColor(Ds.TEXT_2)
         typeface = Typeface.DEFAULT_BOLD
-        setPadding(0, Ds.dp(this, 10), 0, Ds.dp(this, 4))
+        setPadding(0, Ds.dp(this@RoleSettingsActivity, 10), 0, Ds.dp(this@RoleSettingsActivity, 4))
     }
 
     private fun field(host: LinearLayout, value: String, hint: String): EditText =

@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -17,6 +18,7 @@ import com.hachimi.app.BrainConfigStore
 import com.hachimi.app.BrainConfigStore.BrainConfig
 import com.hachimi.app.KernelHostService
 import com.hachimi.app.MainActivity
+import com.hachimi.app.SettingsActivity
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
@@ -42,7 +44,24 @@ class SettingsPage(private val act: Activity) {
     private var gateSeg: Ds.Seg? = null
     private var visSeg: Ds.Seg? = null
     private var injectSeg: Ds.Seg? = null
+    private var notifSeg: Ds.Seg? = null
+    // 运行权限行 tag 引用（onResume 从系统设置返回时刷新状态）
+    private var a11yRowRef: TextView? = null
+    private var projRowRef: TextView? = null
+    // 授权门控/任务通知 tag 引用（点击切换时实时更新文本）
+    private var gateTagRef: TextView? = null
+    private var notifTagRef: TextView? = null
     private var taps = 0
+
+    // —— 通道卡折叠（P1.5 UI：默认折叠，点击标题展开/收起）——
+    private var channelCard: View? = null
+    private var channelCollapsed = true
+    private val chArrow: TextView by lazy {
+        TextView(act).apply {
+            text = "▸"; textSize = 14f; setTextColor(Ds.TEXT_3)
+            setPadding(Ds.dp(act, 6), 0, 0, 0)
+        }
+    }
 
     /** 主界面分段 ↔ 设置页「默认模式」双向同步钩子（TasksPage 注册）。 */
     companion object {
@@ -63,6 +82,21 @@ class SettingsPage(private val act: Activity) {
          * 内核默认 900s 不动（实验线/对拍口径零影响）。
          */
         fun wallClockS(steps: Int): Long = maxOf(900L, steps * 45L)
+
+        /** 任务通知开关（行为模块；UI 先留，完成/失败通知在 KernelHostService 收尾触发）。 */
+        fun notifOn(c: Activity): Boolean =
+            c.getSharedPreferences(TasksPage.PREFS, 0).getBoolean("task_notify", true)
+
+        /** 无障碍服务是否已开启（GateService 类名命中即认为已启用）。 */
+        fun a11yEnabled(c: Activity): Boolean = runCatching {
+            android.provider.Settings.Secure.getString(c.contentResolver,
+                android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+                ?.contains("com.hachimi.app") ?: false
+        }.getOrDefault(false)
+
+        /** 屏幕录制（MediaProjection）是否正在运行（以 ProjectionHolder 真实状态为准）。 */
+        fun projectionEnabled(c: Activity): Boolean =
+            com.hachimi.app.ProjectionHolder.isRunning
     }
 
     private lateinit var page: ScrollView
@@ -82,6 +116,24 @@ class SettingsPage(private val act: Activity) {
         gateSeg?.select(if (gateLevel(act) == "relaxed") 1 else 0)
         injectSeg?.select(if (act.getSharedPreferences(TasksPage.PREFS, 0)
                 .getBoolean("knowledge_enabled", true)) 1 else 0)
+        refreshPermissionTags()
+        // 录屏授权走 startForegroundService 异步启动，onResume 时 virtualDisplay 可能还没建完；
+        // 延迟两拍重刷，覆盖 ProjectionService onStartCommand 完成的时间窗。
+        main.postDelayed({ refreshPermissionTags() }, 600)
+        main.postDelayed({ refreshPermissionTags() }, 1500)
+    }
+
+    private fun refreshPermissionTags() {
+        a11yRowRef?.let { t ->
+            val ok = a11yEnabled(act)
+            t.text = if (ok) "已开" else "未开"
+            t.setTextColor(if (ok) Ds.GREEN_TXT else Ds.TEXT_3)
+        }
+        projRowRef?.let { t ->
+            val ok = projectionEnabled(act)
+            t.text = if (ok) "已授权" else "未授权"
+            t.setTextColor(if (ok) Ds.GREEN_TXT else Ds.TEXT_3)
+        }
     }
 
     // ---------------- 构建 ----------------
@@ -127,19 +179,53 @@ class SettingsPage(private val act: Activity) {
         roleCard.addView(roleRow)
         box.addView(roleCard)
 
-        // —— ① 通道（BYOK：单端点 + 视觉开关）——
-        box.addView(sectionTitle("通道（BYOK）", topPad = 14))
+        // —— ① 模型（设计稿 V8：分组「模型」，折叠显示「模型配置 (BYOK)」行，点击展开详细）——
+        box.addView(sectionTitle("模型", topPad = 14))
+        val modelRow = Ds.card(act)
+        val modelRowClick = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, Ds.dp(act, 2), 0, Ds.dp(act, 2))
+            setOnClickListener { toggleChannel() }
+        }
+        modelRowClick.addView(TextView(act).apply {
+            text = "🔑"; textSize = 16f
+            layoutParams = LinearLayout.LayoutParams(Ds.dp(act, 30), Ds.dp(act, 30))
+        })
+        val modelRowCol = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        modelRowCol.addView(TextView(act).apply {
+            text = "模型配置 (BYOK)"; textSize = 14f; setTextColor(Ds.TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        modelRowCol.addView(Ds.small(act, "规划模型 · 视觉模型").apply {
+            setPadding(0, Ds.dp(act, 1), 0, 0)
+        })
+        modelRowClick.addView(modelRowCol, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val cfg0 = BrainConfigStore.load(act)
+        modelRowClick.addView(Ds.tag(act, if (cfg0 != null) "已配置 ✓" else "未配置",
+            if (cfg0 != null) Ds.GREEN_TXT else Ds.TEXT_3, Ds.GRAY_BG))
+        modelRowClick.addView(chArrow)
+        modelRow.addView(modelRowClick)
+        box.addView(modelRow)
+
         val ch = Ds.card(act)
+        channelCard = ch
+        ch.visibility = View.GONE   // 默认折叠
         ch.addView(sectionLabel("模型端点"))
         planUrl = field(ch, "https://api.example.com/v1")
-        planKey = field(ch, "sk-…")
+        planKey = field(ch, "sk-…").apply {
+            // 密文显示（Key 不裸奔），读取仍用明文值
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
         planModel = field(ch, "例如 deepseek-v4-flash-vision")
         ch.addView(divider(ch))
-        ch.addView(sectionLabel("启用视觉（与主模型共用端点）"))
+        ch.addView(sectionLabel("视觉"))
         visSeg = Ds.seg(act, listOf("关", "开"), 0) { visSeg?.select(it) }
         ch.addView(visSeg!!.view, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        ch.addView(Ds.small(act, "开 = 视觉观察走主端点（模型需支持图片输入）；关 = 纯无障碍树。").apply {
+        ch.addView(Ds.small(act, "开 = 观察走主端点（模型需支持图片输入）；关 = 纯无障碍树。").apply {
             setPadding(0, Ds.dp(act, 4), 0, 0)
         })
         // 步数上限（2026-09-30 用户反馈：默认写死的 24 改为可配置）
@@ -166,28 +252,100 @@ class SettingsPage(private val act: Activity) {
         ch.addView(resultView)
         box.addView(ch)
 
-        // —— ② 执行 ——
-        box.addView(sectionTitle("执行", topPad = 14))
+        // —— ② 行为（设计稿 V8：授权门控 + 任务通知 + 运行模式 + 运行权限）——
+        // 通用设置行：左 label+desc，右 tag（可更新），整行可点击。返回 row + tagView。
+        fun behaviorRow(label: String, desc: String, tagText: String, tagOk: Boolean,
+                        onClick: () -> Unit): Pair<LinearLayout, TextView> {
+            val row = LinearLayout(act).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, Ds.dp(act, 6), 0, Ds.dp(act, 6))
+                setOnClickListener { onClick() }
+            }
+            val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(act).apply { text = label; textSize = 14f; setTextColor(Ds.TEXT) })
+            col.addView(Ds.small(act, desc).apply { setPadding(0, Ds.dp(act, 1), 0, 0) })
+            row.addView(col.apply {
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            val tag = Ds.tag(act, tagText,
+                if (tagOk) Ds.GREEN_TXT else Ds.TEXT_3, Ds.GRAY_BG)
+            row.addView(tag)
+            return row to tag
+        }
+
+        box.addView(sectionTitle("行为", topPad = 14))
         val ex = Ds.card(act)
-        ex.addView(sectionLabel("默认模式（分段与主界面同步）"))
+        // 授权门控：标准/宽松，点击切换并实时更新 tag
+        val gatePair = behaviorRow("授权门控", "敏感操作前确认",
+            if (gateLevel(act) == "relaxed") "宽松" else "标准", true) {
+            val next = if (gateLevel(act) == "relaxed") "standard" else "relaxed"
+            act.getSharedPreferences(TasksPage.PREFS, 0).edit()
+                .putString("gate_level", next).apply()
+            gateTagRef?.text = if (next == "relaxed") "宽松" else "标准"
+        }
+        ex.addView(gatePair.first)
+        gateTagRef = gatePair.second
+        ex.addView(divider(ex))
+        ex.addView(sectionLabel("运行模式（分段与主界面同步）"))
         modeSeg = Ds.seg(act, listOf("前台引导", "分屏"),
             act.getSharedPreferences(TasksPage.PREFS, 0).getInt("run_mode", 0)) {
             act.getSharedPreferences(TasksPage.PREFS, 0).edit().putInt("run_mode", it).apply()
         }.also { ex.addView(it.view, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)) }
-        ex.addView(sectionLabel("授权门控级别"))
-        gateSeg = Ds.seg(act, listOf("标准（输入+跳转确认）", "宽松（仅输入确认）"),
-            if (gateLevel(act) == "relaxed") 1 else 0) { i ->
+        // 任务通知：开/关，点击切换并实时更新 tag
+        ex.addView(divider(ex))
+        val notifPair = behaviorRow("任务通知", "完成/失败时通知",
+            if (notifOn(act)) "开" else "关", notifOn(act)) {
+            val next = !notifOn(act)
             act.getSharedPreferences(TasksPage.PREFS, 0).edit()
-                .putString("gate_level", if (i == 1) "relaxed" else "standard").apply()
-        }.also { ex.addView(it.view, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)) }
+                .putBoolean("task_notify", next).apply()
+            notifTagRef?.text = if (next) "开" else "关"
+            notifTagRef?.setTextColor(if (next) Ds.GREEN_TXT else Ds.TEXT_3)
+        }
+        ex.addView(notifPair.first)
+        notifTagRef = notifPair.second
+        // 运行权限：无障碍/录屏状态，点击跳系统设置
+        ex.addView(divider(ex))
+        ex.addView(sectionLabel("运行权限"))
+        val (a11yRow, a11yTag) = behaviorRow("无障碍服务", "操作手机的开关",
+            if (a11yEnabled(act)) "已开" else "未开", a11yEnabled(act)) {
+            act.startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+        ex.addView(a11yRow)
+        val (projRow, projTag) = behaviorRow("屏幕录制（观察）", "看屏幕的权限",
+            if (projectionEnabled(act)) "已授权" else "未授权", projectionEnabled(act)) {
+            // 两种宿主都支持：MainActivity 内嵌 tab / SettingsActivity 独立入口
+            (act as? MainActivity)?.requestProjection()
+                ?: (act as? SettingsActivity)?.requestProjection()
+        }
+        ex.addView(projRow)
         box.addView(ex)
+        // 记录权限行 tag 引用，onResume 刷新
+        a11yRowRef = a11yTag
+        projRowRef = projTag
 
-        // —— ③ 知识（K7 接真：弱注入开关 + Curator 说明） ——
-        box.addView(sectionTitle("知识", topPad = 14))
-        val kn = Ds.card(act)
-        kn.addView(sectionLabel("弱注入（技能/记忆摘要进下次任务）"))
+        // —— ③ 关于（设计稿 V8：关于大肥鱼；弱注入/实验入口归此保功能） ——
+        box.addView(sectionTitle("关于", topPad = 14))
+        val about = Ds.card(act)
+        about.addView(TextView(act).apply {
+            text = "关于大肥鱼"; textSize = 14f; setTextColor(Ds.TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        about.addView(Ds.small(act, "DeepSeek 鲸鱼娘萌化形象 · 全能手机小帮手").apply {
+            setPadding(0, Ds.dp(act, 2), 0, 0)
+        })
+        // 引导页入口（V1「大肥鱼没吃饱」）：重置首次标记 + 打开引导页，随时可重看
+        about.addView(TextView(act).apply {
+            text = "查看引导页 ›"; textSize = 13f; setTextColor(Ds.PRIMARY)
+            setPadding(0, Ds.dp(act, 10), 0, 0)
+            setOnClickListener {
+                act.getSharedPreferences(TasksPage.PREFS, 0).edit()
+                    .putBoolean("onboarding_done", false).apply()
+                act.startActivity(Intent(act, com.hachimi.app.OnboardingActivity::class.java))
+            }
+        })
+        about.addView(divider(about))
+        about.addView(sectionLabel("弱注入（技能/记忆摘要进下次任务）"))
         injectSeg = Ds.seg(act, listOf("关", "开"),
             if (act.getSharedPreferences(TasksPage.PREFS, 0)
                     .getBoolean("knowledge_enabled", true)) 1 else 0) { i ->
@@ -202,22 +360,12 @@ class SettingsPage(private val act: Activity) {
                 } catch (_: Exception) {}
             }.start()
         }
-        kn.addView(injectSeg!!.view, LinearLayout.LayoutParams(
+        about.addView(injectSeg!!.view, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        kn.addView(divider(kn))
-        kn.addView(prefRow("Curator 蒸馏", "任务完成后自动蒸馏技能/记忆（无后台定时器）", null))
-        kn.addView(Ds.small(act, "弱注入内容携带弱化提示（可能过时，以实际观测为准）；产物在「知识」Tab 查看。").apply {
-            setPadding(0, Ds.dp(act, 6), 0, 0); setTextColor(Ds.TEXT_3)
-        })
-        box.addView(kn)
-
-        // —— ④ 实验（版本号连点 5 次入口） ——
-        box.addView(sectionTitle("实验", topPad = 14))
-        val lab = Ds.card(act)
-        lab.addView(prefRow("实验模式", "连点版本号 5 次开启（研究者入口）", null))
-        lab.addView(TextView(act).apply {
-            text = "Hachifish v0.1 · P1.5 UI 终态"
-            textSize = 12f; setTextColor(Ds.TEXT_3); setPadding(0, Ds.dp(act, 8), 0, 0)
+        about.addView(prefRow("Curator 蒸馏", "任务完成后自动蒸馏技能/记忆（无后台定时器）", null))
+        about.addView(TextView(act).apply {
+            text = "实验模式 · Hachifish v0.1 · P1.5 UI 终态"
+            textSize = 12f; setTextColor(Ds.TEXT_3); setPadding(0, Ds.dp(act, 10), 0, 0)
             setOnClickListener {
                 if (++taps >= 5) {
                     taps = 0
@@ -225,7 +373,7 @@ class SettingsPage(private val act: Activity) {
                 }
             }
         })
-        box.addView(lab)
+        box.addView(about)
         return ScrollView(act).apply { addView(box) }
     }
 
@@ -249,7 +397,19 @@ class SettingsPage(private val act: Activity) {
         }
 
     private fun divider(host: LinearLayout): View = Ds.divider(act).apply {
-        (layoutParams as LinearLayout.LayoutParams).setMargins(0, Ds.dp(act, 8), 0, Ds.dp(act, 4))
+        // 显式赋值 layoutParams：addView 前默认 LP 是 null，`as` 强转会 NPE。
+        // 提前设好 LinearLayout.LayoutParams，addView 时会复用。
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Ds.dp(act, 1)).apply {
+            setMargins(0, Ds.dp(act, 8), 0, Ds.dp(act, 4))
+        }
+    }
+
+    /** 切换通道卡折叠（默认收起；展开/收起更新箭头 ▸/▾）。 */
+    private fun toggleChannel() {
+        channelCollapsed = !channelCollapsed
+        channelCard?.visibility = if (channelCollapsed) View.GONE else View.VISIBLE
+        chArrow.text = if (channelCollapsed) "▸" else "▾"
     }
 
     /** 设置行（mockup 设置组）：名称+说明，右侧状态 tag；enabled=false 时灰态。 */

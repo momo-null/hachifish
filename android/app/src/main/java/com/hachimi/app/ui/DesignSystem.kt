@@ -58,8 +58,11 @@ object Ds {
                 android.view.WindowInsets.Type.statusBars()
                         or android.view.WindowInsets.Type.displayCutout()
                         or android.view.WindowInsets.Type.navigationBars())
+            // IME insets：edge-to-edge 下 adjustResize 失效，键盘弹出必须手动把底部
+            // padding 增加键盘高度，否则输入区被键盘覆盖（P1.5 UI 反馈 3，魅族实录）。
+            val ime = insets.getInsets(android.view.WindowInsets.Type.ime())
             v.setPadding(v.paddingLeft, bars.top + dp(activity, extraTopDp),
-                v.paddingRight, bars.bottom + dp(activity, extraBottomDp))
+                v.paddingRight, bars.bottom + ime.bottom + dp(activity, extraBottomDp))
             insets
         }
     }

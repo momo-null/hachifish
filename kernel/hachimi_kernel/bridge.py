@@ -387,6 +387,38 @@ def session_messages_json(task_id):
                           ensure_ascii=False)
 
 
+def delete_task_json(task_id):
+    """删除一个历史任务（P1.5 UI 会话面板「删除」数据面）。
+
+    清理面：task.json 索引（TaskStore.remove）+ tasks/<task_id>/ 全部资产
+    （trajectory / run.json / skills / world_model 等，runtime_paths 口径一致）。
+    运行中的任务拒绝删除（防误删正在执行的会话）；task 不存在返回 ok:false。
+    """
+    import shutil as _sh
+    try:
+        from hachimi_kernel.task_store import TaskStore
+        from hachimi_kernel import runtime_paths as P
+        # 不存在：诚实 ok=false（防 UI 误删后仍显示）
+        meta = TaskStore.get(task_id)
+        if meta is None:
+            return json.dumps({"ok": False, "error": "task not found"},
+                              ensure_ascii=False)
+        # 运行中拒绝：当前 phase=running 且 run 属于该 task
+        if _state.get("phase") == "running" and _state.get("run_id"):
+            run = _runs.get(_state.get("run_id"))
+            if run is not None and run.get("task_id") == task_id:
+                return json.dumps({"ok": False, "error": "task running"},
+                                  ensure_ascii=False)
+        d = P.task_dir(task_id)
+        if d.exists():
+            _sh.rmtree(str(d), ignore_errors=True)
+        TaskStore.remove(task_id)
+        return json.dumps({"ok": True, "task_id": task_id}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
 def test_brain_json(base_url, api_key=None, model=None):
     return json.dumps(test_brain(base_url, api_key, model), ensure_ascii=False)
 
@@ -696,15 +728,33 @@ def skills_list_json():
 
 
 def rollouts_list_json(limit=50):
-    """K7c 数据面：蒸馏记忆列表（倒序文件名）。"""
+    """K7c 数据面：蒸馏记忆列表（倒序文件名）。
+
+    2026-09-30 UI 反馈：记忆行要显示实际内容（非 task_id）。返回 preview=
+    首行（去掉 markdown 标题井号），并保留 task_id（点击进详情定位文件）。
+    """
     try:
         d = P.memory_rollouts()
         items = []
         if d.exists():
             files = sorted(d.glob("*.md"), key=lambda f: f.stat().st_mtime,
                            reverse=True)[:max(0, int(limit))]
-            items = [{"task_id": f.stem, "chars": f.stat().st_size}
-                     for f in files]
+            for f in files:
+                preview = ""
+                content = ""
+                try:
+                    text = f.read_text(encoding="utf-8", errors="ignore")
+                    lines = text.splitlines()
+                    for ln in lines[:6]:
+                        s = ln.strip().lstrip("#").strip()
+                        if s:
+                            preview = s
+                            break
+                    content = text.strip()[:1500]
+                except Exception:
+                    pass
+                items.append({"task_id": f.stem, "chars": f.stat().st_size,
+                              "preview": preview, "content": content})
         return json.dumps({"ok": True, "rollouts": items}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"ok": False, "rollouts": [],

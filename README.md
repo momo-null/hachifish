@@ -1,46 +1,59 @@
-# Hachimi · OmniAgent 手机研究载体
+# Hachimi · 手机端 GUI Agent
 
-> **Hachimi** 是 [OmniAgent](https://github.com/momo-null/OmniAgent) 的手机端研究项目：以「手机 GUI agent」为实验场，验证知识级自升级（轨迹 → 蒸馏 → skill/记忆注入）对任务完成率的真实提升（RQ1–RQ3）。
->
-> **硬约束**：完全上机运行（不依赖开发机常驻）、不 root、官方 API（AccessibilityService + MediaProjection）、BYOK 零服务器。
+> **Hachimi** 是 [OmniAgent](https://github.com/momo-null/OmniAgent) 的手机端实现：说一句话，agent 通过官方无障碍通道在真机上把事办完——真实 App、真实环境，不 root、零自有服务器（BYOK）。
 
-## 技术栈定稿（2026-09-26 评审 + spike）
+## 它能做什么
+
+在手机上输入一个自然语言目标（例如"打开 B 站搜索你感兴趣的视频并播放"，已多次真机验证成功），agent 会自主观察屏幕、规划步骤、执行点击/输入/手势，并在声称完成前强制校验屏幕状态。执行中随时可暂停/停止，敏感操作（输入、删除等）先过授权门控，支持"总是允许"白名单。
+
+## 技术架构
 
 | 层 | 选型 |
 |----|------|
-| 原生壳 | Kotlin：AccessibilityService + MediaProjection 桥、前台服务、BYOK 设置 UI |
-| 内核 | Python 子集经 **Chaquopy** 嵌入 APK；**自写极简 ReAct loop**（agents SDK 因 pydantic-core 无 Android wheel 开箱不可用，见 doc 评审 §2.1） |
-| UI 桥 | 双实现同接口：Accessibility（运行时）/ u2（开发调试），对照桌面版 `EmulatorBackend` 原语面 |
+| 原生壳 | Kotlin：AccessibilityService（操作通道）+ MediaProjection（观察通道）、前台服务、授权门控、BYOK 设置 UI |
+| 内核 | Python 子集经 **Chaquopy** 嵌入 APK：自写极简 ReAct loop + 模型客户端 + 知识层（skill / 记忆 / 环境模型），仅标准库 |
+| 模型 | 任意 OpenAI 兼容端点（规划 + 视觉），用户自备 key，存 Android Keystore |
+| 视觉兜底 | 自绘/无控件 id 界面走 VLM；无障碍树可用时以树为主 |
 | 实验框架 | PC 侧 harness + `adb reverse` 回环 HTTP 驱动（产品运行本身不依赖 PC） |
-| Go .so | ⏸ 产品化可选优化，不进入研究范围 |
 
 ## 目录
 
 ```
-android/   Kotlin 壳（无障碍/投屏桥、前台服务、设置）
+android/   Kotlin 壳（无障碍/投屏桥、前台服务、设置、任务 UI）
 kernel/    Python 子集：极简 loop + 知识层（语义上游 = OmniAgent omni_core/local）
-harness/   PC 侧实验框架（4 组对照、状态重置、指标采集、对拍用例）
-doc/       架构设计、里程碑、预注册与评审档案
+harness/   PC 侧实验框架（对照组注入、状态重置、指标采集、对拍用例）
+doc/       架构、里程碑、预注册、交互原型
 spec/      红线与工程规范
 ```
 
-## 治理文档（按此顺序读）
+## 文档
 
 | 文档 | 角色 |
 |------|------|
-| [doc/architecture.md](doc/architecture.md) | **架构决策权威**（组件/契约/ADR/上游移植地图） |
-| [spec/redlines.md](spec/redlines.md) | **红线**（R1–R12，含检查方式与变更流程） |
-| [doc/milestones.md](doc/milestones.md) | 里程碑计划（六要素 DoD + 检查点 + 触发规则） |
-| [doc/preregistration_v1.1_source.html](doc/preregistration_v1.1_source.html) | 预注册研究方案 v1.1 原文存档 |
-| [doc/preregistration_v1.2_revisions.md](doc/preregistration_v1.2_revisions.md) | v1.2 修订清单（待并入正式版后冻结 tag `prereg-v1.2`） |
-| [doc/mobile_research_feasibility_review_2026-09-26.md](doc/mobile_research_feasibility_review_2026-09-26.md) | 落地可行性评审 v2（含 spike 证据链） |
+| [doc/architecture.md](doc/architecture.md) | 架构决策权威（组件/契约/ADR/上游移植地图） |
+| [doc/preregistration_v1.3.md](doc/preregistration_v1.3.md) | 预注册研究方案（tag `prereg-v1.3`） |
+| [doc/product_milestones.md](doc/product_milestones.md) | 产品里程碑（P0–P6） |
+| [doc/milestones.md](doc/milestones.md) | 研究里程碑（M0'–M6'，已暂停冻结） |
+| [spec/redlines.md](spec/redlines.md) | 红线（R1–R12，含检查方式与变更流程） |
 | [doc/ux_mockup.html](doc/ux_mockup.html) | 交互原型（8 界面示意） |
 
-## 里程碑（详见 [doc/milestones.md](doc/milestones.md)）
+## 约束与原则
 
-CP0 预注册冻结 → M0' 真机环境 → M1' Kotlin 桥 → M2' Chaquopy 嵌内核 → M3' 单任务闭环 → M4' 实验框架 → M5' 中期实验(CP2) → M6' 正式实验与报告（**8–10 周单人**，每里程碑按 DoD green-light）
+- 官方 API only：操作走 AccessibilityService，观察走 MediaProjection / takeScreenshot；禁 root、私有 hook
+- BYOK：模型端点与密钥完全由用户自备，App 只与用户配置的端点通信
+- 本地优先：轨迹、知识、配置全部落 App 私有目录，无遥测
+- 随时可中止：主界面、悬浮面板、通知栏三处均可停止
+- 语义上游：[OmniAgent](https://github.com/momo-null/OmniAgent) `omni_core/local`；一致性靠 harness 对拍测试维持
 
-## 上游与口径
+## 构建
 
-- 语义上游：OmniAgent `main`（`omni_core/local/*`、K2 信号、`scripts/effectiveness.py`）；一致性靠 harness 对拍测试维持，不用 submodule。
-- 决策档案：OmniAgent 仓库 `mobile-feasibility` 分支。
+```bash
+cd android
+gradle assembleDebug -PhachimiPython=<python3.12 路径> --no-daemon
+```
+
+首次运行需在系统设置中开启 Hachimi 无障碍服务，并在 App 内配置模型端点（`harness/config.example.json` 是 PC 侧 harness 的配置模板）。
+
+## 许可
+
+研究数据与脚本随结果开源；研究方案见预注册文档。

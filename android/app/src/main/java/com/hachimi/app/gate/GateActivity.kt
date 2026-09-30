@@ -105,17 +105,20 @@ class GateActivity : Activity() {
             setPadding(0, 0, 0, Ds.dp(c, 8))
         })
         // 三级授权（V12 文案）
-        sheet.addView(Ds.button(c, "允许一次") { finishWith(RESULT_ALLOW_ONCE) })
-        sheet.addView(Ds.button(c, "本次任务都允许「$targetPkg」的$opType", primary = false) {
-            finishWith(RESULT_ALLOW_ALWAYS)
-        }.apply {
-            (layoutParams as LinearLayout.LayoutParams).topMargin = Ds.dp(c, 10)
-        })
-        sheet.addView(Ds.button(c, "拒绝并停止任务", primary = false, danger = true) {
+        // 注意：不能 addView 单参 + apply 改 layoutParams——apply 在 addView 之前执行，
+        // 此时 layoutParams 为 null，`as LinearLayout.LayoutParams` 强转即 NPE（真机崩溃根因）。
+        // 必须显式传双参 addView（先构造 LP）。
+        fun spaced(view: TextView, topDp: Int) {
+            sheet.addView(view, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = Ds.dp(c, topDp)
+            })
+        }
+        spaced(Ds.button(c, "允许一次") { finishWith(RESULT_ALLOW_ONCE) }, 0)
+        spaced(Ds.button(c, "本次任务都放行") { finishWith(RESULT_ALLOW_ALWAYS) }, 10)
+        spaced(Ds.button(c, "拒绝并停止任务", primary = false, danger = true) {
             finishWith(RESULT_DENY)
-        }.apply {
-            (layoutParams as LinearLayout.LayoutParams).topMargin = Ds.dp(c, 10)
-        })
+        }, 10)
         countdownLabel = TextView(c).apply {
             text = "$secondsLeft 秒未选择将自动拒绝"
             textSize = 11f; setTextColor(Ds.TEXT_3)

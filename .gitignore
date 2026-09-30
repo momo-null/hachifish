@@ -22,6 +22,8 @@ venv/
 Thumbs.db
 .tools/
 .codebuddy/
+.zcode/
+.zcodeignore
 
 # 本地密钥 / BYOK 配置（绝不入库）
 *.local.json

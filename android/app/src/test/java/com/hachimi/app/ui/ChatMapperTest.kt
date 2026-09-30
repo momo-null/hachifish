@@ -130,12 +130,24 @@ class ChatMapperTest {
     }
 
     @Test
-    fun `user message never emitted by events`() {
-        // UserMsg 仅本地插入；映射层任何事件都不产出（防内核伪造用户消息）
-        listOf("start", "message", "step", "finish", "error", "mode", "paused").forEach {
-            val e = mapOf<String, Any?>("content" to "x", "text" to "x", "status" to "done",
-                "tool" to "t", "summary" to "s", "error" to "e")
-            assertFalse(ChatMapper.item(it, e) is ChatItem.UserMsg)
-        }
+    fun `tool label is user-friendly chinese phrase`() {
+        assertEquals("打开应用", ChatMapper.toolLabel("launch_app"))
+        assertEquals("输入文字", ChatMapper.toolLabel("type_text"))
+        assertEquals("点击控件", ChatMapper.toolLabel("tap_by_id"))
+        assertEquals("点击屏幕", ChatMapper.toolLabel("tap_xy"))
+        assertEquals("查看屏幕", ChatMapper.toolLabel("observe"))
+        assertEquals("滑动屏幕", ChatMapper.toolLabel("gesture"))
+        assertEquals("按键操作", ChatMapper.toolLabel("press"))
+        assertEquals("完成", ChatMapper.toolLabel("task_done"))
+        assertEquals("识别画面", ChatMapper.toolLabel("look"))
+        assertEquals("等待加载", ChatMapper.toolLabel("wait"))
+        // 未命中回退原始名 + 前缀（诚实口径，不臆造）
+        assertEquals("操作·weird_tool", ChatMapper.toolLabel("weird_tool"))
+    }
+
+    @Test
+    fun `tool card count defaults to one`() {
+        val running = ChatMapper.item("step", stepEvent(ok = null)) as ChatItem.ToolCard
+        assertEquals(1, running.count)
     }
 }

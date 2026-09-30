@@ -88,7 +88,7 @@ class MainActivity : Activity() {
         chatPage?.onPause()
     }
 
-    // ---------------- 底部导航（P5 终态：💬 聊天默认 / ◈ 知识 / ⚙ 设置） ----------------
+    // ---------------- 底部导航（对齐设计稿 V8：💬 聊天 / 🧠 知识 / ⚙ 设置） ----------------
 
     private fun buildNavBar(): LinearLayout {
         val bar = LinearLayout(this).apply {
@@ -96,7 +96,7 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.WHITE)
         }
         val spec = listOf(
-            Triple("💬", "聊天", 0), Triple("◈", "知识", 1), Triple("⚙", "设置", 2))
+            Triple("💬", "聊天", 0), Triple("🧠", "知识", 1), Triple("⚙", "设置", 2))
         spec.forEach { (glyph, label, tab) ->
             val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL

@@ -7,8 +7,11 @@ import java.time.OffsetDateTime
 /** SessionUi 纯函数单测（V13 会话列表：状态文案 / 相对时间 / 副标题）。 */
 class SessionUiTest {
 
+    /** 生成「minutesAgo 分钟前」的 ISO 时间。多减 5s 余量：isoOf 在断言时才取 now，
+     *  晚于测试开头采集的 now，diff 恒比整边界少毫秒级；若取整分钟会因整数除法
+     *  下溢一档（5 分钟→4 分钟、48h→1 天）。5s 余量让 diff 落在区间中段避开整边界。 */
     private fun isoOf(minutesAgo: Long): String =
-        OffsetDateTime.now().minusMinutes(minutesAgo).toString()
+        OffsetDateTime.now().minusMinutes(minutesAgo).minusSeconds(5).toString()
 
     @Test
     fun `state label by success overrides state`() {

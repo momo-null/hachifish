@@ -22,12 +22,14 @@ sealed class ChatItem {
     /** 大肥鱼口播/答案（左气泡；P1 用于 finish 前的最终答复，P2 扩展穿插口播）。 */
     data class AssistantMsg(val text: String) : ChatItem()
 
-    /** tool 执行卡片：icon 色按 [ok] 三态（null=进行中）。 */
+    /** tool 执行卡片：icon 色按 [ok] 三态（null=进行中）。count>1 = 连续同类调用折叠
+     *  （P1.5 UI：连续 observe 折叠成「查看屏幕 ×N」，降噪）。 */
     data class ToolCard(
         val step: Int?,
         val tool: String,
         val ok: Boolean?,
-        val error: String?
+        val error: String?,
+        val count: Int = 1
     ) : ChatItem()
 
     /** 完成面板（fish_done 彩蛋 + summary + 再来一单）。 */
@@ -120,5 +122,22 @@ object ChatMapper {
         tool.contains("press") || tool.contains("back") -> "⬅"
         tool == "task_done" -> "🏁"
         else -> "🔧"
+    }
+
+    /** tool 名 → 用户友好中文短语（P1.5 UI 反馈：调用条术语人性化）。
+     *  纯函数可测；未命中时回退原始名 + 前缀（诚实口径：不臆造语义）。 */
+    fun toolLabel(tool: String): String = when {
+        tool == "launch_app" -> "打开应用"
+        tool == "type_text" -> "输入文字"
+        tool == "tap_by_id" -> "点击控件"
+        tool == "tap_xy" -> "点击屏幕"
+        tool == "observe" -> "查看屏幕"
+        tool == "gesture" -> "滑动屏幕"
+        tool == "swipe" -> "滑动屏幕"
+        tool == "press" -> "按键操作"
+        tool == "task_done" -> "完成"
+        tool == "look" -> "识别画面"
+        tool == "wait" -> "等待加载"
+        else -> "操作·$tool"
     }
 }

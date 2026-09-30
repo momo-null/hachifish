@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Shader
 import android.util.LruCache
+import com.hachimi.app.R
 import kotlin.math.max
 
 /**

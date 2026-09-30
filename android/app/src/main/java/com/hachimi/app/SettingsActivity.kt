@@ -1,6 +1,7 @@
 package com.hachimi.app
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import com.hachimi.app.ui.Ds
 import com.hachimi.app.ui.SettingsPage
@@ -25,5 +26,22 @@ class SettingsActivity : Activity() {
     override fun onResume() {
         super.onResume()
         page?.onResume()
+    }
+
+    /** 屏幕录制授权入口（行为段「屏幕录制」行点击调用）。 */
+    fun requestProjection() {
+        val pm = getSystemService(MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+        startActivityForResult(pm.createScreenCaptureIntent(), REQ_PROJECTION)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PROJECTION && resultCode == RESULT_OK && data != null) {
+            KernelHostService.startProjection(this, resultCode, data)
+        }
+    }
+
+    companion object {
+        private const val REQ_PROJECTION = 2002
     }
 }

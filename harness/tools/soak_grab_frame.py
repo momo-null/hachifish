@@ -8,11 +8,15 @@ p95 ≤ 300ms、无 OOM/崩溃。
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 
-ADB = r"REPO_ROOT\.tools\platform-tools\adb.exe"
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(_ROOT, "harness"))
+from _env import ADB  # noqa: E402  （环境变量 HACHIMI_ADB 可覆盖）
+
 PKG = "com.hachimi.app"
 
 

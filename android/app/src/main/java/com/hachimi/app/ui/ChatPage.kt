@@ -22,7 +22,6 @@ import com.hachimi.app.KernelHostService
 import com.hachimi.app.MainActivity
 import com.hachimi.app.NarrativePanel
 import com.hachimi.app.RoleStore
-import com.hachimi.app.SettingsPage
 import org.json.JSONObject
 
 /**
@@ -260,7 +259,15 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             if (ChatMapper.replacesThinking(item) && items.lastOrNull() == ChatItem.Thinking) {
                 items.removeAt(items.size - 1)
             }
-            items.add(item)
+            // 连续同类 observe 折叠（P1.5 UI）：末尾也是 observe ToolCard → count+1 不新增，
+            // 降噪（「查看屏幕 ×N」），保留首次语义与 ok 态。
+            val last = items.lastOrNull()
+            if (item is ChatItem.ToolCard && item.tool.contains("observe") && last is ChatItem.ToolCard
+                && last.tool.contains("observe") && last.count > 0) {
+                items[items.size - 1] = last.copy(count = last.count + 1)
+            } else {
+                items.add(item)
+            }
             refresh()
         }
     }
@@ -318,10 +325,14 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             setPadding(0, Ds.dp(act, 12), 0, Ds.dp(act, 10))
         })
         val tags = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("📱 App 操作", "⌨ 替你输入", "🔍 看屏幕找控件").forEach { t ->
-            tags.addView(Ds.tag(act, t, Ds.PRIMARY, Color.parseColor("#E8F1FA")).apply {
-                (layoutParams as LinearLayout.LayoutParams).rightMargin = Ds.dp(act, 6)
-            })
+        listOf("📱 App 操作", "⌨ 替你输入", "🔍 看屏幕找控件").forEachIndexed { i, t ->
+            // 显式双参 addView：单参 addView + apply 改 layoutParams 会在 addView 前
+            // 访问 null LP → `as LinearLayout.LayoutParams` NPE（真机崩溃根因）。
+            tags.addView(Ds.tag(act, t, Ds.PRIMARY, Color.parseColor("#E8F1FA")),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    if (i > 0) leftMargin = Ds.dp(act, 6)
+                })
         }
         box.addView(tags)
     }
@@ -343,6 +354,11 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         sending = true
         input.isEnabled = false
         input.setText("")
+        // 点发送即收起输入法（P1.5 UI 反馈 3）：adjustResize 下输入区上移到键盘上方，
+        // 发送后收起键盘让消息流/输入区回到完整可见高度。
+        input.clearFocus()
+        (act.getSystemService(Activity.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+            .hideSoftInputFromWindow(input.windowToken, 0)
         lastObjective = objective
         yieldedHome = false
         items.add(ChatItem.UserMsg(objective))
@@ -542,7 +558,53 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             row.addView(col, LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             if (current) row.addView(Ds.tag(act, "当前", Ds.PRIMARY, Color.parseColor("#E8F1FA")))
+            // 行内删除按钮（P1.5 UI）：删历史会话；点击 consume 不触发整行切换。
+            // 用独立 TextView 而非 setOnClickListener 包裹，避免与行点击冲突。
+            // 符号用抽象「✕」（非 emoji 🗑），次级灰、视觉克制。
+            row.addView(TextView(act).apply {
+                text = "✕"; textSize = 13f; gravity = Gravity.CENTER
+                setTextColor(Ds.TEXT_2)
+                setOnClickListener {
+                    android.app.AlertDialog.Builder(act)
+                        .setTitle("删除这个会话？")
+                        .setMessage("将删除「${t.optString("objective").ifEmpty { "（无标题）" }}」及其全部执行记录，不可恢复。")
+                        .setPositiveButton("删除") { _, _ -> deleteSession(tid) }
+                        .setNegativeButton("取消", null)
+                        .show()
+                }
+            }, LinearLayout.LayoutParams(Ds.dp(act, 30), Ds.dp(act, 30)).apply {
+                leftMargin = Ds.dp(act, 6)
+            })
         }
+    }
+
+    /** 删除会话：bridge 删除 task 资产 → 刷新列表；若是当前会话则清 currentTaskId/last_task_id/items。 */
+    private fun deleteSession(tid: String) {
+        val bridge = KernelHostService.pyBridgeModule
+        if (bridge == null) { toast("内核未就绪，稍后再试"); return }
+        Thread {
+            try {
+                val r = JSONObject(bridge.callAttr("delete_task_json", tid).toString())
+                main.post {
+                    if (r.optBoolean("ok")) {
+                        if (tid == currentTaskId) {
+                            currentTaskId = null
+                            prefs.edit().remove("last_task_id").apply()
+                            items.clear()
+                            phase = ChatPhase.IDLE
+                            headerStatus.text = phase.label
+                            refresh()
+                        }
+                        toast("已删除")
+                        openSessions()
+                    } else {
+                        toast("删除失败：${r.optString("error")}")
+                    }
+                }
+            } catch (e: Exception) {
+                main.post { toast("删除失败：${e.javaClass.simpleName}") }
+            }
+        }.start()
     }
 
     /** 切换会话：last_task_id 落盘 + session_messages 回放为消息流。 */
@@ -671,19 +733,32 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         private fun userRow(m: ChatItem.UserMsg): View = LinearLayout(act).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
+            // 行必须 MATCH_PARENT 宽，gravity=END 才会把子 View 推到右侧；
+            // 默认 WRAP_CONTENT 行无剩余宽度，END 失效导致用户气泡挤在左侧（真机实录）。
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }.also { row ->
             row.addView(TextView(act).apply {
                 text = m.text; textSize = 14f; setTextColor(Color.WHITE)
                 background = Ds.round(act, 16, Ds.PRIMARY)
                 val p = Ds.dp(act, 12)
                 setPadding(p, p / 2 + Ds.dp(act, 2), p, p / 2 + Ds.dp(act, 2))
-                maxWidth = Ds.dp(act, 260)
+                maxWidth = Ds.dp(act, 300)
+            })
+            // 用户头像：气泡右侧，用「用户角色」头像（上传图 > 称呼首字），与大肥鱼（左）对称
+            row.addView(ImageView(act).apply {
+                setImageBitmap(userAvatar30)
+            }, LinearLayout.LayoutParams(Ds.dp(act, 28), Ds.dp(act, 28)).apply {
+                leftMargin = Ds.dp(act, 8); topMargin = Ds.dp(act, 2)
             })
         }
 
         private fun assistantRow(m: ChatItem.AssistantMsg): View = LinearLayout(act).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.START
+            // 行 MATCH_PARENT 宽让 gravity=START 生效（同 userRow 根因修复）。
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }.also { row ->
             row.addView(ImageView(act).apply {
                 setImageBitmap(avatar30)
@@ -693,7 +768,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 background = Ds.round(act, 16, Color.WHITE, 1, Ds.CARD_BORDER)
                 val p = Ds.dp(act, 12)
                 setPadding(p + Ds.dp(act, 4), p / 2 + Ds.dp(act, 2), p + Ds.dp(act, 4), p / 2 + Ds.dp(act, 2))
-                maxWidth = Ds.dp(act, 240)
+                maxWidth = Ds.dp(act, 300)
             }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 leftMargin = Ds.dp(act, 8); topMargin = Ds.dp(act, 2)
@@ -705,9 +780,11 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             background = Ds.round(act, 12, Color.WHITE, 1, Ds.CARD_BORDER)
             val p = Ds.dp(act, 10)
             setPadding(p, p / 2, p, p / 2)
+            // 宽度对齐对话气泡（WRAP_CONTENT），不再占满整行显得过长；
+            // 左缩进与大肥鱼头像对齐（头像 28dp + 文本 margin 8dp = 36dp）。
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                leftMargin = Ds.dp(act, 36)
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                leftMargin = Ds.dp(act, 36); topMargin = Ds.dp(act, 4)
             }
         }.also { card ->
             val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -715,10 +792,14 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 text = ChatMapper.toolGlyph(t.tool); textSize = 14f
             })
             head.addView(TextView(act).apply {
-                text = t.tool; textSize = 12f; setTextColor(Ds.TEXT)
-                typeface = android.graphics.Typeface.MONOSPACE
+                // 中文友好名（toolLabel）；折叠时带 ×N
+                text = if (t.count > 1) "${ChatMapper.toolLabel(t.tool)} ×${t.count}"
+                       else ChatMapper.toolLabel(t.tool)
+                textSize = 12f; setTextColor(Ds.TEXT)
                 val p = Ds.dp(act, 6)
                 setPadding(p, 0, 0, 0)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
             })
             head.addView(TextView(act).apply {
                 text = when (t.ok) {
@@ -751,6 +832,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             val p = Ds.dp(act, 14)
             setPadding(p, p, p, p)
         }.also { card ->
+            card.layoutParams = ViewGroup.LayoutParams(
+                Ds.dp(act, 300), ViewGroup.LayoutParams.WRAP_CONTENT)
             val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             head.addView(TextView(act).apply {
                 text = "✓"; textSize = 16f
@@ -810,6 +893,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             val p = Ds.dp(act, 14)
             setPadding(p, p, p, p)
         }.also { card ->
+            card.layoutParams = ViewGroup.LayoutParams(
+                Ds.dp(act, 300), ViewGroup.LayoutParams.WRAP_CONTENT)
             val head = LinearLayout(act).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -896,5 +981,26 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         }
 
         private val avatar30 by lazy { FishAssets.circle(act, FishAssets.AVATAR, 28) }
+
+        /** 用户角色头像（28dp）：上传图 > 称呼首字圆（与大肥鱼头像区分，P1.5 UI）。 */
+        private val userAvatar30 by lazy {
+            RoleStore.userAvatarFile(act, role.userAvatarPath)?.let { f ->
+                android.graphics.BitmapFactory.decodeFile(f.absolutePath)?.let { raw ->
+                    return@lazy FishAssets.circle(raw, Ds.dp(act, 28))
+                }
+            }
+            val size = Ds.dp(act, 28)
+            val out = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(out)
+            canvas.drawColor(Ds.PRIMARY)
+            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE; textSize = size * 0.44f
+                textAlign = android.graphics.Paint.Align.CENTER
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            val y = size / 2f - (paint.descent() + paint.ascent()) / 2
+            canvas.drawText(role.userInitial, size / 2f, y, paint)
+            out
+        }
     }
 }

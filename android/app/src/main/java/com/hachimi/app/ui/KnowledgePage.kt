@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
@@ -200,12 +201,32 @@ class KnowledgePage(private val act: Activity) {
                     val row = LinearLayout(act).apply {
                         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                     }
-                    row.addView(TextView(act).apply {
-                        text = it2.optString("task_id"); textSize = 13f
-                        typeface = Typeface.MONOSPACE; setTextColor(Ds.TEXT)
+                    // 记忆行：显示实际内容摘要（preview，对齐设计稿 V7），超 2 行截断；
+                    // 点击进详情（AlertDialog 展示完整 content）。
+                    val contentFull = it2.optString("content")
+                    val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }.apply {
                         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+                    col.addView(TextView(act).apply {
+                        text = it2.optString("preview").takeIf { it.isNotBlank() }
+                            ?: it2.optString("task_id")
+                        textSize = 13f; setTextColor(Ds.TEXT)
+                        maxLines = 2
+                        ellipsize = TextUtils.TruncateAt.END
                     })
-                    row.addView(Ds.small(act, "${it2.optInt("chars")} 字"))
+                    if (contentFull.isNotBlank()) {
+                        col.addView(Ds.small(act, "${it2.optInt("chars")} 字 · 点击查看详情").apply {
+                            setPadding(0, Ds.dp(act, 2), 0, 0)
+                        })
+                    }
+                    row.addView(col)
+                    card.setOnClickListener {
+                        android.app.AlertDialog.Builder(act)
+                            .setTitle("记忆详情")
+                            .setMessage(contentFull.ifBlank { "（无内容）" })
+                            .setPositiveButton("关闭", null)
+                            .show()
+                    }
                     card.addView(row)
                     bodyHost.addView(card, Ds.vp(top = Ds.dp(act, 6)))
                 }

@@ -385,6 +385,21 @@ class TasksPage(private val act: Activity) {
             toast("请先输入目标，例如：在便签里创建一条「买牛奶」的提醒")
             return
         }
+        // 新任务开始：重置门控总放行（上次任务的"本次任务都放行"不带过来）
+        com.hachimi.app.gate.GateManager.beginTask()
+        // 无障碍未开直接跑必失败：弹窗引导去开启（Onboarding 页有完整四步）
+        if (com.hachimi.app.HachimiAccessibilityService.instance == null) {
+            android.app.AlertDialog.Builder(act)
+                .setTitle("需要无障碍权限")
+                .setMessage("大肥鱼要靠无障碍服务才能操作手机。请到开启页打开「Hachifish 无障碍服务」，完成后回来再发任务。")
+                .setPositiveButton("去开启") { _, _ ->
+                    act.startActivity(android.content.Intent(
+                        android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+                .setNegativeButton("取消", null)
+                .show()
+            return
+        }
         val bridge = KernelHostService.pyBridgeModule
         if (bridge == null) {
             toast("内核启动中（首次约需 10 秒），稍后再试")

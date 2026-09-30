@@ -112,20 +112,18 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                         .put("note", "brain config stored (Keystore-encrypted)")
                 }
                 "gate_clear" -> {
-                    // M4' 状态重置：清空授权白名单（实验组间口径一致）
-                    com.hachimi.app.gate.GateManager.clear(context)
-                    JSONObject().put("ok", true).put("note", "gate whitelist cleared")
+                    // M4' 状态重置：门控总放行（旧实现按包名白名单，现改为任务级内存开关）
+                    com.hachimi.app.gate.GateManager.beginTask()
+                    JSONObject().put("ok", true).put("note", "gate session reset")
                 }
                 "app_index" -> {
                     // 本机应用索引数据面（2026-09-30）：规模/样本/时效，PC 排查用
                     AppIndex.debugJson(context)
                 }
                 "gate_allow" -> {
-                    // M4' 门控预授权（reset 阶段逐任务注入 App×操作对，避免 run 内人工应答）
-                    val pkg = args.optString("package")
-                    val op = args.optString("op")
-                    com.hachimi.app.gate.GateManager.remember(context, pkg, op)
-                    JSONObject().put("ok", true).put("note", "whitelist + $pkg|$op")
+                    // M4' 门控预授权（新实现：任务级总放行，不区分 pkg/op）
+                    com.hachimi.app.gate.GateManager.debugOpenSession()
+                    JSONObject().put("ok", true).put("note", "gate session opened for current task")
                 }
                 "config" -> {
                     // 设备 profile 注入（跨品牌兼容）：把 ROM 专属参数写入应用私有 SharedPreferences
