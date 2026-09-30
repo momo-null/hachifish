@@ -33,6 +33,38 @@ class OnboardingActivity : Activity() {
 
         box.addView(Ds.appBar(this, "Hachimi",
             listOf(Ds.tag(this, "v0.1 · 初始化", Ds.TEXT_2, Ds.GRAY_BG))))
+
+        // —— P5 欢迎首屏（V1：大肥鱼「没吃饱」自嘲萌开场，四步授权之前）——
+        val welcome = Ds.card(this)
+        welcome.gravity = android.view.Gravity.CENTER_HORIZONTAL
+        welcome.addView(android.widget.ImageView(this).apply {
+            setImageResource(com.hachimi.app.ui.FishAssets.GUIDE)
+            adjustViewBounds = true
+            maxHeight = Ds.dp(this@OnboardingActivity, 150)
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+        })
+        welcome.addView(TextView(this).apply {
+            text = "才不是吃白饭的好吗！说一句目标，我替你点完"
+            textSize = 12.5f; setTextColor(Ds.TEXT_2)
+            gravity = android.view.Gravity.CENTER
+            setLineSpacing(Ds.dp(this@OnboardingActivity, 2).toFloat(), 1f)
+            setPadding(0, Ds.dp(this@OnboardingActivity, 10), 0, 0)
+        })
+        welcome.addView(TextView(this).apply {
+            text = "大肥鱼前来报到"
+            textSize = 18f; setTextColor(Ds.TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, Ds.dp(this@OnboardingActivity, 8), 0, Ds.dp(this@OnboardingActivity, 4))
+        })
+        welcome.addView(Ds.small(this, "说一句目标，大肥鱼替你点完——文件、App、消息都行").apply {
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, 0, 0, Ds.dp(this@OnboardingActivity, 4))
+        })
+        box.addView(welcome, Ds.vp(bottom = Ds.dp(this, 14)))
+
         box.addView(Ds.small(this, "四步授权：无障碍 → 投屏 → 白名单 → BYOK。研究机一次配好，之后免维护。").apply {
             setPadding(0, 0, 0, Ds.dp(this@OnboardingActivity, 12))
         })

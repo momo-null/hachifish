@@ -76,9 +76,8 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         when (currentTab) {
-            0 -> { chatPage?.onResume(); tasksPage?.onResume() }
-            1 -> tasksPage?.onResume()
-            2 -> knowledgePage?.onResume()
+            0 -> { chatPage?.onResume(); tasksPage?.onResume() }   // tasksPage 惰性不再创建，?. 恒 null 安全
+            1 -> knowledgePage?.onResume()
             else -> settingsPage?.onResume()
         }
     }
@@ -89,7 +88,7 @@ class MainActivity : Activity() {
         chatPage?.onPause()
     }
 
-    // ---------------- 底部导航（P1：💬 聊天默认 / ▦ 任务 / ◈ 知识 / ⚙ 设置） ----------------
+    // ---------------- 底部导航（P5 终态：💬 聊天默认 / ◈ 知识 / ⚙ 设置） ----------------
 
     private fun buildNavBar(): LinearLayout {
         val bar = LinearLayout(this).apply {
@@ -97,8 +96,7 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.WHITE)
         }
         val spec = listOf(
-            Triple("💬", "聊天", 0), Triple("▦", "任务", 1),
-            Triple("◈", "知识", 2), Triple("⚙", "设置", 3))
+            Triple("💬", "聊天", 0), Triple("◈", "知识", 1), Triple("⚙", "设置", 2))
         spec.forEach { (glyph, label, tab) ->
             val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -123,8 +121,7 @@ class MainActivity : Activity() {
         content.removeAllViews()
         val page: View = when (tab) {
             0 -> (chatPage ?: ChatPage(this).also { chatPage = it }).view
-            1 -> (tasksPage ?: TasksPage(this).also { tasksPage = it }).view
-            2 -> (knowledgePage ?: KnowledgePage(this).also { knowledgePage = it }).view
+            1 -> (knowledgePage ?: KnowledgePage(this).also { knowledgePage = it }).view
             else -> (settingsPage ?: SettingsPage(this).also { settingsPage = it }).view
         }
         content.addView(page, FrameLayout.LayoutParams(
@@ -138,8 +135,7 @@ class MainActivity : Activity() {
             label.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
         if (tab == 0) chatPage?.onResume()
-        if (tab == 1) tasksPage?.onResume()
-        if (tab == 2) knowledgePage?.onResume()
+        if (tab == 1) knowledgePage?.onResume()
     }
 
     private fun LinearLayout.cells(): List<LinearLayout> =
