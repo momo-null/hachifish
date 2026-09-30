@@ -157,9 +157,21 @@ def test_skills_list_json():
     d = P.global_skills()
     d.mkdir(parents=True, exist_ok=True)
     (d / "s1.md").write_text(
-        "---\nname: s1\nobjective_pattern: 测试\n---\n序列", encoding="utf-8")
+        "---\nname: s1\nobjective_pattern: 测试\nuse_count: 5\n"
+        "success_count: 4\ncreated_at: 2026-09-28T10:00:00+00:00\n---\n序列",
+        encoding="utf-8")
     r = json.loads(bridge.skills_list_json())
     assert r["ok"] and any(s["name"] == "s1" for s in r["skills"])
+    # V7 统计字段：frontmatter 自维护字段透传（缺字段技能 = 0 默认）
+    s1 = [s for s in r["skills"] if s["name"] == "s1"][0]
+    assert s1["use_count"] == 5 and s1["success_count"] == 4, s1
+    assert s1["created_at"].startswith("2026-09-28"), s1
+    # 无统计字段技能：默认 0 不炸
+    (d / "s2.md").write_text(
+        "---\nname: s2\nobjective_pattern: x\n---\n序列", encoding="utf-8")
+    r2 = json.loads(bridge.skills_list_json())
+    s2 = [s for s in r2["skills"] if s["name"] == "s2"][0]
+    assert s2["use_count"] == 0 and s2["success_count"] == 0
 
 
 def test_rollouts_list_json():

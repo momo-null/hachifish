@@ -310,6 +310,18 @@ object NarrativePanel {
                 Ds.dp(c, 18), Gravity.TOP or Gravity.END)
         }
         ball.addView(ballBadge)
+        // V11 轻浮动动画（mockup .fish-ball floaty）：3s 循环上下 5dp，
+        // 遵循系统减弱动效（animator 禁用时 TranslateAnimation 不生效即静态）
+        val floaty = android.view.animation.TranslateAnimation(0f, 0f, 0f, -Ds.dp(c, 5).toFloat()).apply {
+            duration = 1500
+            repeatCount = android.view.animation.Animation.INFINITE
+            repeatMode = android.view.animation.Animation.REVERSE
+        }
+        if (android.provider.Settings.Global.getFloat(
+                c.contentResolver,
+                android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f) {
+            ball.startAnimation(floaty)
+        }
         // 拖动贴边 + 点按展开（超 touchSlop 判拖动，否则点击）
         val slop = android.view.ViewConfiguration.get(c).scaledTouchSlop
         val down = FloatArray(2)

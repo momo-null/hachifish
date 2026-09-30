@@ -61,8 +61,30 @@ class OnboardingActivity : Activity() {
         })
         welcome.addView(Ds.small(this, "说一句目标，大肥鱼替你点完——文件、App、消息都行").apply {
             gravity = android.view.Gravity.CENTER
-            setPadding(0, 0, 0, Ds.dp(this@OnboardingActivity, 4))
+            setPadding(0, 0, 0, Ds.dp(this@OnboardingActivity, 10))
         })
+        // V1 功能列表三项（mockup onboard-features）
+        listOf(
+            Triple("📁", "文件整理、批量操作"),
+            Triple("📱", "替你操作 App 完成任务"),
+            Triple("🧠", "越用越懂你，自动学习")
+        ).forEach { (glyph, text) ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, Ds.dp(this@OnboardingActivity, 4), 0, 0)
+            }
+            row.addView(TextView(this).apply {
+                this.text = glyph; textSize = 14f
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            })
+            row.addView(TextView(this).apply {
+                this.text = text; textSize = 13f; setTextColor(Ds.TEXT_2)
+                setPadding(Ds.dp(this@OnboardingActivity, 10), 0, 0, 0)
+            })
+            welcome.addView(row)
+        }
         box.addView(welcome, Ds.vp(bottom = Ds.dp(this, 14)))
 
         box.addView(Ds.small(this, "四步授权：无障碍 → 投屏 → 白名单 → BYOK。研究机一次配好，之后免维护。").apply {

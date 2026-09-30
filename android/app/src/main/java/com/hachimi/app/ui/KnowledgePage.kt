@@ -133,13 +133,32 @@ class KnowledgePage(private val act: Activity) {
                 typeface = Typeface.DEFAULT_BOLD
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             })
-            head.addView(Ds.tag(act, "技能", Ds.PRIMARY, Color.parseColor("#E8F1FA")))
+            // V7 徽标：7 天内创建 = NEW；已使用 = ACTIVE
+            val created = s.optString("created_at")
+            val isNew = runCatching {
+                !created.isBlank() && System.currentTimeMillis() -
+                    java.time.OffsetDateTime.parse(created).toInstant().toEpochMilli() < 7 * 86400_000L
+            }.getOrDefault(false)
+            val used = s.optInt("use_count", 0) > 0
+            head.addView(Ds.tag(act,
+                if (isNew) "NEW" else if (used) "ACTIVE" else "技能",
+                if (isNew) Ds.PRIMARY else if (used) Ds.GREEN_TXT else Ds.PRIMARY,
+                Color.parseColor("#E8F1FA")))
             card.addView(head)
             s.optString("objective_pattern").takeIf { it.isNotBlank() }?.let {
                 card.addView(Ds.small(act, "匹配：$it").apply { setPadding(0, Ds.dp(act, 4), 0, 0) })
             }
             s.optString("description").takeIf { it.isNotBlank() }?.let {
                 card.addView(Ds.small(act, it).apply { setPadding(0, Ds.dp(act, 2), 0, 0) })
+            }
+            // V7 统计行：使用次数 + 成功率（数据缺省时跳过该行）
+            val useCount = s.optInt("use_count", 0)
+            val successCount = s.optInt("success_count", 0)
+            if (useCount > 0) {
+                val rate = if (useCount > 0) successCount * 100 / useCount else 0
+                card.addView(Ds.small(act, "已使用 $useCount 次 · 成功率 $rate%").apply {
+                    setTextColor(Ds.TEXT_3); setPadding(0, Ds.dp(act, 4), 0, 0)
+                })
             }
             bodyHost.addView(card, Ds.vp(top = Ds.dp(act, 8)))
         }

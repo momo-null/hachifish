@@ -651,16 +651,43 @@ def memory_json():
 
 
 def skills_list_json():
-    """K7c 数据面：全局技能列表（名称/匹配规则/描述，task 私有不进列表）。"""
+    """K7c 数据面：全局技能列表（名称/匹配规则/描述 + 使用统计，V7 对齐）。"""
     try:
         from hachimi_kernel.skill_library import SkillLibrary
+        import re as _re
         out = []
         for f in SkillLibrary._global_dir().glob("*.md"):
             s = SkillLibrary._parse(f)
-            if s is not None:
-                out.append({"name": s.name,
-                            "description": (getattr(s, "description", "") or "")[:200],
-                            "objective_pattern": s.objective_pattern})
+            if s is None:
+                continue
+            # V7 统计：frontmatter 自维护字段（Curator 晋升时写入/模型调用时更新；
+            # 缺字段 = 0，展示层不猜）。created_at 供 NEW 徽标（7 天内）。
+            meta = {}
+            try:
+                text = f.read_text(encoding="utf-8")
+                if text.startswith("---"):
+                    fm = text.split("---")[1]
+                    for key in ("success_count", "use_count", "created_at"):
+                        m = _re.search(r"^%s:\s*(.+)$" % key, fm, _re.M)
+                        if m:
+                            meta[key] = m.group(1).strip()
+                else:
+                    meta["created_at"] = getattr(s.metadata, "created", "") or ""
+            except Exception:
+                meta = {}
+            use = 0
+            success = 0
+            try:
+                use = int(meta.get("use_count", 0))
+                success = int(meta.get("success_count", 0))
+            except Exception:
+                pass
+            out.append({"name": s.name,
+                        "description": (getattr(s, "description", "") or "")[:200],
+                        "objective_pattern": s.objective_pattern,
+                        "use_count": use,
+                        "success_count": success,
+                        "created_at": meta.get("created_at", "")})
         return json.dumps({"ok": True, "skills": out}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"ok": False, "skills": [],

@@ -116,7 +116,10 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         }
         body.addView(recycler, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        emptyBox = buildEmpty()
+        emptyBox = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Ds.PAGE)
+        }   // 空态/欢迎卡由 refresh() 动态填充（V2/V3 双形态）
         body.addView(emptyBox, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         // V13 会话面板（body 内覆盖层；GONE 起）
@@ -153,6 +156,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         }
         inputArea.addView(input); inputArea.addView(btnSend)
         view.addView(inputArea)
+        refresh()   // 首帧：空态（V2）或欢迎卡（V3，冷启动恢复后被 refresh 替换）
     }
 
     private fun controlBtn(glyph: String, onClick: () -> Unit): TextView =
@@ -257,10 +261,64 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     }
 
     private fun refresh() {
+        // V3 欢迎卡：有会话（恢复/切换过）且流为空 → 展示自我介绍卡而非空状态
+        if (items.isEmpty() && currentTaskId != null) {
+            emptyBox.removeAllViews()
+            emptyBox.addView(buildWelcome())
+        } else if (items.isEmpty()) {
+            emptyBox.removeAllViews()
+            emptyBox.addView(buildEmpty())
+        }
         adapter.submit(items)
         emptyBox.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
         recycler.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
         if (items.isNotEmpty()) recycler.scrollToPosition(items.size - 1)
+    }
+
+    /** V3 欢迎卡：大肥鱼已上线 + 能力 tags（会话存在但无消息时的首屏角色）。 */
+    private fun buildWelcome(): View = LinearLayout(act).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        setBackgroundColor(Ds.PAGE)
+        val p = Ds.dp(act, 24)
+        setPadding(p, Ds.dp(act, 60), p, p)
+    }.also { box ->
+        val head = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(ImageView(act).apply {
+            setImageBitmap(FishAssets.circle(act, FishAssets.AVATAR, 44))
+        }, LinearLayout.LayoutParams(Ds.dp(act, 44), Ds.dp(act, 44)))
+        val info = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            val p2 = Ds.dp(act, 12)
+            setPadding(p2, 0, 0, 0)
+        }
+        info.addView(TextView(act).apply {
+            text = "${role.roleName}已上线"
+            textSize = 14f; setTextColor(Ds.TEXT)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        })
+        info.addView(TextView(act).apply {
+            text = "你的全能小帮手"
+            textSize = 11f; setTextColor(Ds.TEXT_2)
+        })
+        head.addView(info)
+        box.addView(head)
+        box.addView(TextView(act).apply {
+            text = "${role.userName}好！我帮你点手机、管文件、发消息，说一句目标就行。"
+            textSize = 13f; setTextColor(Ds.TEXT_2)
+            setLineSpacing(Ds.dp(act, 2).toFloat(), 1f)
+            setPadding(0, Ds.dp(act, 12), 0, Ds.dp(act, 10))
+        })
+        val tags = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("📁 文件整理", "📱 App 操作", "✉️ 发消息").forEach { t ->
+            tags.addView(Ds.tag(act, t, Ds.PRIMARY, Color.parseColor("#E8F1FA")).apply {
+                (layoutParams as LinearLayout.LayoutParams).rightMargin = Ds.dp(act, 6)
+            })
+        }
+        box.addView(tags)
     }
 
     // ---------------- 发送（P1：全部按任务派发，链路复刻 TasksPage） ----------------
@@ -790,6 +848,24 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     topMargin = Ds.dp(act, 12)
+                }
+            })
+            // V4「手动接管」：看完整轨迹（task 详情页回放），人接手判断
+            card.addView(TextView(act).apply {
+                text = "手动接管（看完整轨迹）"; textSize = 12f; setTextColor(Ds.PRIMARY)
+                gravity = Gravity.CENTER
+                background = Ds.round(act, 10, Color.WHITE, 1, Ds.CARD_BORDER)
+                val p2 = Ds.dp(act, 12)
+                setPadding(p2, Ds.dp(act, 8), p2, Ds.dp(act, 8))
+                setOnClickListener {
+                    currentTaskId?.let { tid ->
+                        act.startActivity(Intent(act, com.hachimi.app.TaskDetailActivity::class.java)
+                            .putExtra("task_id", tid))
+                    }
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = Ds.dp(act, 8)
                 }
             })
         }
