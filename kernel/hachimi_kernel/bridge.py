@@ -15,6 +15,7 @@ import time
 
 from hachimi_kernel.brain_client import BrainClient, BrainError
 from hachimi_kernel.mini_loop import MiniLoop
+from hachimi_kernel import runtime_paths as P   # K7 数据面/知识注入路径单一来源
 
 _bridge = None            # Kotlin 注入的原语派发器（.call(name, args_json) -> result_json）
 _state = {
@@ -569,6 +570,132 @@ def _persona_block():
         return ""
 
 
+# ---- K7 知识模块接线（注入 / Curator 挂钩 / 数据面） ----
+
+# 弱注入开关（Kotlin set_knowledge_enabled 注入；默认开 = 桌面 P2 定稿口径）
+_knowledge_enabled = {"on": True}
+
+
+def set_knowledge_enabled(enabled):
+    """Kotlin 设置页「弱注入」开关落 kernel（true=注入 memory/技能摘要）。"""
+    _knowledge_enabled["on"] = bool(enabled)
+    return {"ok": True, "knowledge_enabled": _knowledge_enabled["on"]}
+
+
+def _knowledge_block():
+    """弱注入块（K7a）：memory summary + 全局技能摘要 → build_knowledge_block。
+
+    语义对齐桌面 §3.4：携带弱化提示（可能过时，以实际观测为准）；
+    开关关 / 无任何内容 → 空串（零注入，prompt 逐字节不变）。
+    """
+    if not _knowledge_enabled["on"]:
+        return ""
+    try:
+        from hachimi_kernel.knowledge_inject import (
+            load_memory_text, build_knowledge_block)
+        skills = []
+        try:
+            from hachimi_kernel.skill_library import SkillLibrary
+            # 全局目录直读 + _parse（构造器需合法 task_id，全局列表面板/注入
+            # 无 task 上下文——与 knowledge_inject.build_skill_catalog 同款）
+            for f in SkillLibrary._global_dir().glob("*.md"):
+                s = SkillLibrary._parse(f)
+                if s is not None:
+                    skills.append({"name": s.name,
+                                   "objective_pattern": s.objective_pattern,
+                                   "ops": (getattr(s, "ops", "") or "")[:200]})
+        except Exception:
+            skills = []
+        return build_knowledge_block(load_memory_text(), skills)
+    except Exception as e:
+        print("[task] knowledge block unavailable: %s: %s" % (type(e).__name__, e),
+              flush=True)
+        return ""
+
+
+def _make_curator(task_id):
+    """Curator 工厂（K7b 挂钩注入点；测试可 monkeypatch）。"""
+    from hachimi_kernel.curator import Curator
+    return Curator(task_id)
+
+
+def _curator_after_finish(task_id, run_record):
+    """任务收尾后的知识维护（K7b）：蒸馏/prune/复核——**绝不拖垮主流程**。
+
+    实验组冻结（R9）由调用方判定后跳过；Curator 自身启发式、无 brain 依赖。
+    """
+    if not task_id or run_record is None:
+        return
+    try:
+        report = _make_curator(task_id).run_once(run_record=run_record)
+        print("[curator] task=%s pruned=%s skills_promoted=%s errors=%d"
+              % (task_id, report.pruned_files, report.skills_promoted,
+                 len(report.errors)), flush=True)
+    except Exception as e:
+        print("[curator] failed (task continues): %s: %s" % (type(e).__name__, e),
+              flush=True)
+
+
+def memory_json():
+    """K7c 数据面：记忆聚合只读视图（对齐父 memory_api GET /memory）。"""
+    try:
+        master = P_memory_master_text()
+        rollouts = len(list(P.memory_rollouts().glob("*.md"))) \
+            if P.memory_rollouts().exists() else 0
+        return json.dumps({"ok": True, "master": master,
+                           "master_chars": len(master), "rollouts": rollouts},
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
+def skills_list_json():
+    """K7c 数据面：全局技能列表（名称/匹配规则/描述，task 私有不进列表）。"""
+    try:
+        from hachimi_kernel.skill_library import SkillLibrary
+        out = []
+        for f in SkillLibrary._global_dir().glob("*.md"):
+            s = SkillLibrary._parse(f)
+            if s is not None:
+                out.append({"name": s.name,
+                            "description": (getattr(s, "description", "") or "")[:200],
+                            "objective_pattern": s.objective_pattern})
+        return json.dumps({"ok": True, "skills": out}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "skills": [],
+                           "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
+def rollouts_list_json(limit=50):
+    """K7c 数据面：蒸馏记忆列表（倒序文件名）。"""
+    try:
+        d = P.memory_rollouts()
+        items = []
+        if d.exists():
+            files = sorted(d.glob("*.md"), key=lambda f: f.stat().st_mtime,
+                           reverse=True)[:max(0, int(limit))]
+            items = [{"task_id": f.stem, "chars": f.stat().st_size}
+                     for f in files]
+        return json.dumps({"ok": True, "rollouts": items}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "rollouts": [],
+                           "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
+def P_memory_master_text():
+    """MEMORY.md 全文（截断管控 20000，对齐 knowledge_inject 口径）。"""
+    try:
+        p = P.memory_master()
+        if not p.exists():
+            return ""
+        return p.read_text(encoding="utf-8")[:20000]
+    except Exception:
+        return ""
+
+
 def _run(body, stop_flag=_controls):
     steps = []
     # K1a 统一入口：message 优先（会话式）；无 message = 旧表单 objective 路径
@@ -672,12 +799,20 @@ def _run(body, stop_flag=_controls):
                 _state["phase"] = "done" if out["status"] in ("done", "chat") else "error"
                 _state["summary"] = out
                 _state["trajectory"] = steps
-            # K 闭环挂载点（桌面 tool_loop._finish → Curator 触发）。R9：实验期冻结——
-            # 组任务（_frozen_run 命中）禁止蒸馏；未来接线时在此检查
+            # K 闭环挂载点（桌面 tool_loop._finish → Curator 触发，K7b 接线）。
+            # R9：实验期冻结——组任务（_frozen_run 命中）禁止蒸馏
             with _lock:
                 frozen = _state.get("run_id") in _frozen_run
-            if frozen and globals().get("_curator_hook"):
+            if frozen:
                 print("[task] CURATOR SUPPRESSED (experiment freeze)", flush=True)
+            elif task_id:
+                # 只对真实任务蒸馏（chat 轮 run_record 同样传入——Curator
+                # 内部按步数阈值短路，短对话零成本跳过）
+                try:
+                    rec_dict = rec.to_dict()
+                except Exception:
+                    rec_dict = None   # store 落盘失败分支：无 run 记录则不蒸馏
+                _curator_after_finish(task_id, rec_dict)
             _emit({"event": "finish", "run_id": run_id, "status": out["status"],
                    "steps": out["steps"], "wall_clock_s": out.get("wall_clock_s"),
                    "summary": out.get("summary", ""),
@@ -706,7 +841,10 @@ def _run(body, stop_flag=_controls):
                         config={"max_steps": body.get("max_steps", 24),
                                 "wall_clock_s": body.get("wall_clock_s", 900),
                                 "verify_tool": "verify_done",
-                                "persona": _persona_block()},
+                                "persona": _persona_block(),
+                                # K7a：弱注入块（memory summary + 技能摘要；
+                                # 开关关/无内容 = 空串零注入）
+                                "knowledge": _knowledge_block()},
                         controls=_controls,
                         verify_fn=verify,
                         # K1a 统一入口：历史 + 本轮消息（闲聊/任务大脑自决，K1b）

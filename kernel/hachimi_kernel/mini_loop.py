@@ -418,6 +418,11 @@ class MiniLoop(object):
         persona = (self.config.get("persona") or "").strip()
         if persona:
             p += "# 助手人格设定\n%s\n\n" % persona
+        # 弱注入块（K7a，桌面 §3.4 语义）：memory/技能摘要，自带弱化提示；
+        # 空文本零注入。run 内由 config 一次性传入（逐字节稳定，前缀缓存友好）。
+        knowledge = (self.config.get("knowledge") or "").strip()
+        if knowledge:
+            p += "%s\n\n" % knowledge
         unified = bool(self._message or self._history)
         if unified:
             # K1 统一入口形态：本轮消息即指令（用户消息在会话流末尾），

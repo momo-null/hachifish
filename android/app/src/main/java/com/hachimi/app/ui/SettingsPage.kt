@@ -41,6 +41,7 @@ class SettingsPage(private val act: Activity) {
     private var modeSeg: Ds.Seg? = null
     private var gateSeg: Ds.Seg? = null
     private var visSeg: Ds.Seg? = null
+    private var injectSeg: Ds.Seg? = null
     private var taps = 0
 
     /** 主界面分段 ↔ 设置页「默认模式」双向同步钩子（TasksPage 注册）。 */
@@ -79,6 +80,8 @@ class SettingsPage(private val act: Activity) {
         roleDescLabel?.text = "角色卡 · 称呼你为「${role.userName}」"
         modeSeg?.select(act.getSharedPreferences(TasksPage.PREFS, 0).getInt("run_mode", 0))
         gateSeg?.select(if (gateLevel(act) == "relaxed") 1 else 0)
+        injectSeg?.select(if (act.getSharedPreferences(TasksPage.PREFS, 0)
+                .getBoolean("knowledge_enabled", true)) 1 else 0)
     }
 
     // ---------------- 构建 ----------------
@@ -181,13 +184,29 @@ class SettingsPage(private val act: Activity) {
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)) }
         box.addView(ex)
 
-        // —— ③ 知识（诚实占位：能力默认关 K0 红线） ——
-        box.addView(sectionTitle("知识（默认关，需显式开启 — K0 红线）", topPad = 14))
+        // —— ③ 知识（K7 接真：弱注入开关 + Curator 说明） ——
+        box.addView(sectionTitle("知识", topPad = 14))
         val kn = Ds.card(act)
-        kn.addView(prefRow("弱注入", "下次任务前注入技能/记忆摘要", false))
+        kn.addView(sectionLabel("弱注入（技能/记忆摘要进下次任务）"))
+        injectSeg = Ds.seg(act, listOf("关", "开"),
+            if (act.getSharedPreferences(TasksPage.PREFS, 0)
+                    .getBoolean("knowledge_enabled", true)) 1 else 0) { i ->
+            injectSeg?.select(i)
+            val on = i == 1
+            act.getSharedPreferences(TasksPage.PREFS, 0).edit()
+                .putBoolean("knowledge_enabled", on).apply()
+            // 同步 kernel（K7a 开关；kernel 侧默认开，双向保持一致）
+            Thread {
+                try {
+                    KernelHostService.pyBridgeModule?.callAttr("set_knowledge_enabled", on)
+                } catch (_: Exception) {}
+            }.start()
+        }
+        kn.addView(injectSeg!!.view, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         kn.addView(divider(kn))
-        kn.addView(prefRow("Curator 蒸馏", "每次任务完成后触发（无后台定时器）", false))
-        kn.addView(Ds.small(act, "知识能力随 P2 上线后在此真实开关。").apply {
+        kn.addView(prefRow("Curator 蒸馏", "任务完成后自动蒸馏技能/记忆（无后台定时器）", null))
+        kn.addView(Ds.small(act, "弱注入内容携带弱化提示（可能过时，以实际观测为准）；产物在「知识」Tab 查看。").apply {
             setPadding(0, Ds.dp(act, 6), 0, 0); setTextColor(Ds.TEXT_3)
         })
         box.addView(kn)
