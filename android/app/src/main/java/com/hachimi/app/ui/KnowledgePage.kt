@@ -82,7 +82,7 @@ class KnowledgePage(private val act: Activity) {
         if (bridge == null) {
             bodyHost.removeAllViews()
             bodyHost.addView(Ds.emptyState(act, "⏳", "内核启动中",
-                "首次约需 10 秒；就绪后下拉本页刷新。"))
+                "首次约需 10 秒；就绪后切走再切回本页即自动加载。"))
             return
         }
         bodyHost.removeAllViews()
