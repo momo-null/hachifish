@@ -331,3 +331,20 @@ Omni 侧其实给了另一条更克制的路：`format_skill_catalog_message`（
 - 注入块 2207 → 1520 字符（-31%，legacy 数据）；去重后重复条目 = 0。
 - DoD4 首轮正向：T5 ×5/组，中位数总步 28 → 15（−46%）、有效步 13 → 9（−31%）；均值 −9~11%（长尾未收口）。
 - 成功率：max_steps=26 时代 ~60% → 1000 步时代 10/10。
+
+### 7.4 检索能力：为 Omni 统一复用而设计（search_skill / load_skill）
+
+> 决策原则：**所有知识模块能力都要能被 Omni 统一复用与集成**，因此检索不做成
+> 只有手机端能用的内联逻辑，而是拆成「模块级公共接口 + 宿主无关工具壳」两层。
+
+| 层 | 位置 | 契约 | Omni 集成方式 |
+|---|---|---|---|
+| 打分器 | `skill_library.score_skill(skill, query)` | 包名交集 > 拉丁词元 > CJK bigram；纯标准库 | 直接 import；Omni 侧 `find_by_pattern` 可逐步迁移到同一打分器（唯一实现） |
+| 检索 | `skill_library.search_skills(skills, query, limit)` | 接受 `Skill` 对象或 payload dict；返回 `[{name, applies, score, entry_id}]` | 面板 / CLI / agent 直接调用，返回结构是 UI 展示与埋点共用的稳定契约 |
+| 加载 | 工具 `load_skill(name)` | 精确名 → 模糊名；返回脱敏序列 | Omni 工具面注册同名原语（纯 Python，不经 Kotlin 派发） |
+| 搜索 | 工具 `search_skill(query, limit)` | 命中给 results + load_skill 提示；未命中给 available 列表 | 同上；池子上百条时成为主要入口 |
+
+说明：
+- 工具实现刻意保持**宿主无关**（不依赖 Kotlin dispatcher、不依赖 Android API），Omni 复制同名函数即可，行为一致；
+- 注入侧（目录 top-k）与工具侧（关键词搜索）共用同一打分器，避免两边各写一套导致排序口径不一致；
+- 目录只列 `max_skills` 条是**上下文预算**考量，不是能力边界 —— 池子变大后由 `search_skill` 兜住可见性（这正是选它而非“全量列目录”的原因：Omni 的场景是 PC 长任务，技能池规模会大得多）。

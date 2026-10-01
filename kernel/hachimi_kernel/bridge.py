@@ -118,6 +118,14 @@ def _make_tools():
         "parameters": _LOAD_SKILL_SPEC["parameters"],
         "call": _load_skill}
 
+    # P2-R：search_skill —— 关键词检索技能库（池子规模化后，目录 top-k 之外的
+    # 技能对模型不可见；本工具让模型主动找到它们）。与 load_skill 同层：纯
+    # Python、宿主无关，Omni 侧可直接注册同名工具复用 skill_library.search_skills。
+    tools["search_skill"] = {
+        "description": _SEARCH_SKILL_SPEC["description"],
+        "parameters": _SEARCH_SKILL_SPEC["parameters"],
+        "call": _search_skill}
+
     return tools
 
 
@@ -131,6 +139,53 @@ _LOAD_SKILL_SPEC = {
                     "description": "技能名称（目录里 **粗体** 的名字）"}},
                    "required": ["name"]},
 }
+
+
+_SEARCH_SKILL_SPEC = {
+    "name": "search_skill",
+    "description": "按关键词检索已沉淀的技能库（应用名、操作动作、界面描述均可）。"
+                   "当你隐约记得某类操作做过、但目录里没直接列出时调用；"
+                   "命中后用 load_skill 加载完整操作序列。",
+    "parameters": {"type": "object",
+                   "properties": {"query": {"type": "string",
+                    "description": "检索词，例如应用包名或操作描述"},
+                    "limit": {"type": "integer",
+                    "description": "返回条数上限（默认 5）"}},
+                   "required": ["query"]},
+}
+
+
+def _skill_payloads():
+    """全局技能 → payload dict 列表（检索/注入共用同一形态）。"""
+    from hachimi_kernel.skill_library import SkillLibrary
+    out, seen = [], set()
+    for f in sorted(SkillLibrary._global_dir().glob("*.md")):
+        s = SkillLibrary._parse(f)
+        if s is None or s.disable_model_invocation:
+            continue
+        if s.entry_id and s.entry_id in seen:
+            continue
+        if s.entry_id:
+            seen.add(s.entry_id)
+        out.append({"name": s.name, "entry_id": s.entry_id,
+                    "objective_pattern": s.objective_pattern,
+                    "ops": _skill_ops(s)})
+    return out
+
+
+def _search_skill(args):
+    """search_skill 实现：走 skill_library.search_skills（与 Omni 同一检索器）。"""
+    from hachimi_kernel.skill_library import search_skills
+    q = str((args or {}).get("query", "")).strip()
+    if not q:
+        return {"ok": False, "error": "query required"}
+    limit = (args or {}).get("limit", 5)
+    hits = search_skills(_skill_payloads(), q, limit=limit)
+    if not hits:
+        return {"ok": False, "error": "no skill matched: %s" % q,
+                "available": [p["name"] for p in _skill_payloads()][:10]}
+    return {"ok": True, "query": q, "results": hits,
+            "note": "用 load_skill(\"<名称>\") 加载完整操作序列后再执行。"}
 
 
 def _load_skill(args):

@@ -19,7 +19,9 @@ from typing import Any, Dict, List, Tuple
 from hachimi_kernel.runtime_paths import (
     memory_summary, task_skills, global_skills, user_profile, character_card,
 )
-from hachimi_kernel.skill_library import SkillLibrary, _cjk_bigrams
+from hachimi_kernel.skill_library import (  # noqa: F401  (SkillLibrary 供 catalog 路径)
+    SkillLibrary, _cjk_bigrams, score_skill, search_skills,
+)
 
 
 # 注入措辞（P2-R Phase 2）：中性且要求优先复用。
@@ -193,34 +195,14 @@ def load_agents_snapshot(layers: List[Tuple[str, Any]], limit: int = 8192) -> Ag
                           digests=digests, limit=int(limit or 0))
 
 
-_PACKAGE_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+")
-
-
 def _score_skill(skill: Dict[str, Any], objective: str) -> int:
-    """技能条目相对当前 objective 的相关度（纯标准库，零 embedding）。
+    """相关度打分：转发到 skill_library.score_skill（Omni 与 hachimi 唯一实现）。
 
     打分优先级（P2-R Phase 2，对照 doc/knowledge_redesign.md §3.2）：
-    1. 结构化字段：objective 与技能文本中**包名**的交集（最强信号——
-       操作序列与 App 强绑定）；
-    2. 拉丁词元重叠（>=3 字符，大小写归一）；
-    3. CJK bigram 重叠（中文意图弱匹配）。
+    1. 结构化字段：包名交集（最强信号——操作序列与 App 强绑定）；
+    2. 拉丁词元重叠；3. CJK bigram 重叠。纯标准库，零 embedding。
     """
-    obj = (objective or "").strip()
-    if not obj:
-        return 0
-    text = " ".join([str(skill.get("objective_pattern") or ""),
-                     str(skill.get("ops") or ""),
-                     str(skill.get("name") or "")])
-    score = 0
-    obj_pkgs = set(_PACKAGE_RE.findall(obj))
-    if obj_pkgs:
-        score += 10 * len({p for p in obj_pkgs if p in text})
-    obj_tokens = {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", obj)}
-    score += len(obj_tokens & {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", text)})
-    obj_cjk = _cjk_bigrams(obj)
-    if obj_cjk:
-        score += len(obj_cjk & _cjk_bigrams(text))
-    return score
+    return score_skill(skill, objective)
 
 
 def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]],

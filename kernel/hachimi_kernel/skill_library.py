@@ -31,6 +31,9 @@ from hachimi_kernel.runtime_paths import task_skills, global_skills
 # 结构性参数（view_id / package 等）保留 —— 它们才是可复用套路的骨架。
 _TEXTUAL_ARGS = frozenset({"text"})
 
+# 包名形态（相关度检索的最强信号：操作序列与 App 强绑定）；通用形态，非领域词表
+_PACKAGE_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+")
+
 
 def canonical_args(args: Dict[str, Any]) -> Dict[str, Any]:
     """脱敏后的 args：内容性参数归一为 ``<text>``，结构性参数原样保留。"""
@@ -45,6 +48,68 @@ def canonical_ops(substeps: List["SkillSubstep"]) -> List[str]:
         parts.append("%s(%s)" % (s.tool, json.dumps(
             canonical_args(s.args), ensure_ascii=False, sort_keys=True)))
     return parts
+
+
+def _skill_field(s, key, default=""):
+    """同时兼容 Skill 对象与注入 payload dict（两边共用同一检索器）。"""
+    if s is None:
+        return default
+    if isinstance(s, dict):
+        v = s.get(key)
+    else:
+        v = getattr(s, key, None)
+    return default if v is None else v
+
+
+def score_skill(skill, query: str) -> int:
+    """条目相对查询的相关度（纯标准库，零 embedding）——统一打分器。
+
+    优先级：结构化字段（包名交集） > 拉丁词元重叠 > CJK bigram 重叠。
+    Omni 与 hachimi 共用：注入排序、`search_skill` 工具、以及 Omni 侧其它
+    入口（面板 / CLI / agent）都可 import 本函数，避免各写一套打分。
+    """
+    obj = (query or "").strip()
+    if not obj:
+        return 0
+    text = " ".join([
+        str(_skill_field(skill, "objective_pattern", "")),
+        str(_skill_field(skill, "ops", "")),
+        str(_skill_field(skill, "name", "")),
+    ])
+    score = 0
+    obj_pkgs = set(_PACKAGE_RE.findall(obj))
+    if obj_pkgs:
+        score += 10 * len({p for p in obj_pkgs if p in text})
+    obj_tokens = {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", obj)}
+    score += len(obj_tokens & {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", text)})
+    obj_cjk = _cjk_bigrams(obj)
+    if obj_cjk:
+        score += len(obj_cjk & _cjk_bigrams(text))
+    return score
+
+
+def search_skills(skills, query: str, limit: int = 5):
+    """统一技能检索（P2-R）：相关度排序 + 过滤零分，返回精简结果。
+
+    ``skills`` 可以是 ``Skill`` 对象列表或注入 payload dict 列表；返回
+    ``[{"name","applies","score","entry_id"}]`` —— UI 展示、工具返回、
+    埋点统计共用同一结构，便于 Omni 集成。
+    """
+    if not skills:
+        return []
+    scored = [(score_skill(s, query), s) for s in skills]
+    scored = [(sc, s) for sc, s in scored if sc > 0]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for sc, s in scored[:max(1, int(limit or 5))]:
+        pat = str(_skill_field(s, "objective_pattern", "")).strip()
+        out.append({
+            "name": str(_skill_field(s, "name", "")),
+            "applies": pat[:120] + ("…" if len(pat) > 120 else ""),
+            "score": sc,
+            "entry_id": str(_skill_field(s, "entry_id", "")),
+        })
+    return out
 
 
 def compute_entry_id(substeps: List["SkillSubstep"]) -> str:
