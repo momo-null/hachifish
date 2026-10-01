@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -822,6 +823,62 @@ def _trajectory_digest(run_record: Dict[str, Any], max_steps: int = 40) -> str:
     return "\n".join(lines)
 
 
+# 语义去重阈值（重叠率 = 交集 / min(两指纹大小)），按实测分布取 0.45：
+# 同义表述实测 0.47~0.63（"按返回键自动保存" vs "按 back 返回自动保存"），
+# 不同事实实测 <= 0.06（"标题字段锁定" vs "正文占位行"）—— 分离度足够。
+_SIMILAR_THRESHOLD = 0.45
+
+
+def _similar(a: str, b: str) -> bool:
+    """两条目是否同义（语义指纹重叠率 >= 阈值）。"""
+    fp_a = _fact_fingerprint(a)
+    fp_b = _fact_fingerprint(b)
+    if not fp_a or not fp_b:
+        return False
+    return len(fp_a & fp_b) / max(1, min(len(fp_a), len(fp_b))) >= _SIMILAR_THRESHOLD
+
+
+def _fact_fingerprint(text: str) -> set:
+    """条目语义指纹 = CJK bigram 集合 ∪ 拉丁词元集合（纯标准库，零 embedding）。
+
+    用于识别 LLM 提取出的**同义不同表述**：条目级精确去重（strip+小写全文比对）
+    挡不住「按返回键自动保存」vs「按 back 返回后即写入列表」这类差异。
+    """
+    from hachimi_kernel.skill_library import _cjk_bigrams
+    toks = {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", text or "")}
+    return (toks | _cjk_bigrams(text or "")) or set(str(text or "")[:40])
+
+
+def semantic_dedup(items: List[str], threshold: float = None) -> List[str]:  # noqa: F821
+    """模糊去重：相似度 = 交集 / min(两集合大小)，超阈值视为同一条，保留先到者。
+
+    Omni 可复用：facts / lessons / 纠偏条目都能用同一函数压掉同义重复，
+    避免记忆块随使用次数线性膨胀（2026-10-01：3 次提取就攒出 12 条，
+    其中"自动保存"类事实出现 3 个变体）。
+    """
+    threshold = _SIMILAR_THRESHOLD if threshold is None else float(threshold)
+    out: List[str] = []
+    seen: List[set] = []
+    for it in items or []:
+        s = str(it or "").strip()
+        if not s:
+            continue
+        fp = _fact_fingerprint(s)
+        dup = False
+        for prev in seen:
+            if not prev or not fp:
+                continue
+            inter = len(prev & fp)
+            if inter / max(1, min(len(prev), len(fp))) >= threshold:
+                dup = True
+                break
+        if dup:
+            continue
+        seen.append(fp)
+        out.append(s)
+    return out
+
+
 def _parse_rollout_sections(text: str):
     """从 rollout md 解析 ``## facts`` / ``## lessons`` 段落的有效条目。"""
     facts: List[str] = []
@@ -878,10 +935,15 @@ def _merge_memory_sections(existing: str, new_facts: List[str], new_lessons: Lis
         added = 0
         for n in new:
             key = n.strip().lower()
-            if key and key not in seen:
-                seen.add(key)
-                items.append(n.strip())
-                added += 1
+            if not key:
+                continue
+            if key in seen:                      # 1) 精确重复
+                continue
+            if any(_similar(key, s) for s in seen):   # 2) 同义重复（语义指纹）
+                continue
+            seen.add(key)
+            items.append(n.strip())
+            added += 1
         return added
 
     added_f = _add(sections[fact_sec], new_facts)
