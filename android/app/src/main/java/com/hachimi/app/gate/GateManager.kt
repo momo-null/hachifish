@@ -26,22 +26,43 @@ object GateManager {
     @Volatile
     private var sessionOpen: Boolean = false
 
+    /** 调试/自动化总放行（DebugBridge ``gate_allow``）——与用户 session 分开：
+     *  harness 的预授权发生在 **run 之前**，而 run start 会 [beginTask] 重置
+     *  sessionOpen（旧任务放行不外泄）。两者共用一个标志时，自动化跑的每个敏感
+     *  操作都会撞门控 UI 并在 10s 倒计时后被拒（2026-10-01 回归：harness 跑 T1
+     *  首步 launch_app 即 deny_timeout，26 步预算全烧在找图标）。
+     *  这里是显式调试开关，只由 [debugOpenSession] 打开、[debugClear] 关闭，
+     *  [beginTask] 不碰它；用户侧「仅本次任务」语义保持不变。 */
+    @Volatile
+    private var debugOpen: Boolean = false
+
     data class Verdict(val granted: Boolean, val source: String, val choice: String)
 
-    /** 新任务开始：重置总放行开关（旧任务的 allow_always 不带到新任务）。 */
+    /** 新任务开始：重置用户总放行开关（旧任务的 allow_always 不带到新任务）。 */
     fun beginTask() {
         sessionOpen = false
-        Log.i(TAG, "gate session reset (new task)")
+        Log.i(TAG, "gate session reset (new task; debugOpen=$debugOpen)")
     }
 
-    /** 调试用：强制打开当前任务总放行（对应 DebugBridge gate_allow）。 */
+    /** 调试用：强制打开总放行（对应 DebugBridge gate_allow），跨任务生效。 */
     fun debugOpenSession() {
-        sessionOpen = true
+        debugOpen = true
+        Log.i(TAG, "gate debug-open (persists until explicit clear)")
     }
 
-    /** 敏感操作判定：当前任务已总放行则直接通过；否则弹 GateUI 阻塞等待用户选择。
+    /** 调试桥 gate_clear：连调试放行一起关，回到零授权起点。 */
+    fun debugClear() {
+        debugOpen = false
+        sessionOpen = false
+        Log.i(TAG, "gate debug + session cleared")
+    }
+
+    /** 敏感操作判定：调试放行/当前任务已总放行则直接通过；否则弹 GateUI 阻塞等待用户选择。
      *  级别：relaxed 时 launch_app 不询问（仅 type_text 问）。 */
     fun enforce(context: Context, pkg: String, op: String, preview: String = ""): Verdict {
+        if (debugOpen) {
+            return Verdict(true, "debug", "allow_always")
+        }
         if (sessionOpen) {
             return Verdict(true, "session", "allow_always")
         }

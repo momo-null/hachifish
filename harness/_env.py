@@ -76,21 +76,26 @@ def device_brand(serial=None):
 def brain_config():
     """BYOK 大脑配置 {base_url, api_key, model}。
 
-    优先级：环境变量 > harness/config.local.json（*.local.json 已 gitignore）。
-    环境变量：HACHIMI_BRAIN_BASE_URL / HACHIMI_BRAIN_API_KEY / HACHIMI_BRAIN_MODEL。
-    密钥一律不写进代码、不入库。
+    读取优先级：环境变量 > harness/config.local.json **顶层字段** > 嵌套
+    ``brain`` 块。密钥一律不写进代码、不入库。
+
+    顶层优先的理由（2026-10-01 实录根因）：用户改写 config.local.json 时习惯
+    把新的 base_url/api_key/model 平铺写在顶层，此时嵌套 ``brain`` 块里仍是旧
+    值；若只读嵌套块，就会出现「明明换了 key 却一直用老 key」——本次修复前
+    _env.py 正是只读 brain 块。嵌套块保留为兼容回退，不删（历史文件仍在用）。
     """
     import json
-    cfg = {}
+    raw: dict = {}
     path = os.path.join(ROOT, "harness", "config.local.json")
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as f:
-            cfg = (json.load(f) or {}).get("brain") or {}
+            raw = (json.load(f) or {})
+    nested = raw.get("brain") or {}
+    cfg = {}
     for key, var in (("base_url", "HACHIMI_BRAIN_BASE_URL"),
                      ("api_key", "HACHIMI_BRAIN_API_KEY"),
                      ("model", "HACHIMI_BRAIN_MODEL")):
-        if os.environ.get(var):
-            cfg[key] = os.environ[var]
+        cfg[key] = raw.get(key) or nested.get(key) or os.environ.get(var)
     return cfg
 
 

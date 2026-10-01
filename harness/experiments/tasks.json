@@ -6,9 +6,9 @@
    "level": "L1",
    "app": "org.fossify.notes",
    "title": "便签创建提醒",
-   "objective": "Open the app org.fossify.notes, create a new text note containing the text '提醒：明天上午备份实验数据', make sure the note is saved so the notes list shows it, then call task_done. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label, because the OK button silently does nothing when the label is empty; after OK the app returns to the list, tap the new list row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
+   "objective": "Open the app org.fossify.notes, create a new text note containing the text '提醒：明天上午备份实验数据', make sure the note is saved so the notes list shows it, then call task_done. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label, because the OK button silently does nothing when the label is empty; after OK the app does NOT return to the old list - it creates a NEW category tab named after the label you just typed (it becomes the visible tab); that new tab holds only one placeholder row whose text is a hint message (view id org.fossify.notes:id/text_note_view) - tap that placeholder row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
    "done_when": "提醒：明天上午备份实验数据",
-   "max_steps": 26,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.notes"
@@ -23,7 +23,7 @@
    "title": "计算器表达式",
    "objective": "Open the app org.fossify.math, calculate the expression 12*34+66 using the calculator UI, confirm the result 474 is displayed on screen, then call task_done.",
    "done_when": "474",
-   "max_steps": 18,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.math"
@@ -37,7 +37,7 @@
    "title": "时钟加闹钟",
    "objective": "Open the app org.fossify.clock, add a new alarm set to 07:30 with label 'Hachimi 起床', enable it, confirm the alarm 07:30 appears in the alarm list, then call task_done. Flow notes: tapping the add button opens the alarm editor (default time 08:00); tap the time field to open the time picker, use the picker's text-input mode toggle, enter hour 07, then tap the minute field and enter 30, confirm with OK; back in the editor tap the label field and set the label, then confirm with OK. If a first-time tip dialog appears, dismiss it with OK. Time-picker tip: to set the alarm time, tap material_timepicker_mode_button to switch the clock face to text input, then type_text the hour into the focused field and the minute likewise, and confirm with material_timepicker_ok_button. Navigation tip: the app may reopen on any tab (stopwatch/timer/clock/alarm). First switch to the ALARM tab via the bottom navigation, confirm existing alarms are listed, then tap org.fossify.clock:id/alarm_fab to add a new alarm. Editor prefill note: the alarm editor prefills the time (and label) of the most recently created alarm (after a clean reset: 08:00, no label) — always set the time and label explicitly for the new alarm. Bottom navigation: the tab labels (tab_item_label) are plain TextViews and NOT clickable via tap_by_id — switch to the ALARM tab (second of four bottom tabs) by a coordinate tap at roughly x=0.375, y=0.94. After confirming, the new alarm appears in the alarm list below existing ones (creation order); if it is not visible, scroll the list DOWN (swipe up) to reveal it before calling task_done.",
    "done_when": "07:30",
-   "max_steps": 26,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.clock"
@@ -56,7 +56,7 @@
    "title": "文件重命名",
    "objective": "Open the app org.fossify.filemanager, find any file in the main storage list, rename it to 'hachimi_renamed.txt' (if it is not a file but a folder, pick another entry that is a file), confirm the new name is visible, then call task_done. Note: long-press a file row (press and hold about 1 second at its position) to open the context menu with the rename action.",
    "done_when": "hachimi_renamed",
-   "max_steps": 24,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.filemanager"
@@ -69,9 +69,9 @@
    "level": "L1",
    "app": "org.fossify.notes",
    "title": "便签格式化",
-   "objective": "Open the app org.fossify.notes, create a new note with three lines: '购物清单', '牛奶', '鸡蛋', save it, confirm all three lines are visible, then call task_done. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label, because the OK button silently does nothing when the label is empty; after OK the app returns to the list, tap the new list row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
+   "objective": "Open the app org.fossify.notes, create a new note with three lines: '购物清单', '牛奶', '鸡蛋', save it, confirm all three lines are visible, then call task_done. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label, because the OK button silently does nothing when the label is empty; after OK the app does NOT return to the old list - it creates a NEW category tab named after the label you just typed (it becomes the visible tab); that new tab holds only one placeholder row whose text is a hint message (view id org.fossify.notes:id/text_note_view) - tap that placeholder row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
    "done_when": "鸡蛋",
-   "max_steps": 26,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.notes"
@@ -84,9 +84,9 @@
    "level": "L2",
    "app": "org.fossify.notes",
    "title": "笔记多页编辑",
-   "objective": "Open the app org.fossify.notes, create a new text note whose content is 'L2 第一行：分屏模式任务', and save it. Then reopen that note, append a second line 'L2 第二行：追加成功' (set the full text to both lines), save again, confirm both lines are visible, then call task_done. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label, because the OK button silently does nothing when the label is empty; after OK the app returns to the list, tap the new list row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
+   "objective": "Open the app org.fossify.notes, create a new text note whose content is 'L2 第一行：分屏模式任务', and save it. Then reopen that note, append a second line 'L2 第二行：追加成功' (set the full text to both lines), save again, confirm both lines are visible, then call task_done. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label, because the OK button silently does nothing when the label is empty; after OK the app does NOT return to the old list - it creates a NEW category tab named after the label you just typed (it becomes the visible tab); that new tab holds only one placeholder row whose text is a hint message (view id org.fossify.notes:id/text_note_view) - tap that placeholder row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
    "done_when": "L2 第二行：追加成功",
-   "max_steps": 36,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.notes"
@@ -101,7 +101,7 @@
    "title": "图库建相册整理",
    "objective": "Open the app org.fossify.gallery, create a new album named 'Hachimi整理', confirm the album appears in the album list, then call task_done. Note (Fossify Gallery new-folder flow): tap the '更多选项' overflow button (top right), then the '新建文件夹' menu item — menu item labels are not clickable via tap_by_id, tap by coordinates from your last observation. A folder-picker dialog titled '选择文件夹' opens FIRST: tap the row '内部存储空间' to select the parent folder, THEN tap 确定 (android:id/button1) — OK does nothing until a folder row is selected. Next a naming dialog opens: tap the folder name input field (org.fossify.gallery:id/folder_name), type 'Hachimi整理', then tap 确定. An empty or duplicate name is silently rejected (toast only). After creation the new folder appears in the main folder list.",
    "done_when": "Hachimi整理",
-   "max_steps": 28,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.gallery"
@@ -121,7 +121,7 @@
    "title": "秒表计时",
    "objective": "Open the app org.fossify.clock, switch to the stopwatch tab, start the stopwatch, wait at least 3 seconds, stop it, confirm a non-zero elapsed time is displayed, then call task_done. Flow notes: from the clock tab, tapping the stopwatch summary row (the clickable '0.0' row) opens the stopwatch tab; the start/stop control is an icon button without text (id contains play_pause), tap it to start and again to stop.",
    "done_when": "秒表",
-   "max_steps": 20,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.clock"
@@ -141,7 +141,7 @@
    "title": "文件归档移动",
    "objective": "Open the app org.fossify.filemanager, create a new folder named 'Hachimi归档' in the main storage, confirm it appears in the list, then call task_done.",
    "done_when": "Hachimi归档",
-   "max_steps": 22,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.filemanager"
@@ -156,7 +156,7 @@
    "title": "便签检索确认",
    "objective": "Open the app org.fossify.notes, use the search function to find notes containing '111111', confirm a note containing 111111 is visible in the search results, then call task_done.",
    "done_when": "111111",
-   "max_steps": 20,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.notes"
@@ -169,9 +169,9 @@
    "level": "L3",
    "app": "org.fossify.clock + org.fossify.notes",
    "title": "跨 App 信息汇总",
-   "objective": "Open the app org.fossify.clock, find the alarm list and read the first alarm time shown, then open org.fossify.notes and create a new note whose content is '闹钟时间：' followed by that exact time, save it, confirm the note is visible in the list, then call task_done. Note: confirm the new-note dialog with its OK button (text note is the default type); the note saves automatically when you go back. Time-picker tip: to set the alarm time, tap material_timepicker_mode_button to switch the clock face to text input, then type_text the hour into the focused field and the minute likewise, and confirm with material_timepicker_ok_button. Navigation tip: the app may reopen on any tab (stopwatch/timer/clock/alarm). First switch to the ALARM tab via the bottom navigation, confirm existing alarms are listed, then tap org.fossify.clock:id/alarm_fab to add a new alarm. Bottom navigation: the tab labels (tab_item_label) are plain TextViews and NOT clickable via tap_by_id — switch to the ALARM tab (second of four bottom tabs) by a coordinate tap at roughly x=0.375, y=0.94. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label that is NOT already a category tab name shown in the list, because the OK button silently does nothing when the label is empty; after OK the app returns to the list, tap the new list row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
+   "objective": "Open the app org.fossify.clock, find the alarm list and read the first alarm time shown, then open org.fossify.notes and create a new note whose content is '闹钟时间：' followed by that exact time, save it, confirm the note is visible in the list, then call task_done. Note: confirm the new-note dialog with its OK button (text note is the default type); the note saves automatically when you go back. Time-picker tip: to set the alarm time, tap material_timepicker_mode_button to switch the clock face to text input, then type_text the hour into the focused field and the minute likewise, and confirm with material_timepicker_ok_button. Navigation tip: the app may reopen on any tab (stopwatch/timer/clock/alarm). First switch to the ALARM tab via the bottom navigation, confirm existing alarms are listed, then tap org.fossify.clock:id/alarm_fab to add a new alarm. Bottom navigation: the tab labels (tab_item_label) are plain TextViews and NOT clickable via tap_by_id — switch to the ALARM tab (second of four bottom tabs) by a coordinate tap at roughly x=0.375, y=0.94. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label that is NOT already a category tab name shown in the list, because the OK button silently does nothing when the label is empty; after OK the app does NOT return to the old list - it creates a NEW category tab named after the label you just typed (it becomes the visible tab); that new tab holds only one placeholder row whose text is a hint message (view id org.fossify.notes:id/text_note_view) - tap that placeholder row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
    "done_when": "闹钟时间：",
-   "max_steps": 40,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.notes",
@@ -193,7 +193,7 @@
    "title": "图库多条件整理",
    "objective": "Open the app org.fossify.gallery, browse the media list, then create a new album named 'Hachimi精选' and confirm it appears in the albums view, then call task_done. If the app asks for any permission, accept it.",
    "done_when": "Hachimi精选",
-   "max_steps": 36,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.gallery"
@@ -211,9 +211,9 @@
    "level": "L3",
    "app": "org.fossify.math + org.fossify.notes",
    "title": "长流程向导",
-   "objective": "Open the app org.fossify.math, calculate 8*9 and note the result shown, then open org.fossify.notes and create a note with content '计算结果：' followed by that exact result, save it, confirm the note is visible, then call task_done. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label, because the OK button silently does nothing when the label is empty; after OK the app returns to the list, tap the new list row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text). The note content must be exactly '计算结果：' followed by the result with no extra characters — keep the full-width colon '：' (e.g. '计算结果：72'). Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label that is NOT already a category tab name shown in the list, because the OK button silently does nothing when the label is empty; after OK the app returns to the list, tap the new list row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
+   "objective": "Open the app org.fossify.math, calculate 8*9 and note the result shown, then open org.fossify.notes and create a note with content '计算结果：' followed by that exact result, save it, confirm the note is visible, then call task_done. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label, because the OK button silently does nothing when the label is empty; after OK the app does NOT return to the old list - it creates a NEW category tab named after the label you just typed (it becomes the visible tab); that new tab holds only one placeholder row whose text is a hint message (view id org.fossify.notes:id/text_note_view) - tap that placeholder row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text). The note content must be exactly '计算结果：' followed by the result with no extra characters — keep the full-width colon '：' (e.g. '计算结果：72'). Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label that is NOT already a category tab name shown in the list, because the OK button silently does nothing when the label is empty; after OK the app does NOT return to the old list - it creates a NEW category tab named after the label you just typed (it becomes the visible tab); that new tab holds only one placeholder row whose text is a hint message (view id org.fossify.notes:id/text_note_view) - tap that placeholder row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
    "done_when": "计算结果：",
-   "max_steps": 38,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.notes",
@@ -229,7 +229,7 @@
    "title": "定时任务编排",
    "objective": "Open the app org.fossify.clock, add two alarms: one at 08:00 labeled '早会' and one at 20:00 labeled '复盘', confirm both alarms appear in the alarm list, then call task_done. Flow notes: tapping the add button opens the alarm editor (default time 08:00); tap the time field to open the time picker, use the picker's text-input mode toggle, enter the hour, then tap the minute field and enter the minutes, confirm with OK; back in the editor tap the label field and set the label, then confirm with OK. If a first-time tip dialog appears, dismiss it with OK. Time-picker tip: to set the alarm time, tap material_timepicker_mode_button to switch the clock face to text input, then type_text the hour into the focused field and the minute likewise, and confirm with material_timepicker_ok_button. Navigation tip: the app may reopen on any tab (stopwatch/timer/clock/alarm). First switch to the ALARM tab via the bottom navigation, confirm existing alarms are listed, then tap org.fossify.clock:id/alarm_fab to add a new alarm. IMPORTANT: create BOTH alarms — 08:00 labeled '早会' AND 20:00 labeled '复盘' — before calling task_done; each alarm needs its own editor round (set time, set label, confirm). Editor prefill note: the alarm editor prefills the time (and label) of the most recently created alarm (after a clean reset: 08:00, no label) — always set the time and label explicitly for the new alarm. Bottom navigation: the tab labels (tab_item_label) are plain TextViews and NOT clickable via tap_by_id — switch to the ALARM tab (second of four bottom tabs) by a coordinate tap at roughly x=0.375, y=0.94. After confirming, the new alarm appears in the alarm list below existing ones (creation order); if it is not visible, scroll the list DOWN (swipe up) to reveal it before calling task_done.",
    "done_when": "20:00",
-   "max_steps": 42,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.clock"
@@ -246,9 +246,9 @@
    "level": "L3",
    "app": "org.fossify.filemanager + org.fossify.notes",
    "title": "多 App 数据对比",
-   "objective": "Open the app org.fossify.filemanager, find the folder named 'Download' in the main storage list and read its item count (shown next to the folder name as 'N 项'; scroll the list if the Download folder is not visible), then open org.fossify.notes and create a note with content '存储条目数：' followed by that count, save it, confirm the note is visible, then call task_done. Note: confirm the new-note dialog with its OK button (text note is the default type); the note saves automatically when you go back. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label that is NOT already a category tab name shown in the list, because the OK button silently does nothing when the label is empty; after OK the app returns to the list, tap the new list row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
+   "objective": "Open the app org.fossify.filemanager, find the folder named 'Download' in the main storage list and read its item count (shown next to the folder name as 'N 项'; scroll the list if the Download folder is not visible), then open org.fossify.notes and create a note with content '存储条目数：' followed by that count, save it, confirm the note is visible, then call task_done. Note: confirm the new-note dialog with its OK button (text note is the default type); the note saves automatically when you go back. Note (Fossify Notes 1.7.0 UI): in the new-note dialog you MUST first tap the label field (locked_note_title) and type a short non-empty label that is NOT already a category tab name shown in the list, because the OK button silently does nothing when the label is empty; after OK the app does NOT return to the old list - it creates a NEW category tab named after the label you just typed (it becomes the visible tab); that new tab holds only one placeholder row whose text is a hint message (view id org.fossify.notes:id/text_note_view) - tap that placeholder row and type the note content directly into it (in-place editing, auto-saves; type_text replaces the whole row text).",
    "done_when": "存储条目数：",
-   "max_steps": 36,
+   "max_steps": 1000,
    "reset": {
     "pm_clear": [
      "org.fossify.notes",

@@ -112,9 +112,11 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                         .put("note", "brain config stored (Keystore-encrypted)")
                 }
                 "gate_clear" -> {
-                    // M4' 状态重置：门控总放行（旧实现按包名白名单，现改为任务级内存开关）
-                    com.hachimi.app.gate.GateManager.beginTask()
-                    JSONObject().put("ok", true).put("note", "gate session reset")
+                    // M4' 状态重置：任务级放行 + 调试放行一并关闭。
+                    // 2026-10-01：只调 beginTask 的话，调试预授权（gate_allow 打开的
+                    // debugOpen）永远关不掉 —— 必须以它为自动化的「关」对称操作。
+                    com.hachimi.app.gate.GateManager.debugClear()
+                    JSONObject().put("ok", true).put("note", "gate session + debug cleared")
                 }
                 "app_index" -> {
                     // 本机应用索引数据面（2026-09-30）：规模/样本/时效，PC 排查用
