@@ -13,7 +13,7 @@ import re
 import threading
 import time
 
-from hachimi_kernel.brain_client import BrainClient, BrainError
+from hachimi_kernel.brain_client import BrainClient, BrainError, DEFAULT_TIMEOUT
 from hachimi_kernel.mini_loop import MiniLoop
 from hachimi_kernel import runtime_paths as P   # K7 数据面/知识注入路径单一来源
 
@@ -242,10 +242,12 @@ def _make_brain(body):
     if not cfg or not cfg.get("base_url"):
         raise BrainError("no brain configured (BYOK 未设置)")
     print("[task] brain: %s model=%s" % (cfg["base_url"], cfg["model"]), flush=True)
-    # thinking 默认 disabled（brain_client 注释：自适应思考与多轮工具循环不兼容）；
-    # timeout 120s：部分网关偶发 >60s 停顿（2026-09-29 实测 discovery-api）
+    # thinking 默认 disabled（brain_client 注释：自适应思考与多轮工具循环不兼容）。
+    # timeout 取 brain_client.DEFAULT_TIMEOUT（单一出处）：网关长尾实测超过 120s
+    # 仍未返回并报废整轮任务（2026-10-01 便签任务 15 步/247s 白跑），抬到 240s 并
+    # 配合 chat() 内的退避重试。
     return BrainClient(cfg["base_url"], cfg.get("api_key", ""), cfg.get("model", ""),
-                       timeout=120,
+                       timeout=DEFAULT_TIMEOUT,
                        thinking=cfg.get("thinking") or {"type": "disabled"})
 
 
@@ -652,10 +654,17 @@ def _knowledge_parts():
         try:
             from hachimi_kernel.skill_library import SkillLibrary
             # 全局目录直读 + _parse（构造器需合法 task_id，全局列表面板/注入
-            # 无 task 上下文——与 knowledge_inject.build_skill_catalog 同款）
+            # 无 task 上下文——与 knowledge_inject.build_skill_catalog 同款）。
+            # P2-R Phase 1：按 entry_id 去重（防御性；写入端已去重，这里兜住
+            # 旧数据/手工文件造成的重复注入）。
+            seen_ids = set()
             for f in SkillLibrary._global_dir().glob("*.md"):
                 s = SkillLibrary._parse(f)
                 if s is not None and not s.disable_model_invocation:
+                    if s.entry_id and s.entry_id in seen_ids:
+                        continue
+                    if s.entry_id:
+                        seen_ids.add(s.entry_id)
                     skills.append({"name": s.name,
                                    "objective_pattern": s.objective_pattern,
                                    "ops": _skill_ops(s)[:200]})

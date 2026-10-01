@@ -444,11 +444,10 @@ class Curator:
                 facts = [f for f in (wm.facts or []) if f and f != "_(暂无)_"]
             except Exception:
                 facts = []
-            if not facts:
-                # P2：产品路径暂无世界模型写入（bridge/loop 不产 facts），成功任务
-                # 若零 facts 则记忆只剩失败教训——注入无增益。回退从成功轨迹提取
-                # 「上次成功路径」事实（紧凑操作序列），同任务复跑步数可观测下降。
-                facts = _success_path_facts(run_record)
+            # P2-R Phase 1：不再回退「上次成功路径」——它与 skill 的 substeps
+            # 同构，是记忆/技能重复的根源（doc/knowledge_redesign.md §1.7 #3）。
+            # 分工从此明确：套路归 skill（entry_id 去重），facts 等世界模型接入后
+            # 只装环境事实；成功任务零 facts = 宁缺毋滥。
         else:
             if reason:
                 lessons.append(f"[失败] {objective} —— {reason}")
@@ -723,7 +722,12 @@ def _fmt_action(a: Dict[str, Any]) -> str:
 
 
 def _success_path_facts(run_record: Dict[str, Any]) -> List[str]:
-    """成功轨迹 → 「上次成功路径」事实（P2 facts 回退；世界模型接入前的过渡）。"""
+    """成功轨迹 → 「上次成功路径」事实串。
+
+    **已退出蒸馏链**（P2-R Phase 1，doc/knowledge_redesign.md §1.7 #3）：该内容
+    与 skill 的 substeps 同构，是记忆/技能双写的根源。保留本函数仅作离线
+    debug / 对拍用途，生产蒸馏不再调用。
+    """
     actions = _read_actions(run_record.get("trajectory_file") or "")
     if len(actions) < 2:
         return []

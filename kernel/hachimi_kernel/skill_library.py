@@ -12,6 +12,7 @@ Skill 生命周期：
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -20,6 +21,40 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hachimi_kernel.runtime_paths import task_skills, global_skills
+
+
+# ---------------------------------------------------------------------------
+# 规范化 / 条目身份（P2-R Phase 1：doc/knowledge_redesign.md §2）
+# ---------------------------------------------------------------------------
+
+# 内容性参数：不同任务的字面值（上次输出了什么），不参与技能身份；
+# 结构性参数（view_id / package 等）保留 —— 它们才是可复用套路的骨架。
+_TEXTUAL_ARGS = frozenset({"text"})
+
+
+def canonical_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """脱敏后的 args：内容性参数归一为 ``<text>``，结构性参数原样保留。"""
+    return {k: ("<text>" if k in _TEXTUAL_ARGS else v)
+            for k, v in (args or {}).items()}
+
+
+def canonical_ops(substeps: List["SkillSubstep"]) -> List[str]:
+    """脱敏动作序列（``tool(canonical_args)`` 紧凑串列表）—— 注入与 ID 共用。"""
+    parts = []
+    for s in (substeps or []):
+        parts.append("%s(%s)" % (s.tool, json.dumps(
+            canonical_args(s.args), ensure_ascii=False, sort_keys=True)))
+    return parts
+
+
+def compute_entry_id(substeps: List["SkillSubstep"]) -> str:
+    """条目主键 = 脱敏动作序列的 sha1 前 12 位。
+
+    同一套路、不同字面内容（如两次 type_text 的文本不同）⇒ 同一 entry_id，
+    写入端据此去重、注入端据此合并（P2-R：记忆/技能重复的根治点）。
+    """
+    canon = "|".join(canonical_ops(substeps))
+    return hashlib.sha1(canon.encode("utf-8")).hexdigest()[:12] if canon else ""
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +85,7 @@ class SkillMetadata:
 class Skill:
     name: str = ""
     objective_pattern: str = ""
+    entry_id: str = ""              # 脱敏动作序列摘要（P2-R Phase 1）：身份主键
     task_id: str = ""
     description: str = ""
     tags: List[str] = field(default_factory=list)
@@ -79,6 +115,7 @@ class Skill:
             f"---\n"
             f"name: {self.name}\n"
             f"objective_pattern: {self.objective_pattern}\n"
+            f"entry_id: {self.entry_id}\n"
             f"task_id: {self.task_id}\n"
             f"description: {self.description}\n"
             f"tags_json: {json.dumps(self.tags, ensure_ascii=False)}\n"
@@ -294,6 +331,7 @@ class SkillLibrary:
         return Skill(
             name=_derive_skill_name(record.get("objective", "")),
             objective_pattern=record.get("objective", ""),
+            entry_id=compute_entry_id(substeps),
             task_id=task_id,
             substeps=substeps,
             metadata=SkillMetadata(success_count=1, total_uses=1, confidence=1.0,
@@ -306,13 +344,28 @@ class SkillLibrary:
 
     # --- 晋升判定 ------------------------------------------------------------
     def promote_or_insert(self, candidate: Skill) -> Dict[str, Any]:
+        """按身份匹配已有技能：entry_id（脱敏序列）优先，objective_pattern 兜底。
+
+        P2-R Phase 1：同一套路的字面参数不同（type_text 文本不同）⇒ 同一
+        entry_id ⇒ 走 record_success 累计（N=3 晋升由此成立），而非另立新档 ——
+        这是「重复根源」的写入端修复。
+        旧文件无 entry_id：现场补算回写（一次性迁移，读时归一）。
+        """
         existing = self.load(candidate.name)
         if existing is None:
             for s in self.list_all():
-                if s.objective_pattern == candidate.objective_pattern:
+                eid = s.entry_id or compute_entry_id(s.substeps)
+                if candidate.entry_id and eid and eid == candidate.entry_id:
                     existing = s
                     break
+            if existing is None and not candidate.entry_id:
+                for s in self.list_all():
+                    if s.objective_pattern == candidate.objective_pattern:
+                        existing = s
+                        break
         if existing:
+            if not existing.entry_id:
+                existing.entry_id = candidate.entry_id or compute_entry_id(existing.substeps)
             if len(candidate.substeps) >= len(existing.substeps):
                 existing.substeps = candidate.substeps
             promoted = existing.record_success()
