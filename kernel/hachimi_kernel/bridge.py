@@ -614,35 +614,66 @@ def set_knowledge_enabled(enabled):
     return {"ok": True, "knowledge_enabled": _knowledge_enabled["on"]}
 
 
-def _knowledge_block():
-    """弱注入块（K7a）：memory summary + 全局技能摘要 → build_knowledge_block。
+def _skill_ops(s) -> str:
+    """Skill.substeps → 紧凑操作序列（注入块 ops 字段；Skill dataclass 无 ops）。"""
+    parts = []
+    for ss in (s.substeps or []):
+        t, a = ss.tool, (ss.args or {})
+        if t == "launch_app":
+            parts.append("launch_app(%s)" % (a.get("package") or "?"))
+        elif t == "tap_by_id":
+            parts.append("tap_by_id(%s)" % (a.get("view_id") or "?"))
+        elif t == "type_text":
+            parts.append("type_text(%s)" % str(a.get("text", ""))[:16])
+        elif t == "tap_xy":
+            parts.append("tap_xy(%.2f,%.2f)" % (a.get("x", 0), a.get("y", 0)))
+        else:
+            parts.append(t)
+    return " → ".join(parts)
 
-    语义对齐桌面 §3.4：携带弱化提示（可能过时，以实际观测为准）；
+
+def _knowledge_parts():
+    """弱注入块 + 元数据（K7a / P2 DoD2）：返回 ``(block, meta)``。
+
+    meta 供主界面「本次注入了哪些知识」指示：memory 有无、技能名列表、块字符数；
     开关关 / 无任何内容 → 空串（零注入，prompt 逐字节不变）。
     """
     if not _knowledge_enabled["on"]:
-        return ""
+        return "", {"memory": False, "skills": [], "chars": 0}
     try:
         from hachimi_kernel.knowledge_inject import (
             load_memory_text, build_knowledge_block)
         skills = []
+        mem = ""
+        try:
+            mem = load_memory_text()
+        except Exception:
+            mem = ""
         try:
             from hachimi_kernel.skill_library import SkillLibrary
             # 全局目录直读 + _parse（构造器需合法 task_id，全局列表面板/注入
             # 无 task 上下文——与 knowledge_inject.build_skill_catalog 同款）
             for f in SkillLibrary._global_dir().glob("*.md"):
                 s = SkillLibrary._parse(f)
-                if s is not None:
+                if s is not None and not s.disable_model_invocation:
                     skills.append({"name": s.name,
                                    "objective_pattern": s.objective_pattern,
-                                   "ops": (getattr(s, "ops", "") or "")[:200]})
+                                   "ops": _skill_ops(s)[:200]})
         except Exception:
             skills = []
-        return build_knowledge_block(load_memory_text(), skills)
+        block = build_knowledge_block(mem, skills)
+        return block, {"memory": bool(mem.strip()),
+                       "skills": [s["name"] for s in skills],
+                       "chars": len(block)}
     except Exception as e:
         print("[task] knowledge block unavailable: %s: %s" % (type(e).__name__, e),
               flush=True)
-        return ""
+        return "", {"memory": False, "skills": [], "chars": 0}
+
+
+def _knowledge_block():
+    """弱注入块（K7a）：memory summary + 全局技能摘要 → build_knowledge_block。"""
+    return _knowledge_parts()[0]
 
 
 def _make_curator(task_id):
@@ -717,12 +748,144 @@ def skills_list_json():
             out.append({"name": s.name,
                         "description": (getattr(s, "description", "") or "")[:200],
                         "objective_pattern": s.objective_pattern,
+                        "disabled": bool(s.disable_model_invocation),
                         "use_count": use,
                         "success_count": success,
                         "created_at": meta.get("created_at", "")})
         return json.dumps({"ok": True, "skills": out}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"ok": False, "skills": [],
+                           "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
+# ---- P2 知识管理面（DoD3 启停/删除/清空 + DoD5 导出） -----------------------
+
+def _global_skills_dir():
+    """全局技能目录（惰性导入，防循环依赖；目录不存在则创建——_global_dir 语义）。"""
+    from hachimi_kernel.skill_library import SkillLibrary
+    return SkillLibrary._global_dir()
+
+
+def _skill_file(name):
+    """全局技能文件路径（_safe_filename 防目录穿越；无效名返回 None）。"""
+    try:
+        from hachimi_kernel.skill_library import _safe_filename
+        fn = _safe_filename(str(name or "").strip())
+        if not fn:
+            return None
+        return _global_skills_dir() / f"{fn}.md"
+    except Exception:
+        return None
+
+
+def skill_toggle_json(name, disabled):
+    """启/停技能（DoD3）：frontmatter 写 disable_model_invocation。
+
+    停用技能不进注入块、不进模型目录（recall 的 load_skill 仍可手工加载）；
+    裸 md（无 frontmatter）补一段最小 frontmatter。
+    """
+    try:
+        f = _skill_file(name)
+        if f is None or not f.exists():
+            return json.dumps({"ok": False, "error": "no such skill: %s" % name},
+                              ensure_ascii=False)
+        flag = "true" if disabled else "false"
+        text = f.read_text(encoding="utf-8")
+        if text.startswith("---"):
+            lines = text.split("\n")
+            insert_at = None
+            for i in range(1, len(lines)):
+                ln = lines[i].strip()
+                if ln == "---":          # frontmatter 结束：插在收尾 --- 前
+                    insert_at = i
+                    break
+                if ln.startswith("disable_model_invocation:"):
+                    lines[i] = "disable_model_invocation: %s" % flag
+                    insert_at = None
+                    break
+            if insert_at is not None:
+                lines.insert(insert_at, "disable_model_invocation: %s" % flag)
+            out = "\n".join(lines)
+        else:
+            out = "---\nname: %s\ndisable_model_invocation: %s\n---\n\n%s" \
+                  % (str(name).strip(), flag, text)
+        f.write_text(out, encoding="utf-8")
+        return json.dumps({"ok": True, "name": name, "disabled": bool(disabled)},
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
+def skill_delete_json(name):
+    """删除全局技能文件（DoD3；Curator 下次蒸馏可再生成）。"""
+    try:
+        f = _skill_file(name)
+        if f is None or not f.exists():
+            return json.dumps({"ok": False, "error": "no such skill: %s" % name},
+                              ensure_ascii=False)
+        f.unlink()
+        return json.dumps({"ok": True, "name": name}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
+def knowledge_clear_json(scope="memory"):
+    """一键清空（DoD3）：scope=memory 清 MEMORY.md+rollouts+summary；
+    scope=all 再加全局技能（画像/角色卡是用户资产，不清）。"""
+    try:
+        cleared = {"rollouts": 0, "skills": 0}
+        if scope in ("memory", "all"):
+            d = P.memory_rollouts()
+            if d.exists():
+                for f in d.glob("*.md"):
+                    f.unlink()
+                    cleared["rollouts"] += 1
+            for p in (P.memory_master(), ):
+                if p.exists():
+                    p.unlink()
+            # 注入视图同步清空（regenerate_summary 在 MEMORY.md 缺失时清空并返 0）
+            try:
+                from hachimi_kernel.curator import regenerate_summary
+                regenerate_summary()
+            except Exception:
+                pass
+        if scope == "all":
+            g = _global_skills_dir()
+            if g.exists():
+                for f in g.glob("*.md"):
+                    f.unlink()
+                    cleared["skills"] += 1
+        print("[knowledge] cleared scope=%s %s" % (scope, cleared), flush=True)
+        return json.dumps({"ok": True, "scope": scope, **cleared}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
+
+
+def knowledge_export_json():
+    """导出数据面（DoD5）：知识域全部 md 文件（skills/ + memory/ 全目录）。
+
+    Kotlin 侧打包 zip 走系统分享；单文件 100KB 截断管控。
+    """
+    try:
+        files = []
+        for root, prefix in ((_global_skills_dir(), "skills"),
+                             (P.global_memory(), "memory")):
+            if not root.exists():
+                continue
+            for f in sorted(root.rglob("*.md")):
+                if not f.is_file():
+                    continue
+                files.append({
+                    "path": "%s/%s" % (prefix, f.relative_to(root).as_posix()),
+                    "content": f.read_text(encoding="utf-8", errors="replace")[:100000],
+                })
+        return json.dumps({"ok": True, "files": files}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "files": [],
                            "error": "%s: %s" % (type(e).__name__, e)},
                           ensure_ascii=False)
 
@@ -882,6 +1045,9 @@ def _run(body, stop_flag=_controls):
                 frozen = _state.get("run_id") in _frozen_run
             if frozen:
                 print("[task] CURATOR SUPPRESSED (experiment freeze)", flush=True)
+            elif task_id and not _knowledge_enabled["on"]:
+                # P2 DoD1：设置里关掉知识 = 注入与沉淀一起停（风险触发即总开关）
+                print("[task] CURATOR OFF (knowledge disabled)", flush=True)
             elif task_id:
                 # 只对真实任务蒸馏（chat 轮 run_record 同样传入——Curator
                 # 内部按步数阈值短路，短对话零成本跳过）
@@ -908,6 +1074,15 @@ def _run(body, stop_flag=_controls):
             # K3：口播/答案 → message 事件（手机端 assistant 气泡；穿插口播同型）
             _emit({"event": "message", "run_id": run_id, "content": content})
 
+        # P2 DoD2：注入指示事件——主界面显示「本次注入了哪些知识」
+        #（块算一次，事件与 config 共用；开关关/无内容 = 空块零注入）
+        kblock, kmeta = _knowledge_parts()
+        _emit({"event": "knowledge", "run_id": run_id,
+               "enabled": _knowledge_enabled["on"],
+               "memory": kmeta["memory"],
+               "skills_names": "、".join(kmeta["skills"]),
+               "chars": kmeta["chars"]})
+
         loop = MiniLoop(objective=objective,
                         done_when=done_when,
                         tools=tools, brain=brain,
@@ -921,8 +1096,7 @@ def _run(body, stop_flag=_controls):
                                 "persona": _persona_block(),
                                 # K7a：弱注入块（memory summary + 技能摘要；
                                 # 开关关/无内容 = 空串零注入）
-                                "knowledge": _knowledge_block()},
-                        controls=_controls,
+                                "knowledge": kblock},                        controls=_controls,
                         verify_fn=verify,
                         # K1a 统一入口：历史 + 本轮消息（闲聊/任务大脑自决，K1b）
                         history=history,

@@ -345,7 +345,9 @@ class SettingsPage(private val act: Activity) {
             }
         })
         about.addView(divider(about))
-        about.addView(sectionLabel("弱注入（技能/记忆摘要进下次任务）"))
+        // P2：开关同时管两个方向——任务后蒸馏（Curator）+ 任务前弱注入（kernel
+        // _knowledge_enabled 一处门控）；风险触发（注入劣化）即总开关，关=零读写
+        about.addView(sectionLabel("知识沉淀与弱注入（蒸馏 + 注入一起开关）"))
         injectSeg = Ds.seg(act, listOf("关", "开"),
             if (act.getSharedPreferences(TasksPage.PREFS, 0)
                     .getBoolean("knowledge_enabled", true)) 1 else 0) { i ->
@@ -362,7 +364,7 @@ class SettingsPage(private val act: Activity) {
         }
         about.addView(injectSeg!!.view, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        about.addView(prefRow("Curator 蒸馏", "任务完成后自动蒸馏技能/记忆（无后台定时器）", null))
+        about.addView(prefRow("Curator 蒸馏", "任务完成后自动蒸馏技能/记忆（随上方开关联动；无后台定时器）", null))
         about.addView(TextView(act).apply {
             text = "实验模式 · Hachifish v0.1 · P1.5 UI 终态"
             textSize = 12f; setTextColor(Ds.TEXT_3); setPadding(0, Ds.dp(act, 10), 0, 0)

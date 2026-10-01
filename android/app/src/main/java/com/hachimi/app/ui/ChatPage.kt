@@ -775,6 +775,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             is ChatItem.DonePanel -> 3
             is ChatItem.FailPanel -> 4
             ChatItem.Thinking -> 5
+            is ChatItem.KnowledgeHint -> 6
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, type: Int): RecyclerView.ViewHolder {
@@ -797,6 +798,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 is ChatItem.DonePanel -> doneRow(it)
                 is ChatItem.FailPanel -> failRow(it)
                 ChatItem.Thinking -> thinkingRow()
+                is ChatItem.KnowledgeHint -> knowledgeRow(it)
             })
         }
 
@@ -1069,6 +1071,30 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                     LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     leftMargin = Ds.dp(act, 8); topMargin = Ds.dp(act, 2)
                 }
+            })
+        }
+
+        /** 知识注入提示行（P2 DoD2）：小字灰卡，注明本次注入的记忆/技能；空块出弱提示。 */
+        private fun knowledgeRow(k: ChatItem.KnowledgeHint): View = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                leftMargin = Ds.dp(act, 36)
+            }
+        }.also { row ->
+            val what = buildString {
+                val parts = mutableListOf<String>()
+                if (k.memory) parts.add("全局记忆")
+                if (k.skills.isNotEmpty()) parts.add("技能「${k.skills.joinToString("」「")}」")
+                append(if (parts.isEmpty()) "本次无知识可注入"
+                       else "已注入：${parts.joinToString(" + ")}")
+            }
+            row.addView(TextView(act).apply {
+                text = "🧠 $what"
+                textSize = 11f; setTextColor(Ds.TEXT_3)
+                background = Ds.round(act, 10, Ds.GRAY_BG)
+                val p = Ds.dp(act, 8)
+                setPadding(p, p / 2, p, p / 2)
             })
         }
 

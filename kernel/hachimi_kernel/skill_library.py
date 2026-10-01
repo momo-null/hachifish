@@ -264,7 +264,29 @@ class SkillLibrary:
     def from_run_record(cls, record: dict, task_id: str) -> Optional[Skill]:
         if not record.get("success"):
             return None
-        sd = record.get("steps_data") or []
+        sd = list(record.get("steps_data") or [])
+        if len(sd) < 2 and record.get("trajectory_file"):
+            # P2 修复：bridge 的 RunRecord 不带 steps_data（schema 未含该字段），
+            # 候选技能此前永远拿不到操作序列 → 全局技能目录恒空。
+            # 回退读轨迹 jsonl（绝对路径，单一真源；每行 StepRecord.action）。
+            try:
+                tf = Path(str(record["trajectory_file"]))
+                if tf.exists():
+                    for ln in tf.read_text(encoding="utf-8").splitlines():
+                        try:
+                            a = (json.loads(ln).get("action") or {})
+                            if a.get("tool"):
+                                sd.append({"tool": a["tool"], "args": a.get("args") or {}})
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+        # 元动作与观察动作不进技能操作序列（P2 DoD4 教训）：技能=执行路径，
+        # observe/look/screenshot 是模型的验证行为而非套路，注入只添噪声；
+        # task_done/verify 是完成声明与校验门，wait 无信息。
+        sd = [s for s in sd if s.get("tool") not in (
+            "task_done", "verify_done", "wait",
+            "observe", "look", "screenshot")]
         if len(sd) < 2:
             return None
         substeps = [SkillSubstep(tool=s.get("tool", ""), args=s.get("args") or {})
@@ -276,6 +298,9 @@ class SkillLibrary:
             substeps=substeps,
             metadata=SkillMetadata(success_count=1, total_uses=1, confidence=1.0,
                                    status="candidate",
+                                   # P2：直接落全局——注入只读全局技能目录；task 级
+                                   # 技能对下次任务不可见，「越用越顺手」不成立
+                                   scope="global",
                                    created=datetime.now(timezone.utc).isoformat()),
         )
 

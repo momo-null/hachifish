@@ -25,6 +25,17 @@
         android:theme="@style/Hachimi.Light"
         android:allowBackup="false">
 
+        <!-- 知识导出 zip 分享（P2 DoD5）：仅暴露 cacheDir/share/ -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.hachimi.app.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <activity android:name=".MainActivity" android:exported="true"
             android:windowSoftInputMode="adjustResize|stateHidden">
             <intent-filter>

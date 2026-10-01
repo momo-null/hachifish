@@ -196,8 +196,10 @@ class Curator:
                     rollout = self.distill_task_memory(run_record)
                     if rollout is not None:
                         report.rollouts_distilled = 1
-                        _merge_threshold = 10 if _steady_converged() else 5
-                        report.memory_merged = self.maybe_merge_rollouts(threshold=_merge_threshold)
+                        # P2 DoD4：合并阈值降为 1——「越用越顺手」要求下一次 run
+                        # 就能看到本次沉淀；_merge_memory_sections 条目级去重
+                        # （strip+小写全文比对）保证重复蒸馏不膨胀 MEMORY.md
+                        report.memory_merged = self.maybe_merge_rollouts(threshold=1)
                 report.dedup_hit_rate = getattr(self, "_last_dedup_hit_rate", 0.0)
                 self._persist_curator_metric(
                     report.dedup_hit_rate, report.skills_promoted, report.skills_created)
@@ -442,6 +444,11 @@ class Curator:
                 facts = [f for f in (wm.facts or []) if f and f != "_(暂无)_"]
             except Exception:
                 facts = []
+            if not facts:
+                # P2：产品路径暂无世界模型写入（bridge/loop 不产 facts），成功任务
+                # 若零 facts 则记忆只剩失败教训——注入无增益。回退从成功轨迹提取
+                # 「上次成功路径」事实（紧凑操作序列），同任务复跑步数可观测下降。
+                facts = _success_path_facts(run_record)
         else:
             if reason:
                 lessons.append(f"[失败] {objective} —— {reason}")
@@ -681,6 +688,47 @@ class Curator:
 # ---------------------------------------------------------------------------
 # 蒸馏 / 合并辅助（模块级，便于单测与无 Curator 实例复用）
 # ---------------------------------------------------------------------------
+
+def _read_actions(trajectory_file: str) -> List[Dict[str, Any]]:
+    """读轨迹 jsonl 的动作序列（tool+args），过滤元/观察动作；异常返回空。"""
+    out: List[Dict[str, Any]] = []
+    try:
+        for ln in Path(str(trajectory_file)).read_text(encoding="utf-8").splitlines():
+            try:
+                a = (json.loads(ln).get("action") or {})
+                tool = a.get("tool")
+                if tool and tool not in ("task_done", "verify_done",
+                                         "observe", "look", "screenshot"):
+                    out.append({"tool": tool, "args": a.get("args") or {}})
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def _fmt_action(a: Dict[str, Any]) -> str:
+    """动作 → 紧凑串（技能 ops 同风格）：launch_app(时钟)、tap_by_id(...id/new_note)。"""
+    tool = a.get("tool", "?")
+    args = a.get("args") or {}
+    if tool == "launch_app":
+        return "launch_app(%s)" % (args.get("package") or "?")
+    if tool == "tap_by_id":
+        return "tap_by_id(%s)" % (args.get("view_id") or "?")
+    if tool == "type_text":
+        return "type_text(%s)" % (str(args.get("text", ""))[:16])
+    if tool == "tap_xy":
+        return "tap_xy(%.2f,%.2f)" % (args.get("x", 0), args.get("y", 0))
+    return tool
+
+
+def _success_path_facts(run_record: Dict[str, Any]) -> List[str]:
+    """成功轨迹 → 「上次成功路径」事实（P2 facts 回退；世界模型接入前的过渡）。"""
+    actions = _read_actions(run_record.get("trajectory_file") or "")
+    if len(actions) < 2:
+        return []
+    objective = (run_record.get("objective") or "").strip()
+    return ["任务「%s」上次成功路径：%s" % (objective, " → ".join(_fmt_action(a) for a in actions[:12]))]
 
 def _parse_rollout_sections(text: str):
     """从 rollout md 解析 ``## facts`` / ``## lessons`` 段落的有效条目。"""

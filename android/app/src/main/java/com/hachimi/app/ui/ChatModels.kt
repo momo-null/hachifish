@@ -42,6 +42,14 @@ sealed class ChatItem {
     /** 失败面板（fish_fail + 人话错误 + 重试）。 */
     data class FailPanel(val reason: String) : ChatItem()
 
+    /** 知识注入提示（P2 DoD2：主界面能看出本次注入了哪些知识）。
+     *  enabled=false 时不出卡；空块出「无注入」弱提示。 */
+    data class KnowledgeHint(
+        val memory: Boolean,
+        val skills: List<String>,
+        val chars: Int
+    ) : ChatItem()
+
     /** 「思考中」三点指示（K3a 前端状态机：start 后首个事件前）。 */
     object Thinking : ChatItem()
 }
@@ -90,6 +98,12 @@ object ChatMapper {
         "error" -> ChatItem.FailPanel(
             reason = (e["error"] as? String) ?: "发生错误"
         )
+        "knowledge" -> ChatItem.KnowledgeHint(
+            memory = e["memory"] as? Boolean ?: false,
+            skills = (e["skills_names"] as? String).orEmpty()
+                .split("、").mapNotNull { it.trim().takeIf { s -> s.isNotBlank() } },
+            chars = (e["chars"] as? Number)?.toInt() ?: 0
+        )
         else -> null   // start / paused / mode：只驱动相位，不进消息流
     }
 
@@ -111,6 +125,7 @@ object ChatMapper {
     fun replacesThinking(item: ChatItem?): Boolean =
         item is ChatItem.ToolCard || item is ChatItem.AssistantMsg
             || item is ChatItem.DonePanel || item is ChatItem.FailPanel
+            || item is ChatItem.KnowledgeHint
 
     /** tool 名 → 图标语义分组（渲染用，纯函数可测）。 */
     fun toolGlyph(tool: String): String = when {

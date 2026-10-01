@@ -108,6 +108,11 @@ class KernelHostService : Service() {
             bridgeMod.callAttr("register_bridge", dispatcher)
             // 叙事面板：Python 步进事件 → 悬浮层（前台引导模式 UI 组成，架构 §6）
             bridgeMod.callAttr("register_narrative", NarrativePanel)
+            // P2：知识开关持久化值随 attach 同步 kernel（进程重启后 kernel 默认开，
+            // 用户此前关过的选择会丢——设置页只在切换时推送，冷启动必须这里回放）
+            bridgeMod.callAttr("set_knowledge_enabled",
+                getSharedPreferences("hachimi_ui", MODE_PRIVATE)
+                    .getBoolean("knowledge_enabled", true))
             pyBridgeModule = bridgeMod
             // 本机应用索引预热（后台线程）：首次 launch_app 按应用名跳转零建索引成本
             AppIndex.warmup(this)
