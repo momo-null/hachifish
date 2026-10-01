@@ -823,14 +823,31 @@ def _trajectory_digest(run_record: Dict[str, Any], max_steps: int = 40) -> str:
     return "\n".join(lines)
 
 
-# 语义去重阈值（重叠率 = 交集 / min(两指纹大小)），按实测分布取 0.45：
-# 同义表述实测 0.47~0.63（"按返回键自动保存" vs "按 back 返回自动保存"），
-# 不同事实实测 <= 0.06（"标题字段锁定" vs "正文占位行"）—— 分离度足够。
-_SIMILAR_THRESHOLD = 0.45
+# 语义去重阈值（重叠率 = 交集 / min(两指纹大小)）。
+# 实测校准（真机提取出的同义句对）：同义 0.29~0.43，不同事实 <= 0.06。
+# 取 0.35：覆盖大部分同义改写，与"不同事实"仍有 6 倍安全边际。
+# 局限：用词完全不同的同义改写（实测最低 0.29）仍会漏 —— 需要 embedding 或
+# LLM 辅助合并，属于后续项（见 doc/knowledge_redesign.md §6.3 遗留）。
+_SIMILAR_THRESHOLD = 0.35
+
+# 具体控件 id（非通用）作为强信号：两条事实都提到同一个具体控件，
+# 极可能讲的是同一件事（例如都讲 material_timepicker_mode_button）。
+# 覆盖两种写法：反引号里的短 id（alarm_fab）与完整 resource-id
+# （org.fossify.clock:id/alarm_fab）—— 后者含 `:`/`/`，旧正则匹配不到，
+# 会让"alarm_fab 可点"的两条变体漏网（2026-10-01 实测残留）。
+_WIDGET_RE = re.compile(r"[a-z][a-z0-9_]{4,}(?:[.:/][a-z0-9_]+)+")
+_GENERIC_WIDGETS = {"android:id/button1", "android:id/button2"}
+
+
+def _widgets(text: str) -> set:
+    """条目里的具体控件 id（排除 android:id/button1 这类到处都有的通用件）。"""
+    return {m for m in _WIDGET_RE.findall(text or "")} - _GENERIC_WIDGETS
 
 
 def _similar(a: str, b: str) -> bool:
-    """两条目是否同义（语义指纹重叠率 >= 阈值）。"""
+    """两条目是否同义：共享具体控件 id，或语义指纹重叠率 >= 阈值。"""
+    if _widgets(a) & _widgets(b):
+        return True
     fp_a = _fact_fingerprint(a)
     fp_b = _fact_fingerprint(b)
     if not fp_a or not fp_b:
