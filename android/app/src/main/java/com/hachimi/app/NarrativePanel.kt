@@ -77,11 +77,16 @@ object NarrativePanel {
 
     // P3 V10 面板 / V11 球视图引用与进度态
     private var actionLine: TextView? = null     // 当前动作行（口播优先，tool 次之）
+    private var stepLine: TextView? = null       // 「第 n/total 步 · 目标」副标题
     private var progressFill: View? = null
     private var lastProgressN = 0
     private var lastProgressTotal = 0
+    private var lastObjective = ""               // 当前任务目标（浮动面板副标题）
     private var ring: RingDrawable? = null
     private var ballBadge: TextView? = null
+    private var pulseView: View? = null          // 头像外圈脉冲（mockup .float-avatar fishpulse）
+    private var panelBtns: LinearLayout? = null  // V10 独立按钮窗（圆形图标组）
+    private var menuView: LinearLayout? = null   // ⋯ overflow 菜单窗（overlay 自绘）
 
     // 停靠控制台视图引用
     private var consoleStatus: TextView? = null
@@ -137,6 +142,7 @@ object NarrativePanel {
                         // 否则上一任务的放行泄漏到所有后续任务（2026-10-01 真机实录）。
                         com.hachimi.app.gate.GateManager.beginTask()
                         lastStatus = "run " + e.optString("run_id").take(14)
+                        lastObjective = e.optString("objective").trim().replace('\n', ' ').take(30)
                         append("▶ 目标: " + e.optString("objective").take(40))
                         addTimeline("▶ " + e.optString("objective").take(36))
                         setAllStatus(lastStatus)
@@ -170,6 +176,7 @@ object NarrativePanel {
                         }
                         actionLine?.text = "▸ $tool"
                         updateProgressUi()
+                        updateStepLine()
                         // 红框定位指示：有归一化坐标的动作（tap_xy/gesture 首点）
                         val args = e.optJSONObject("args")
                         val x = args?.optDouble("x")
@@ -198,6 +205,7 @@ object NarrativePanel {
                             lastProgressN = lastProgressTotal
                             updateProgressUi()
                         }
+                        updateStepLine()
                         scheduleHide(2500)
                     }
                     "error" -> {
@@ -224,25 +232,36 @@ object NarrativePanel {
         }
     }
 
+    /**
+     * dock/undock 只负责**已挂载**面板的形态切换，不负责创建窗口（2026-10-01 修复）：
+     * kernel 每轮 run（含纯闲聊）都 emit mode 事件，此前未挂载时也会直接 attach 出浮条
+     * ——表现为「闲聊也弹任务浮窗」。窗口创建只认显式任务信号：TasksPage 派发、
+     * 回环 /task、ChatPage 首个真实 tool step（均经 show() 进入）。
+     */
     @Synchronized
     fun dock() {
         docked = true
         if (consoleVisible) return   // 真分屏控制台在场：overlay 降级退出
-        val c = context ?: return
-        main.post {
-            if (contentView != null || pillView != null) detachAll()
-            if (canOverlay(c) && !collapsed) attach(c, true)
-        }
+        applyLayout()
     }
 
     @Synchronized
     fun undock() {
         docked = false
         if (consoleVisible) return
+        applyLayout()
+    }
+
+    /** 按当前 docked/collapsed 重建**已存在**的 overlay；未挂载则什么都不做。 */
+    private fun applyLayout() {
+        // 未挂载 = 本轮尚无任务信号：只记录形态，绝不凭 mode 事件自己冒出来
+        if (contentView == null && pillView == null) return
         val c = context ?: return
         main.post {
-            if (contentView != null || pillView != null) detachAll()
-            if (canOverlay(c) && !collapsed) attach(c, false)
+            detachAll()
+            if (!canOverlay(c)) return@post
+            // 收起态维持药丸球（不因形态事件被"撑回"完整面板）
+            if (collapsed) attachPill(c) else attach(c, docked)
         }
     }
 
@@ -425,10 +444,16 @@ object NarrativePanel {
 
         contentView = LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
-            // P3 V10：浮条=米白卡片（白底描边圆角）；停靠台保留暗色（高级模式）
-            background = if (dock) Ds.round(c, 10, 0xF21E2026.toInt())
-                        else Ds.round(c, 16, Color.WHITE, 1, Ds.CARD_BORDER)
-            setPadding(pad, pad / 2, pad, pad / 2)
+            // P3 V10：浮条=米白卡片（白底 1px 描边 / 圆角 16 / 8dp 投影）；停靠台保留暗色（高级模式）
+            if (dock) {
+                background = Ds.round(c, 10, 0xF21E2026.toInt())
+                setPadding(pad, pad / 2, pad, pad / 2)
+            } else {
+                background = Ds.round(c, 16, Color.WHITE, 1, Ds.CARD_BORDER)
+                setPadding(Ds.dp(c, 12), Ds.dp(c, 10), Ds.dp(c, 12), Ds.dp(c, 10))
+                // mockup box-shadow(0 8 24)：轮廓取自 GradientDrawable 圆角背景
+                elevation = Ds.dp(c, 8).toFloat()
+            }
         }.also { box ->
             if (dock) {
                 consoleStatus = TextView(c).apply {
@@ -456,21 +481,28 @@ object NarrativePanel {
                 box.addView(timeline)
             } else {
                 consoleStatus = null; perception = null; decision = null; timeline = null
-                // V10 头行：呼吸头像 + 当前动作（口播优先，tool 次之）
+                // V10 头行（.float-main）：30dp 呼吸头像 + 动作/第 n 步 · 目标
                 val head = LinearLayout(c).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                 }
-                head.addView(android.widget.ImageView(c).apply {
+                // 头像 + 外圈脉冲（40dp 容器，脉冲圈画在头像下层）
+                val avWrap = android.widget.FrameLayout(c)
+                pulseView = View(c).apply {
+                    background = Ds.round(c, 20, Ds.ACCENT)
+                    alpha = 0.35f
+                    layoutParams = android.widget.FrameLayout.LayoutParams(
+                        Ds.dp(c, 40), Ds.dp(c, 40), Gravity.CENTER)
+                }
+                avWrap.addView(pulseView)
+                avWrap.addView(android.widget.ImageView(c).apply {
                     setImageBitmap(com.hachimi.app.ui.FishAssets.circle(
-                        c, com.hachimi.app.ui.FishAssets.AVATAR, 28))
-                    // 呼吸动画（mockup .fish-avatar fishpulse）：alpha 0.6↔1 循环
-                    startAnimation(android.view.animation.AlphaAnimation(0.6f, 1f).apply {
-                        duration = 900
-                        repeatCount = android.view.animation.Animation.INFINITE
-                        repeatMode = android.view.animation.Animation.REVERSE
-                    })
-                }, LinearLayout.LayoutParams(Ds.dp(c, 28), Ds.dp(c, 28)))
+                        c, com.hachimi.app.ui.FishAssets.AVATAR, 30))
+                    layoutParams = android.widget.FrameLayout.LayoutParams(
+                        Ds.dp(c, 30), Ds.dp(c, 30), Gravity.CENTER)
+                })
+                head.addView(avWrap, LinearLayout.LayoutParams(Ds.dp(c, 40), Ds.dp(c, 40)))
+                startPulse(pulseView!!)
                 val headText = LinearLayout(c).apply {
                     orientation = LinearLayout.VERTICAL
                     val p = Ds.dp(c, 10)
@@ -478,27 +510,30 @@ object NarrativePanel {
                 }
                 actionLine = TextView(c).apply {
                     text = "准备中…"
-                    setTextColor(Ds.TEXT); textSize = 13f
+                    setTextColor(Ds.TEXT); textSize = 12f
                     typeface = Typeface.DEFAULT_BOLD
                     maxLines = 1
                     ellipsize = android.text.TextUtils.TruncateAt.END
                 }
-                statusLine = TextView(c).apply {
-                    text = "▶ 前台引导 · idle"
-                    setTextColor(Ds.TEXT_2); textSize = 10f
-                    typeface = Typeface.MONOSPACE
+                stepLine = TextView(c).apply {
+                    text = ""                 // 「第 n/total 步 · 目标」（updateStepLine）
+                    setTextColor(Ds.TEXT_3); textSize = 10f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
                 }
                 headText.addView(actionLine)
-                headText.addView(statusLine)
+                headText.addView(stepLine)
                 head.addView(headText, LinearLayout.LayoutParams(
                     0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                // 右侧占位：给浮在卡片上方的独立按钮窗留位置（4 圆钮 + gap），不让文字被压
+                head.addView(View(c), LinearLayout.LayoutParams(btnReservePx(c), 1))
                 box.addView(head)
                 // 进度条（mockup .float-progress）：n/total（K2 total 事件字段）
                 val track = android.widget.FrameLayout(c).apply {
-                    background = Ds.round(c, 2, Ds.GRAY_BG)
+                    background = Ds.round(c, 2, Ds.PAGE)
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT, Ds.dp(c, 3)).apply {
-                        topMargin = pad / 2
+                        topMargin = Ds.dp(c, 8)
                     }
                 }
                 progressFill = View(c).apply {
@@ -508,28 +543,58 @@ object NarrativePanel {
                 }
                 track.addView(progressFill)
                 box.addView(track)
+                // 最近 3 步（mockup .float-steps）：顶部 1px 分隔 + gap 3dp
+                box.addView(View(c).apply {
+                    setBackgroundColor(Ds.PAGE)
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, Ds.dp(c, 1)).apply {
+                        topMargin = Ds.dp(c, 8)
+                    }
+                })
                 logLine = TextView(c).apply {
                     text = ""
-                    setTextColor(Ds.TEXT_2); textSize = 11f; maxLines = 3
+                    setTextColor(Ds.TEXT_3); textSize = 10f; maxLines = 3
                     typeface = Typeface.MONOSPACE
+                    setLineSpacing(Ds.dp(c, 3).toFloat(), 1f)
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        topMargin = Ds.dp(c, 7)
+                    }
                 }
                 box.addView(logLine)
                 updateProgressUi()
+                updateStepLine()
             }
-            // 内容窗让位按钮条：停靠=条在底（内容其上），浮条=条在顶（内容其下）
-            addWindow(box, WindowManager.LayoutParams.MATCH_PARENT,
+            // 内容窗：停靠=屏底 40% 控制台；浮条=顶部米白卡片（左右 10dp / 上 8dp，mockup .float-panel）
+            addWindow(box,
+                if (dock) WindowManager.LayoutParams.MATCH_PARENT
+                else c.resources.displayMetrics.widthPixels - Ds.dp(c, 20),
                 if (dock) (c.resources.displayMetrics.heightPixels * 0.40f).toInt()
                 else WindowManager.LayoutParams.WRAP_CONTENT,
                 passThrough = true,
-                gravity = if (dock) Gravity.BOTTOM else Gravity.TOP,
-                yOff = barPx)
+                gravity = if (dock) Gravity.BOTTOM else Gravity.TOP or Gravity.START,
+                xOff = if (dock) 0 else Ds.dp(c, 10),
+                yOff = if (dock) barPx else Ds.dp(c, 8))
         }
 
-        barView = buttonsRow(c).apply {
-            addWindow(this, WindowManager.LayoutParams.MATCH_PARENT, barPx,
-                passThrough = false,
-                gravity = if (dock) Gravity.BOTTOM else Gravity.TOP,
-                yOff = 0)
+        if (dock) {
+            barView = buttonsRow(c).apply {
+                addWindow(this, WindowManager.LayoutParams.MATCH_PARENT, barPx,
+                    passThrough = false,
+                    gravity = Gravity.BOTTOM,
+                    yOff = 0)
+            }
+        } else {
+            // V10：圆形图标按钮组挂独立窗浮于卡片右上角，仅按钮自身拦截触摸（内容仍穿透）
+            panelBtns = circleBtnRow(c).apply {
+                addWindow(this, WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    passThrough = false,
+                    gravity = Gravity.TOP or Gravity.END,
+                    xOff = -Ds.dp(c, 22),      // 与卡片内容右缘对齐（外边距 10 + 内边距 12）
+                    yOff = Ds.dp(c, 24))       // 卡片 top 8 + padding 10 + 行内居中（40-28)/2
+            }
         }
         setAllStatus(lastStatus)
         // 重挂（如收起→展开）时回放既有时间线，避免空白等待下一事件
@@ -542,7 +607,7 @@ object NarrativePanel {
         get() = context?.resources?.displayMetrics?.density?.let { (50 * it).toInt() } ?: 132
 
     private fun addWindow(v: LinearLayout, w: Int, h: Int, passThrough: Boolean,
-                          gravity: Int, yOff: Int) {
+                          gravity: Int, yOff: Int, xOff: Int = 0) {
         val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 (if (passThrough) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
         val params = WindowManager.LayoutParams(
@@ -551,6 +616,7 @@ object NarrativePanel {
             flags, PixelFormat.TRANSLUCENT
         ).apply {
             this.gravity = gravity
+            this.x = xOff
             this.y = yOff
         }
         try {
@@ -562,15 +628,17 @@ object NarrativePanel {
     }
 
     private fun detachAll() {
-        for (v in listOf(contentView, barView)) {
+        for (v in listOf(contentView, barView, panelBtns, menuView)) {
             try {
                 wm?.removeView(v)
             } catch (_: Exception) {}
         }
         try { pillView?.let { wm?.removeView(it) } } catch (_: Exception) {}
+        try { pulseView?.animate()?.cancel() } catch (_: Exception) {}
         contentView = null; barView = null; pillView = null; pillParams = null
+        panelBtns = null; menuView = null; pulseView = null
         statusLine = null; logLine = null
-        actionLine = null; progressFill = null; ring = null; ballBadge = null
+        actionLine = null; stepLine = null; progressFill = null; ring = null; ballBadge = null
         consoleStatus = null; perception = null; decision = null; timeline = null
     }
 
@@ -595,6 +663,109 @@ object NarrativePanel {
         btn(if (docked) "浮条" else "停靠") { _ -> if (docked) undock() else dock() }
         btn("收起") { _ -> collapse() }
         return row
+    }
+
+    // ---------------- V10 圆形图标按钮组（mockup .float-btns） ----------------
+
+    /** 头行右侧为按钮窗预留的宽度：4 圆钮 28dp + gap 4dp×3 + 文案安全间距 10dp。 */
+    private fun btnReservePx(c: Context): Int = Ds.dp(c, 28 * 4 + 4 * 3 + 10)
+
+    /** 28dp 圆形图标按钮（mockup .float-btn）：TextView 自绘，不用原生 Button（避免默认样式/涟漪）。 */
+    private fun roundBtn(c: Context, glyph: String, fg: Int,
+                         onClick: (TextView) -> Unit): TextView = TextView(c).apply {
+        text = glyph; textSize = 12f
+        setTextColor(fg)
+        gravity = Gravity.CENTER
+        background = Ds.round(c, 14, Ds.PAGE)
+        setOnClickListener { v -> onClick(v as TextView) }
+    }
+
+    /** V10 按钮组：⏸（暂停/继续）· ✕（停止，红）· ⌄（收起为球）· ⋯（overflow 次级，弱化色）。 */
+    private fun circleBtnRow(c: Context): LinearLayout {
+        val row = LinearLayout(c).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fun add(v: TextView) = row.addView(v, LinearLayout.LayoutParams(
+            Ds.dp(c, 28), Ds.dp(c, 28)).apply { marginEnd = Ds.dp(c, 4) })
+        add(roundBtn(c, if (paused) "▶" else "⏸", Ds.TEXT) { b ->
+            paused = !paused
+            py(if (paused) "request_pause" else "request_resume")
+            b.text = if (paused) "▶" else "⏸"
+        })
+        add(roundBtn(c, "✕", Ds.RED) { _ -> py("request_stop") })
+        add(roundBtn(c, "⌄", Ds.TEXT) { _ -> collapse() })
+        add(roundBtn(c, "⋯", Ds.TEXT_3) { _ -> toggleMenu(c) })
+        return row
+    }
+
+    /**
+     * ⋯ overflow 菜单：overlay 自绘（PopupMenu 需要 Activity token，本面板挂在 WindowManager
+     * 的 application overlay 上拿不到）。通用「更多操作」入口：停靠/浮条切换 + 隐藏面板，
+     * 后续新能力直接加项即可。再次点 ⋯ 或点任意项关闭。
+     */
+    private fun toggleMenu(c: Context) {
+        if (menuView != null) { hideMenu(); return }
+        val items = listOf(
+            (if (docked) "切回浮条" else "AGENT 控制台（分屏）") to {
+                hideMenu(); if (docked) undock() else dock()
+            },
+            "隐藏面板" to { hideMenu(); detachAll() }
+        )
+        val box = LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ds.round(c, 12, Color.WHITE, 1, Ds.CARD_BORDER)
+            elevation = Ds.dp(c, 6).toFloat()
+            setPadding(Ds.dp(c, 4), Ds.dp(c, 4), Ds.dp(c, 4), Ds.dp(c, 4))
+        }
+        for ((label, act) in items) {
+            box.addView(TextView(c).apply {
+                text = label; textSize = 13f; setTextColor(Ds.TEXT)
+                setPadding(Ds.dp(c, 12), Ds.dp(c, 9), Ds.dp(c, 12), Ds.dp(c, 9))
+                setOnClickListener { act() }
+            })
+        }
+        val wmInst = wm ?: c.getSystemService(WindowManager::class.java).also { wm = it }
+        try {
+            wmInst.addView(box, WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.END
+                x = -Ds.dp(c, 22)   // 与按钮组右对齐
+                y = Ds.dp(c, 52)    // 落在按钮行下方
+            })
+            menuView = box
+        } catch (e: Exception) {
+            Log.w(TAG, "menu add: ${e.message}")
+            menuView = null
+        }
+    }
+
+    private fun hideMenu() {
+        menuView?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
+        menuView = null
+    }
+
+    /** 头像外圈脉冲（mockup @keyframes fishpulse）：alpha .35→0 + 微放大，1.6s 往复。
+     *  800ms 单向 tween + postDelayed 反向，视图脱离窗口后自动停（parent == null）。 */
+    private fun startPulse(v: View) {
+        v.alpha = 0.35f
+        val tick = object : Runnable {
+            override fun run() {
+                if (v.parent == null) return          // 面板已 detach：停表
+                val out = v.alpha > 0.2f
+                v.animate().alpha(if (out) 0f else 0.35f)
+                    .scaleX(if (out) 1.1f else 1f)
+                    .scaleY(if (out) 1.1f else 1f)
+                    .setDuration(800).start()
+                v.postDelayed(this, 800)
+            }
+        }
+        v.post(tick)
     }
 
     // ---------------- 文本更新 ----------------
@@ -623,6 +794,14 @@ object NarrativePanel {
         ballBadge?.text = if (lastProgressN > 0) "$lastProgressN" else "•"
     }
 
+    /** 「第 n/total 步 · 目标」副标题（mockup .float-step）。 */
+    private fun updateStepLine() {
+        val v = stepLine ?: return
+        val head = if (lastProgressTotal > 0) "第 $lastProgressN/$lastProgressTotal 步"
+                   else "第 $lastProgressN 步"
+        v.text = if (lastObjective.isEmpty()) head else "$head · $lastObjective"
+    }
+
     /** 浅底逐行染色（V10 米白面板）：✓ 绿 / → 蓝 / ✗ 红 / 其余灰。 */
     private fun coloredLight(text: String): CharSequence {
         val sb = SpannableString(text)
@@ -630,10 +809,10 @@ object NarrativePanel {
         for (line in text.split("\n")) {
             if (line.isNotEmpty()) {
                 val color = when (line.first()) {
-                    '✓' -> Ds.GREEN_TXT
+                    '✓' -> Ds.GREEN
                     '→' -> Ds.PRIMARY
-                    '✗' -> Ds.RED_TXT
-                    else -> Ds.TEXT_2
+                    '✗' -> Ds.RED
+                    else -> Ds.TEXT_3
                 }
                 sb.setSpan(ForegroundColorSpan(color), idx, idx + line.length, 0)
             }

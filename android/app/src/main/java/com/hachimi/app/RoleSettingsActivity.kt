@@ -59,7 +59,8 @@ class RoleSettingsActivity : Activity() {
         }
         head.addView(TextView(this).apply {
             text = "‹ 设置"; textSize = 15f; setTextColor(Ds.PRIMARY)
-            setOnClickListener { finish() }
+            // 返回前兜底持久化：最后一个字段可能仍持焦（失焦保存不触发）
+            setOnClickListener { persist(); finish() }
         })
         head.addView(TextView(this).apply {
             text = "角色设置"; textSize = 17f; setTextColor(Ds.TEXT)
@@ -67,13 +68,10 @@ class RoleSettingsActivity : Activity() {
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
-        head.addView(TextView(this).apply {
-            text = "保存"; textSize = 14f; setTextColor(Ds.PRIMARY)
-            typeface = Typeface.DEFAULT_BOLD
-            setOnClickListener { save() }
-        })
+        // 右侧占位（无「保存」按钮，标题保持居中）
+        head.addView(View(this), LinearLayout.LayoutParams(Ds.dp(this, 44), 1))
         box.addView(head)
-        box.addView(Ds.small(this, "大肥鱼 × 我 —— 改完保存，下一轮对话生效").apply {
+        box.addView(Ds.small(this, "大肥鱼 × 我 —— 改动失焦即存，即时生效").apply {
             setPadding(0, Ds.dp(this@RoleSettingsActivity, 4), 0, Ds.dp(this@RoleSettingsActivity, 12))
         })
 
@@ -96,7 +94,9 @@ class RoleSettingsActivity : Activity() {
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         fishCard.addView(avatarRow)
         fishCard.addView(label("角色名"))
-        roleNameField = field(fishCard, role.roleName, "给它起个名字")
+        roleNameField = field(fishCard, role.roleName, "给它起个名字").apply {
+            onFocusChangeListener = FocusSave()
+        }
         fishCard.addView(Ds.small(this, "显示在聊天头部和消息旁").apply {
             setPadding(0, 0, 0, Ds.dp(this@RoleSettingsActivity, 10))
         })
@@ -110,6 +110,7 @@ class RoleSettingsActivity : Activity() {
             minLines = 5
             gravity = Gravity.TOP
             setLineSpacing(Ds.dp(this@RoleSettingsActivity, 2).toFloat(), 1f)
+            onFocusChangeListener = FocusSave()
         }
         fishCard.addView(personaField, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
@@ -126,6 +127,7 @@ class RoleSettingsActivity : Activity() {
         })
         fishCard.addView(Ds.button(this, "恢复默认人设", primary = false) {
             personaField.setText(RoleStore.DEFAULT_PERSONA)
+            persist()
         }, Ds.vp(top = Ds.dp(this, 8)))
         box.addView(fishCard)
 
@@ -150,6 +152,7 @@ class RoleSettingsActivity : Activity() {
         pickRow.addView(Ds.button(this@RoleSettingsActivity, "恢复默认", primary = false) {
             pendingAvatarPath = null
             avatarPreview?.setImageBitmap(userAvatarBitmap(RoleStore.read(this@RoleSettingsActivity)))
+            persist()
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
             // 显式 LP 里设 leftMargin：不能在对 button 的 apply 里改 layoutParams——
             // 那会在 addView 前访问 null LP → `as LinearLayout.LayoutParams` NPE。
@@ -165,7 +168,9 @@ class RoleSettingsActivity : Activity() {
         })
         meCard.addView(avatarRow2)
         meCard.addView(label("对我的称呼"))
-        userNameField = field(meCard, role.userName, "例如：主人 / 老板 / 小明")
+        userNameField = field(meCard, role.userName, "例如：主人 / 老板 / 小明").apply {
+            onFocusChangeListener = FocusSave()
+        }
         meCard.addView(Ds.small(this, "大肥鱼会这样称呼你；未设头像时取首字作头像").apply {
             setPadding(0, 0, 0, 0)
         })
@@ -199,36 +204,53 @@ class RoleSettingsActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_PICK || resultCode != RESULT_OK || data == null) return
+        if (requestCode != REQ_PICK || resultCode != RESULT_OK || data?.data == null) return
+        val uri = data.data
         try {
-            val src = BitmapFactory.decodeStream(
-                contentResolver.openInputStream(data.data as Uri)) ?: return
-            // 中心裁方 → 圆形 → 256px → filesDir/user_avatar.png
+            // 两步采样解码：先读 bounds 算 inSampleSize（目标长边 ~512px），再二次开流解码。
+            // 相册原图常 3000-4000px，全尺寸直解单张 48MB+ 极易 OOM（2026-10-01 头像不生效根因之一）。
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri!!)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 512) sample *= 2
+            val src = contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(
+                    it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+            } ?: return
+            // 中心裁方 → 圆形 → 256px → filesDir/user_avatar.png → 立即持久化
             val circle = FishAssets.circle(src, 256)
             val f = File(filesDir, "user_avatar.png")
             f.outputStream().use { circle.compress(Bitmap.CompressFormat.PNG, 90, it) }
             pendingAvatarPath = f.name
             avatarPreview?.setImageBitmap(FishAssets.circle(circle, Ds.dp(this, 56)))
+            persist()
+            Toast.makeText(this, "头像已更新", Toast.LENGTH_SHORT).show()
             src.recycle()
         } catch (e: Exception) {
             Toast.makeText(this, "图片处理失败：${e.javaClass.simpleName}", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // ---------------- 保存 ----------------
+    // ---------------- 保存（失焦即存，无「保存」按钮） ----------------
 
-    private fun save() {
-        val role = RoleStore.Role(
+    /** 三个输入框共用的失焦保存监听：焦点离开即持久化当前全部字段。 */
+    private inner class FocusSave : View.OnFocusChangeListener {
+        override fun onFocusChange(v: View, hasFocus: Boolean) {
+            if (!hasFocus) persist()
+        }
+    }
+
+    /** 读当前 UI 状态持久化（成功静默，失败提示；character.md 同步由 RoleStore 负责）。 */
+    private fun persist() {
+        val ok = RoleStore.write(this, RoleStore.read(this).copy(
             roleName = roleNameField.text.toString().trim().ifEmpty { "大肥鱼" },
             userName = userNameField.text.toString().trim().ifEmpty { "主人" },
             userAvatarPath = pendingAvatarPath,
             personaPrompt = personaField.text.toString()
-        )
-        val ok = RoleStore.write(this, role)
-        Toast.makeText(this,
-            if (ok) "已保存，下一轮对话生效" else "保存失败（写入异常），请重试",
-            Toast.LENGTH_SHORT).show()
-        if (ok) finish()
+        ))
+        if (!ok) Toast.makeText(this, "保存失败（写入异常），请重试", Toast.LENGTH_SHORT).show()
     }
 
     // ---------------- 小部件 ----------------

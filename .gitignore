@@ -31,3 +31,6 @@ Thumbs.db
 
 # 工作上下文文档（本地交接用，不入库）
 docs/progress.md
+
+# 设备知识快照（实验期的本地冻结档，不入库）
+harness/experiments/kb_snapshots/

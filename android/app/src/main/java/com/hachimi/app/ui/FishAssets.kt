@@ -29,6 +29,8 @@ object FishAssets {
     val FAIL = R.drawable.fish_fail
     /** 空状态「压力大肥鱼」（疑惑/期待；亦作默认角色卡形象）。 */
     val EMPTY = R.drawable.fish_empty
+    /** 空闲态 / 待派活主界面主图「吃白饭」（懒散萌，喂食英寸函 hachimi idle）。 */
+    val TASK = R.drawable.fish_task
     /** 完成态彩蛋「看不太懂瞎编一个」（得意+心虚）。 */
     val DONE = R.drawable.fish_done
     /** 对话头像（女仆装透明图，聊天头部/消息旁/悬浮球统一使用）。 */
