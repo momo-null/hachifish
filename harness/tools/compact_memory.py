@@ -38,12 +38,16 @@ def pull() -> str:
 def push(text: str) -> bool:
     """把文本写回设备私有目录（经 /data/local/tmp 中转）。"""
     tmp_local = os.path.join(tempfile.gettempdir(), "MEMORY_compact.md")
-    with open(tmp_local, "w", encoding="utf-8") as f:
+    # newline="\n"：默认会把 \n 译成 \r\n，回写后条目间凭空多出空行
+    with open(tmp_local, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
     _adb("push", tmp_local, "/data/local/tmp/MEMORY_compact.md")
-    r = _adb("shell", "run-as", PKG, "sh", "-c",
-             "cat /data/local/tmp/MEMORY_compact.md > %s" % REMOTE)
-    return r.returncode == 0
+    # 用 cp 而非 `sh -c "cat > path"`：run-as 下的重定向在部分 shell 上不生效
+    r = _adb("shell", "run-as", PKG, "cp", "/data/local/tmp/MEMORY_compact.md", REMOTE)
+    _adb("shell", "rm", "-f", "/data/local/tmp/MEMORY_compact.md")
+    if r.returncode != 0:
+        return False
+    return bool(_adb("shell", "run-as", PKG, "cat", REMOTE).stdout.decode("utf-8", "ignore").strip())
 
 
 def main():

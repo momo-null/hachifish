@@ -838,6 +838,9 @@ _DISJOINT_WIDGET_THRESHOLD = 0.55
 # 共享控件却讲两件事的 pair 实测 0.19 —— 取 0.25 卡在两者之间。
 _WIDGET_HIT_OVERLAP = 0.25
 
+# 共享引用短语时的降档门槛（见 _similar 注释）：真同义 pair 实测 0.26。
+_ANCHOR_OVERLAP = 0.20
+
 # 具体控件 id（非通用）作为强信号：两条事实都提到同一个具体控件，
 # 极可能讲的是同一件事（例如都讲 material_timepicker_mode_button）。
 #
@@ -850,6 +853,7 @@ _WIDGET_HIT_OVERLAP = 0.25
 # （真机 dry-run 实证：底部导航坐标点按 与 悬浮按钮 id 点击 被并成一条）。
 _RES_ID_RE = re.compile(r"[a-z][a-z0-9_.]*:[a-z0-9_]+/([a-z0-9_]+)")
 _BACKTICK_ID_RE = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
+_BACKTICK_ALL_RE = re.compile(r"`([^`]+)`")
 _SNAKE_ID_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
 # 工具名也是 snake_case，但不是控件（否则"都要 type_text"会被当成同义证据）
 _TOOL_WORDS = frozenset({
@@ -869,6 +873,26 @@ def _strip_bullet(text: str) -> str:
     """
     # ``(?:[-*•]+\s*)+``：重复剥 —— "- - x" 只剥一层会留下 "- x"
     return re.sub(r"^(?:[-*•]+\s*)+", "", (text or "").strip()).strip()
+
+
+def _anchors(text: str) -> set:
+    """条目里的**引用短语**（反引号内、含空格或标点，即非纯控件 id 的串）。
+
+    两条事实引用同一句原文（如 ``projection not started``）几乎必然在讲同一件
+    事 —— 真机实证：这类同义改写词面重叠只有 0.26（低于 0.35 阈值）而漏网。
+    """
+    out = set()
+    for m in _BACKTICK_ALL_RE.findall(text or ""):
+        s = m.strip()
+        if len(s) >= 8 and ((" " in s) or (not re.fullmatch(r"[a-z0-9_.:/]+", s))):
+            out.add(s.lower())
+    return out
+
+
+def _anchor_hit(anchors: set, other: str) -> bool:
+    """``anchors`` 中任意引用短语是否作为原文出现在 ``other`` 里。"""
+    t = (other or "").lower()
+    return any(an in t for an in anchors or ())
 
 
 def _widgets(text: str) -> set:
@@ -896,6 +920,10 @@ def _similar(a: str, b: str, threshold: float = None) -> bool:
         threshold = min(threshold, _WIDGET_HIT_OVERLAP)
     elif wa and wb:
         threshold = max(threshold, _DISJOINT_WIDGET_THRESHOLD)
+    # 一方引用、另一方原文复述也算同主题（真机：只有 a 带反引号，b 是裸写）
+    aa, ab = _anchors(a), _anchors(b)
+    if (aa & ab) or _anchor_hit(aa, b) or _anchor_hit(ab, a):
+        threshold = min(threshold, _ANCHOR_OVERLAP)
     fp_a = _fact_fingerprint(a)
     fp_b = _fact_fingerprint(b)
     if not fp_a or not fp_b:

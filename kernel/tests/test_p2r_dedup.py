@@ -152,6 +152,13 @@ def test_disjoint_widgets_need_strong_text_agreement():
     assert not _similar(a, b)
 
 
+def test_shared_quoted_phrase_merges_low_overlap_rewrite():
+    """真机漏网 pair：词面重叠仅 0.26，但引用同一句 `projection not started`。"""
+    a = "截图/视觉观察依赖屏幕投影（projection），在投影未启动时 screenshot 与 look 会失败并报错 `projection not started`；此时可用 wait 后重试，或改用 UI 层级/id 方式验证。"
+    b = "grab_frame 类截图/视觉查询（look）可能因 projection not started 而失败，此时等待后仍可能失败，建议优先依赖 tap_by_id/observe 流程而非视觉查询。"
+    assert _similar(a, b)
+
+
 def test_strip_bullet_handles_nested_markers():
     """真机出现过 LLM 返回 ``- - xxx``，只剥一层会留下 "- " 前缀。"""
     from hachimi_kernel.curator import _strip_bullet
