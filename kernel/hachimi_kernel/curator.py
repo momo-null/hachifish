@@ -131,6 +131,9 @@ class Curator:
         # K4：纠偏采集开关（红线②：默认关）。仅当显式 true 才把 user_corrections 入库。
         self.corrective_source: bool = bool(cfg.get("corrective_source", False))
         self._last_dedup_hit_rate: float = 0.0  # K5：最近一次蒸馏的去重命中率
+        # P2-R：可选蒸馏大脑（facts LLM 提取用）。Curator 自身仍零 brain 依赖 ——
+        # bridge 注入 BYOK client；None = 纯启发式（facts 无源时保持空）。
+        self.brain = None
 
     # ==================================================================
     # 公开入口：任务完成后触发一次
@@ -300,8 +303,50 @@ class Curator:
         return removed
 
     # ==================================================================
-    # 3. review_candidate_skills
+    # 3. facts LLM 提取（P2-R：环境事实生产者，对齐 TDB extraction）
     # ==================================================================
+
+    _FACTS_PROMPT = (
+        "你是知识蒸馏器。下面是一次手机 GUI 任务的成功执行轨迹（已脱敏，"
+        "type_text 的具体内容以 <text> 代替）。\n"
+        "提取 2-5 条【跨任务可复用的环境事实】：只描述应用/系统的行为规律与 UI "
+        "陷阱（例如「某按钮在 X 条件下静默无效」「空列表没有占位行」「某类控件 "
+        "不可点需坐标点按」），禁止包含本次任务的临时内容（具体输入文本、任务目"
+        "标、页面临时状态）。每条一行，以 \"- \" 开头，直接输出条目，不要解释。\n\n"
+        "轨迹：\n{digest}"
+    )
+
+    def _extract_facts_via_llm(self, run_record: Dict[str, Any]) -> List[str]:
+        """成功轨迹 → LLM 提取环境事实（P2-R；对齐 TDB extraction 环节）。
+
+        - 无 brain / 轨迹无内容 / 调用失败 / 无产出 → ``[]``（绝不拖垮蒸馏）；
+        - 输出经条目级清洗（strip / 长度截断 / 上限 5 条），去重交给
+          ``_merge_memory_sections``（strip+小写全文比对）。
+        """
+        if self.brain is None:
+            return []
+        digest = _trajectory_digest(run_record)
+        if not digest:
+            return []
+        try:
+            reply = self.brain.chat(
+                [{"role": "user",
+                  "content": self._FACTS_PROMPT.format(digest=digest)}], [])
+        except Exception as e:
+            print("[curator] facts extract failed: %s: %s"
+                  % (type(e).__name__, e), flush=True)
+            return []
+        facts: List[str] = []
+        for ln in (reply.get("content") or "").splitlines():
+            ln = ln.strip()
+            if ln.startswith("- ") and len(ln) > 6:
+                facts.append(ln[2:].strip()[:200])
+            if len(facts) >= 5:
+                break
+        if facts:
+            print("[curator] facts extracted: %d" % len(facts), flush=True)
+        return facts
+
 
     def review_candidate_skills(self, run_record: Dict[str, Any]) -> Dict[str, Any]:
         """从成功 RunRecord 提取 candidate skill + 晋升判定。
@@ -446,8 +491,12 @@ class Curator:
                 facts = []
             # P2-R Phase 1：不再回退「上次成功路径」——它与 skill 的 substeps
             # 同构，是记忆/技能重复的根源（doc/knowledge_redesign.md §1.7 #3）。
-            # 分工从此明确：套路归 skill（entry_id 去重），facts 等世界模型接入后
-            # 只装环境事实；成功任务零 facts = 宁缺毋滥。
+            # 分工从此明确：套路归 skill（entry_id 去重），facts 只装环境事实。
+            if not facts:
+                # P2-R：facts LLM 提取（对齐 TDB extraction 环节）——轨迹此前是
+                # 死数据；把成功轨迹脱敏摘要交 BYOK 大脑提炼跨任务环境事实
+                # （App 怪癖 / UI 语义）。无 brain / 失败 / 无产出 → []，不拖垮。
+                facts = self._extract_facts_via_llm(run_record)
         else:
             if reason:
                 lessons.append(f"[失败] {objective} —— {reason}")
@@ -733,6 +782,45 @@ def _success_path_facts(run_record: Dict[str, Any]) -> List[str]:
         return []
     objective = (run_record.get("objective") or "").strip()
     return ["任务「%s」上次成功路径：%s" % (objective, " → ".join(_fmt_action(a) for a in actions[:12]))]
+
+
+def _trajectory_digest(run_record: Dict[str, Any], max_steps: int = 40) -> str:
+    """成功轨迹 → 脱敏摘要（动作 + ok/err），供 LLM 提取环境事实（P2-R）。
+
+    轨迹此前是蒸馏的死数据：唯一消费者（_success_path_facts）只提炼操作序列，
+    且已与 skill 重复而退出。本摘要让轨迹作为**环境事实**的原料重新进入
+    蒸馏链 —— 与 TencentDB Agent Memory 的 extraction 环节同构。
+    args 经 canonical_args 脱敏（text → <text>），防止任务临时内容泄入记忆。
+    """
+    from hachimi_kernel.skill_library import canonical_args
+    lines: List[str] = []
+    try:
+        for ln in Path(str(run_record.get("trajectory_file") or "")).read_text(
+                encoding="utf-8").splitlines():
+            if len(lines) >= max_steps:
+                lines.append("…(truncated)")
+                break
+            try:
+                rec = json.loads(ln)
+            except Exception:
+                continue
+            a = rec.get("action") or {}
+            tool = a.get("tool")
+            if not tool:
+                continue
+            r = rec.get("result") or {}
+            if tool == "observe":
+                status = "ok" if r.get("ok") else "ERR: %s" % str(r.get("error", ""))[:60]
+                lines.append("%d. observe -> %s" % (len(lines) + 1, status))
+                continue
+            ca = json.dumps(canonical_args(a.get("args") or {}),
+                            ensure_ascii=False, sort_keys=True)
+            status = "ok" if r.get("ok") else "ERR: %s" % str(r.get("error", ""))[:80]
+            lines.append("%d. %s(%s) -> %s" % (len(lines) + 1, tool, ca, status))
+    except Exception:
+        pass
+    return "\n".join(lines)
+
 
 def _parse_rollout_sections(text: str):
     """从 rollout md 解析 ``## facts`` / ``## lessons`` 段落的有效条目。"""

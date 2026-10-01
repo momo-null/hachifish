@@ -250,20 +250,25 @@ def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]],
         picked = ranked[:max(1, int(max_skills or 3))]
         parts.append("## 相关技能")
         used = 0
-        for s in picked:
+        for i, s in enumerate(picked):
             name = s.get("name", "")
             pat = (s.get("objective_pattern") or "").strip()
             ops = (s.get("ops") or "").strip()
             line = f"- **{name}**"
             if pat:
-                line += "（适用：%s%s）" % (pat[:100], "…" if len(pat) > 100 else "")
+                line += "（适用：%s%s）" % (pat[:60], "…" if len(pat) > 60 else "")
             entry = line
-            if ops:
+            # 目录模式（P2-R）：仅最相关 1 条带完整序列（大概率有用，省一次
+            # 往返），其余只进目录 —— 模型按需 load_skill，池子规模化不挤上下文
+            if i == 0 and ops:
                 entry += f"\n  操作序列：{ops}"
             if max_chars and used + len(entry) > int(max_chars) and used > 0:
                 break
             parts.append(entry)
             used += len(entry)
+        parts.append("")
+        parts.append('以上为技能目录（仅摘要）。与当前任务相符时，先调用 '
+                     'load_skill("<名称>") 获取完整操作序列，再按序列执行。')
         parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 

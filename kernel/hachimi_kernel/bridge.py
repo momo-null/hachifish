@@ -109,7 +109,53 @@ def _make_tools():
         return r
 
     tools["observe"]["call"] = _observe
+
+    # P2-R：load_skill —— 模型按需加载技能完整操作序列。目录摘要已在 system
+    # （历史知识参考），仅凭摘要操作可能不完整（桌面 T2.4 同款语义）；本工具
+    # 让模型在判断任务与某技能相符时主动拉取，池子规模化后不挤爆上下文。
+    tools["load_skill"] = {
+        "description": _LOAD_SKILL_SPEC["description"],
+        "parameters": _LOAD_SKILL_SPEC["parameters"],
+        "call": _load_skill}
+
     return tools
+
+
+_LOAD_SKILL_SPEC = {
+    "name": "load_skill",
+    "description": "按名称加载已沉淀技能的完整操作序列（技能目录见 system 的"
+                   "「历史知识参考」）。当任务与某技能的适用场景相符时调用，"
+                   "可省去重新探索；加载后按序列操作，与当前界面不一致处再 observe 调整。",
+    "parameters": {"type": "object",
+                   "properties": {"name": {"type": "string",
+                    "description": "技能名称（目录里 **粗体** 的名字）"}},
+                   "required": ["name"]},
+}
+
+
+def _load_skill(args):
+    """load_skill 实现：纯 Python（读全局技能库，不经 Kotlin 派发）。"""
+    name = str((args or {}).get("name", "")).strip()
+    if not name:
+        return {"ok": False, "error": "name required"}
+    from hachimi_kernel.skill_library import SkillLibrary, _safe_filename
+    d = SkillLibrary._global_dir()
+    s = None
+    exact = d / (_safe_filename(name) + ".md")
+    if exact.exists():
+        s = SkillLibrary._parse(exact)
+    if s is None:   # 模糊回退：目录名通常很长，模型可能只记得片段
+        for f in sorted(d.glob("*.md")):
+            if name in f.stem:
+                s = SkillLibrary._parse(f)
+                break
+    if s is None:
+        return {"ok": False, "error": "skill not found: %s" % name,
+                "available": [f.stem for f in sorted(d.glob("*.md"))][:10]}
+    return {"ok": True, "name": s.name,
+            "applies": (s.objective_pattern or "")[:120],
+            "steps": _skill_ops(s),
+            "note": "若序列与当前界面相符可直接沿用；与界面不一致处，observe 后调整。"}
 
 
 # look 的工具面描述（与 TOOL_SPECS 分离：look 由内核注入，非 Kotlin 原语）
@@ -702,11 +748,23 @@ def _curator_after_finish(task_id, run_record):
     """任务收尾后的知识维护（K7b）：蒸馏/prune/复核——**绝不拖垮主流程**。
 
     实验组冻结（R9）由调用方判定后跳过；Curator 自身启发式、无 brain 依赖。
+    P2-R：注入可选蒸馏大脑（facts LLM 提取用）——构造/注入失败 = 纯启发式，
+    任何异常都不拖垮主流程。
     """
     if not task_id or run_record is None:
         return
     try:
-        report = _make_curator(task_id).run_once(run_record=run_record)
+        curator = _make_curator(task_id)
+        try:
+            cfg = dict(_brain_cfg or {})
+            if cfg.get("base_url"):
+                from hachimi_kernel.brain_client import BrainClient
+                curator.brain = BrainClient(
+                    cfg["base_url"], cfg.get("api_key", ""), cfg.get("model", ""),
+                    timeout=90, thinking={"type": "disabled"})
+        except Exception as e:
+            print("[curator] facts brain unavailable: %s" % e, flush=True)
+        report = curator.run_once(run_record=run_record)
         print("[curator] task=%s pruned=%s skills_promoted=%s errors=%d"
               % (task_id, report.pruned_files, report.skills_promoted,
                  len(report.errors)), flush=True)
