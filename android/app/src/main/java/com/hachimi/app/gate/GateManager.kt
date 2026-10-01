@@ -53,7 +53,12 @@ object GateManager {
         val id = seq.incrementAndGet()
         val latch = CountDownLatch(1)
         var choice = RESULT_NAMES[GateActivity.RESULT_DENY]!!
-        pending.put(id, { c -> choice = RESULT_NAMES[c] ?: "deny"; latch.countDown() })
+        var timedOut = false
+        pending.put(id, { c, to ->
+            choice = if (to) "deny_timeout" else RESULT_NAMES[c] ?: "deny"
+            timedOut = to
+            latch.countDown()
+        })
         try {
             val i = Intent(context, GateActivity::class.java)
                 .putExtra(GateActivity.EXTRA_PACKAGE, pkg)
@@ -69,20 +74,28 @@ object GateManager {
         }
         val got = latch.await(90, TimeUnit.SECONDS)
         pending.remove(id)
-        Log.i(TAG, "gate pkg=$pkg op=$op choice=$choice timeout=${!got}")
+        Log.i(TAG, "gate pkg=$pkg op=$op choice=$choice timeout=${!got || timedOut}")
         if (choice == "allow_always") {
             sessionOpen = true
             Log.i(TAG, "session opened (all ops allowed this task)")
         }
-        return Verdict(choice.startsWith("allow"), if (got) "user" else "timeout", choice)
+        // source 语义：timedOut=倒计时自动拒绝（非用户选择）；latch 90s 兜底超时同口径
+        val source = if (!got || timedOut) "timeout" else "user"
+        return Verdict(choice.startsWith("allow"), source, choice)
     }
 
     /** GateActivity 用户选择回调（按请求 id 定向）。 */
     fun resolve(requestId: Long, resultCode: Int) {
-        pending.remove(requestId)?.invoke(resultCode)
+        pending.remove(requestId)?.invoke(resultCode, false)
     }
 
-    private val pending = HashMap<Long, (Int) -> Unit>()
+    /** GateActivity 倒计时归零回调：拒绝语义，留痕 deny_timeout（2026-10-01：
+     *  此前超时与手动 deny 在轨迹里同显示 source=user，排查误导）。 */
+    fun resolveTimeout(requestId: Long) {
+        pending.remove(requestId)?.invoke(GateActivity.RESULT_DENY, true)
+    }
+
+    private val pending = HashMap<Long, (Int, Boolean) -> Unit>()
     private val RESULT_NAMES = mapOf(
         GateActivity.RESULT_ALLOW_ONCE to "allow_once",
         GateActivity.RESULT_ALLOW_ALWAYS to "allow_always",

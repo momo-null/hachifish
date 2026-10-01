@@ -151,7 +151,9 @@ class GateActivity : Activity() {
             }
         } catch (_: Exception) {}
         val req = intent.getLongExtra(EXTRA_REQUEST, -1)
-        if (req >= 0) GateManager.resolve(req, code)
+        if (req >= 0) {
+            if (timedOut) GateManager.resolveTimeout(req) else GateManager.resolve(req, code)
+        }
         setResult(code)
         finish()
     }

@@ -132,6 +132,10 @@ object NarrativePanel {
                 when (e.optString("event")) {
                     "start" -> {
                         collapsed = false
+                        // 门控会话随任务重置（GateManager 契约「allow_always 仅当前任务」）：
+                        // 产品路径（聊天发送 / 回环 /task）都不经过 TasksPage，必须在此统一重置，
+                        // 否则上一任务的放行泄漏到所有后续任务（2026-10-01 真机实录）。
+                        com.hachimi.app.gate.GateManager.beginTask()
                         lastStatus = "run " + e.optString("run_id").take(14)
                         append("▶ 目标: " + e.optString("objective").take(40))
                         addTimeline("▶ " + e.optString("objective").take(36))
