@@ -617,7 +617,11 @@ def set_knowledge_enabled(enabled):
 
 
 def _skill_ops(s) -> str:
-    """Skill.substeps → 紧凑操作序列（注入块 ops 字段；Skill dataclass 无 ops）。"""
+    """Skill.substeps → 紧凑操作序列（注入块 ops 字段；Skill dataclass 无 ops）。
+
+    P2-R Phase 2：内容性参数（text）显示为 ``<text>`` —— 上次任务的字面值对
+    新任务是噪声且有诱导照抄风险；结构性参数（view_id / package）保留。
+    """
     parts = []
     for ss in (s.substeps or []):
         t, a = ss.tool, (ss.args or {})
@@ -626,7 +630,7 @@ def _skill_ops(s) -> str:
         elif t == "tap_by_id":
             parts.append("tap_by_id(%s)" % (a.get("view_id") or "?"))
         elif t == "type_text":
-            parts.append("type_text(%s)" % str(a.get("text", ""))[:16])
+            parts.append("type_text(<text>)")
         elif t == "tap_xy":
             parts.append("tap_xy(%.2f,%.2f)" % (a.get("x", 0), a.get("y", 0)))
         else:
@@ -634,9 +638,11 @@ def _skill_ops(s) -> str:
     return " → ".join(parts)
 
 
-def _knowledge_parts():
+def _knowledge_parts(objective: str = ""):
     """弱注入块 + 元数据（K7a / P2 DoD2）：返回 ``(block, meta)``。
 
+    P2-R Phase 2：按 objective 做相关度排序取 top-k + 字符预算；条目不再
+    携带整段 objective 原文（旧版注入块 ~60% 字符是这份冗余）。
     meta 供主界面「本次注入了哪些知识」指示：memory 有无、技能名列表、块字符数；
     开关关 / 无任何内容 → 空串（零注入，prompt 逐字节不变）。
     """
@@ -666,11 +672,12 @@ def _knowledge_parts():
                     if s.entry_id:
                         seen_ids.add(s.entry_id)
                     skills.append({"name": s.name,
+                                   "entry_id": s.entry_id,
                                    "objective_pattern": s.objective_pattern,
                                    "ops": _skill_ops(s)[:200]})
         except Exception:
             skills = []
-        block = build_knowledge_block(mem, skills)
+        block = build_knowledge_block(mem, skills, objective=objective or "")
         return block, {"memory": bool(mem.strip()),
                        "skills": [s["name"] for s in skills],
                        "chars": len(block)}
@@ -1084,8 +1091,9 @@ def _run(body, stop_flag=_controls):
             _emit({"event": "message", "run_id": run_id, "content": content})
 
         # P2 DoD2：注入指示事件——主界面显示「本次注入了哪些知识」
-        #（块算一次，事件与 config 共用；开关关/无内容 = 空块零注入）
-        kblock, kmeta = _knowledge_parts()
+        #（块算一次，事件与 config 共用；开关关/无内容 = 空块零注入）。
+        # P2-R Phase 2：objective 参与相关度排序（结构化字段匹配 + 词元重叠）。
+        kblock, kmeta = _knowledge_parts(objective=objective)
         _emit({"event": "knowledge", "run_id": run_id,
                "enabled": _knowledge_enabled["on"],
                "memory": kmeta["memory"],

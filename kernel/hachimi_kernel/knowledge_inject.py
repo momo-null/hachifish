@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -18,11 +19,14 @@ from typing import Any, Dict, List, Tuple
 from hachimi_kernel.runtime_paths import (
     memory_summary, task_skills, global_skills, user_profile, character_card,
 )
-from hachimi_kernel.skill_library import SkillLibrary
+from hachimi_kernel.skill_library import SkillLibrary, _cjk_bigrams
 
 
-# 弱注入弱化提示（固定文案，避免历史经验喧宾夺主）
-_WEAKEN_HINT = "历史记忆/技能（可能过时，以实际观测为准）"
+# 注入措辞（P2-R Phase 2）：中性且要求优先复用。
+# 旧文案「可能过时，以实际观测为准」在 GUI 场景等于授权模型先 observe 再说
+# （真机实测：B 组 perception 步数翻倍），故改为"相符即沿用 + 不一致才观测"。
+_INJECT_HINT = ("以下为历史知识参考：若操作序列与当前界面相符，可直接沿用、不必重新探索；"
+                "与当前界面不一致处，以实际观测为准。")
 
 _SUMMARY_TRUNCATE = 20000
 _PROFILE_TRUNCATE = 20000
@@ -189,30 +193,77 @@ def load_agents_snapshot(layers: List[Tuple[str, Any]], limit: int = 8192) -> Ag
                           digests=digests, limit=int(limit or 0))
 
 
-def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]]) -> str:
+_PACKAGE_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+")
+
+
+def _score_skill(skill: Dict[str, Any], objective: str) -> int:
+    """技能条目相对当前 objective 的相关度（纯标准库，零 embedding）。
+
+    打分优先级（P2-R Phase 2，对照 doc/knowledge_redesign.md §3.2）：
+    1. 结构化字段：objective 与技能文本中**包名**的交集（最强信号——
+       操作序列与 App 强绑定）；
+    2. 拉丁词元重叠（>=3 字符，大小写归一）；
+    3. CJK bigram 重叠（中文意图弱匹配）。
+    """
+    obj = (objective or "").strip()
+    if not obj:
+        return 0
+    text = " ".join([str(skill.get("objective_pattern") or ""),
+                     str(skill.get("ops") or ""),
+                     str(skill.get("name") or "")])
+    score = 0
+    obj_pkgs = set(_PACKAGE_RE.findall(obj))
+    if obj_pkgs:
+        score += 10 * len({p for p in obj_pkgs if p in text})
+    obj_tokens = {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", obj)}
+    score += len(obj_tokens & {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", text)})
+    obj_cjk = _cjk_bigrams(obj)
+    if obj_cjk:
+        score += len(obj_cjk & _cjk_bigrams(text))
+    return score
+
+
+def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]],
+                          objective: str = "", max_skills: int = 3,
+                          max_chars: int = 2000) -> str:
     """组装知识注入块；无内容返回空字符串（调用方自动跳过）。
 
-    输出携带弱化提示，技能条目统一格式化：名称 + 匹配规则 + 核心操作序列。
+    P2-R Phase 2：
+    - 相关度排序取 top-k（objective 为空 = 不排序，保持原序）；
+    - 注入总字符预算 ``max_chars``（超预算截断条目数，至少保留 1 条）；
+    - 条目渲染只带**截断后的适用场景**（旧版注入整段 objective 原文，
+      曾占注入块 ~60% 字符）；
+    - 措辞见 ``_INJECT_HINT``：要求优先复用，而非"以实际观测为准"式免责。
     """
     memory_text = (memory_text or "").strip()
     skills = skills or []
     if not memory_text and not skills:
         return ""
 
-    parts = [f"# 历史知识参考（{_WEAKEN_HINT}）", ""]
+    parts = ["# 历史知识参考", "", _INJECT_HINT, ""]
     if memory_text:
         parts.append("## 历史记忆")
         parts.append(memory_text)
         parts.append("")
     if skills:
+        ranked = sorted(skills, key=lambda s: _score_skill(s, objective), reverse=True)
+        picked = ranked[:max(1, int(max_skills or 3))]
         parts.append("## 相关技能")
-        for s in skills:
+        used = 0
+        for s in picked:
             name = s.get("name", "")
-            rule = s.get("objective_pattern") or s.get("description") or s.get("name", "")
-            ops = s.get("ops", "")
-            parts.append(f"- **{name}**（匹配：{rule}）")
+            pat = (s.get("objective_pattern") or "").strip()
+            ops = (s.get("ops") or "").strip()
+            line = f"- **{name}**"
+            if pat:
+                line += "（适用：%s%s）" % (pat[:100], "…" if len(pat) > 100 else "")
+            entry = line
             if ops:
-                parts.append(f"  操作序列：{ops}")
+                entry += f"\n  操作序列：{ops}"
+            if max_chars and used + len(entry) > int(max_chars) and used > 0:
+                break
+            parts.append(entry)
+            used += len(entry)
         parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 
