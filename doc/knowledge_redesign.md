@@ -199,7 +199,7 @@ Omni 侧其实给了另一条更克制的路：`format_skill_catalog_message`（
 | #1/#2 同源双写、无 ID | 提取阶段去重 + 冲突检测 | 沿用我们的 `entry_id`，但去重提前到**写入前** | Phase 1 |
 | #8 截断无优先级 | `maxTotalRecallChars` 预算制 | 20000 字符硬截 → **预算 + 排序** | Phase 2 |
 | #3 类型分工不清 | L0→L3 金字塔 | 借"平时看高层、要细节时下钻"的用法，落到 Fact / Lesson / Profile | Phase 1 |
-| **（我们独有）每步重发整棵 observe 树** | 上下文卸载 + `node_id` 下钻 | **最对症的一条**：`observe` 返回的完整 UI 树就是它说的"厚重工具日志"，应卸载为 ref + 紧凑骨架，按需下钻 | 见 §3.4 |
+| **（我们独有）每步重发整棵 observe 树** | 上下文卸载 + `node_id` 下钻 | **最对症的一条**：`observe` 返回的完整 UI 树就是它说的"厚重工具日志"，应卸载为 ref + 紧凑骨架，按需下钻 | 见 §3.5 |
 
 ### 3.3 不采纳 / 需改造
 
@@ -213,7 +213,33 @@ Omni 侧其实给了另一条更克制的路：`format_skill_catalog_message`（
    - 影响评估：**几乎无损失且更省**。Mermaid 的价值在于非线性拓扑（并行/依赖/回溯），我们的有效动作只有 5–9 步且无分支；而目的是让模型"照做"而非"理解拓扑"。
    - 补丁：骨架保留 `[成功] / [失败] / [重试]` 状态标记与 `ref`，以防将来出现分支/回溯时丢失可追溯性。
 
-### 3.4 由此新增的候选目标（待拍板是否并入 §2.2）
+### 3.4 边界对照：TencentDB Agent Memory 怎么处理"上限"
+
+> 取自其 README 可调参数表（Level 1/2）与架构说明。它的边界画法和我们**不同**，
+> 差异本身就能说明问题。
+
+| 维度 | TencentDB 的做法 | 默认值 | 我们（hachimi） |
+|---|---|---|---|
+| **存储端容量** | **没有总量上限**；`capture.l0l1RetentionDays=0` = **永不清理** | 0（关） | 有：facts 40 / skills 20 / tasks 50 run |
+| **写入端节流** | `pipeline.everyNConversations=5`、`extraction.maxMemoriesPerSession=20`、`persona.triggerEveryN=50`、`l1IdleTimeoutSeconds=600`、`l2MinIntervalSeconds=900` | 见左 | **无**（每个 run 都蒸馏） |
+| **注入端预算** | `recall.maxResults=5`、`maxCharsPerMemory`、`maxTotalRecallChars`、`timeoutMs=5000`（超时跳过注入）、`offload.mmdMaxTokenRatio=0.2` | 5 / 0 / 0 / 5000 / 0.2 | 有：块 ≤2000 字符、top-k=3、memory 视图 20000 |
+| **去重** | `extraction.enableDedup=true`，**提取阶段**向量去重 + 冲突检测（依赖 embedding） | true | 写入阶段结构化规则 + 效用淘汰（无 embedding） |
+| **分层与下钻** | 低层（L0/L1/refs）全量留证据，高层（L2/L3/MMD）留结构，"低层保留证据、高层保留结构" | — | 未分层（facts 平面 + rollouts 证据） |
+
+**它的一句话立场**："Memory 不是为了让 AI 存下所有东西" —— 但实现上它靠的是
+**注入端过滤**（每次只放 5 条 + 字符预算 + 超时跳过），而**存储端默认不删**。
+
+**为什么这条在手机上不成立**：桌面/服务端磁盘便宜、每轮只召回一次；我们是
+**每步重发整块**（实测 1420 字符 × 数十步），且设备存储实测 tasks 已 16.7 MB / 283 run。
+所以它"容量无限 + 检索过滤"的画法，在我们这里必须补上**真正的淘汰**（§8.2）。
+
+**两条我们还没做、值得补的**：
+1. **写入端节流**（它的 `everyNConversations` / `maxMemoriesPerSession`）：
+   我们现在每个 run 都蒸馏；沉淀速率应先限流，再谈淘汰 —— 比事后删更省。
+2. **反证扣分**（它的 conflict detection）：我们只有"印证加分"，没有"被现实打脸就扣分"；
+   若按某条 fact 操作却失败，应扣分甚至直接淘汰。
+
+### 3.5 由此新增的候选目标（待拍板是否并入 §2.2）
 
 - **上下文卸载（Context Offloading）**：把 `observe` 的完整树从每步载荷中移出，改为 `ref + 紧凑摘要`，需要时按 ref 下钻。
 - 建议指标：**每步平均载荷字符数**、**单 run 累计输入字符数**，目标各降 ≥ 30%。
@@ -265,7 +291,7 @@ Omni 侧其实给了另一条更克制的路：`format_skill_catalog_message`（
 3. **是否让用户画像平面（Profile）上线**，还是先搁置？
 4. **是否允许引入"意图签名/语义 key"** 取代 objective 全文做 key？（涉及一小段规范化逻辑，可能被视为领域启发式 —— 与北极星红线的边界需你确认）
 5. **DoD4 判据是否正式换成**（有效步数 / 首个动作命中率 / perception 数），总步数仅作辅助？
-6. **是否采纳「上下文卸载」（§3.4）**：把 `observe` 整树改为 ref + 紧凑骨架，并单列 Phase 2b？
+6. **是否采纳「上下文卸载」（§3.5）**：把 `observe` 整树改为 ref + 紧凑骨架，并单列 Phase 2b？
 7. 每个 Phase 是否单独提交 commit，还是攒到一个 branch 合并？
 
 ---
