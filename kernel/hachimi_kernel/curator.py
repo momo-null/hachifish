@@ -214,7 +214,8 @@ class Curator:
                 # P2-R §8.2：每个 run 收尾做一次容量维护（印证 + 淘汰 + 清理）。
                 # 证据=轨迹摘要：本次跑过的 App/控件会点亮对应事实，让"常用"胜出。
                 try:
-                    cap = maintain_capacity(evidence=_trajectory_digest(run_record))
+                    cap = maintain_capacity(evidence=_trajectory_digest(run_record),
+                                            success=bool(run_record.get("success")))
                     if any(cap.values()):
                         print("[curator] capacity maintained: %s" % cap, flush=True)
                 except Exception as e:
@@ -334,13 +335,20 @@ class Curator:
         """成功轨迹 → LLM 提取环境事实（P2-R；对齐 TDB extraction 环节）。
 
         - 无 brain / 轨迹无内容 / 调用失败 / 无产出 → ``[]``（绝不拖垮蒸馏）；
-        - 输出经条目级清洗（strip / 长度截断 / 上限 5 条），去重交给
-          ``_merge_memory_sections``（strip+小写全文比对）。
+        - **写入端节流**（对齐 TDB `everyNConversations` / `maxMemoriesPerSession`）：
+          同一 App 在 ``FACT_EXTRACT_COOLDOWN_S`` 内不重复提取（LLM 调用既花钱
+          又往池子里灌水），单次产出上限 ``FACTS_PER_RUN_MAX``；
+        - 输出经条目级清洗（strip / 长度截断），去重交给 ``_merge_memory_sections``。
         """
         if self.brain is None:
             return []
         digest = _trajectory_digest(run_record)
         if not digest:
+            return []
+        pkg = _run_app(run_record) or _fact_pkg(digest)
+        if not should_extract_facts(pkg):
+            print("[curator] facts extract skipped (cooldown, app=%s)" % (pkg or "-"),
+                  flush=True)
             return []
         try:
             reply = self.brain.chat(
@@ -355,8 +363,9 @@ class Curator:
             ln = _strip_bullet(ln)
             if len(ln) > 6:
                 facts.append(ln[:200])
-            if len(facts) >= 5:
+            if len(facts) >= FACTS_PER_RUN_MAX:
                 break
+        mark_facts_extracted(pkg)
         if facts:
             print("[curator] facts extracted: %d" % len(facts), flush=True)
         return facts
@@ -1086,6 +1095,14 @@ FACTS_APP_FLOOR = 3         # 单 App 保底：不允许把某个 App 的事实�
 FACTS_TOTAL_MAX = 40        # 全局事实槽位
 SKILLS_MAX = 20             # 全局技能槽位（entry_id 唯一，同名套路累计不新增）
 ROLLOUTS_MAX = 30           # rollout 保留条数
+# 反证累计到几次直接淘汰（不必等容量收紧）：事实被现实反复否定就该退出。
+FACT_FAILS_EVICT = 3
+
+# 写入端节流（对齐 TDB 的 everyNConversations / maxMemoriesPerSession）：
+# facts 的 LLM 提取既花钱又会往池子里灌水，同一个 App 在冷却期内不重复提取。
+FACTS_PER_RUN_MAX = 3
+FACT_EXTRACT_COOLDOWN_S = 300
+
 # 淘汰用的同义门槛：比 _SIMILAR_THRESHOLD 严格得多。
 # 印证聚类可以松（判错了只是把分数加给另一条），**删除必须保守** —— 真机实证
 # (7,9) 两条共享 edit_alarm_time 却是不同事实，用 0.35 聚类会把有用的一条删掉。
@@ -1096,6 +1113,9 @@ TASK_KEEP_DAYS = 7
 TASK_MAX_MB = 100
 
 _PKG_RE = re.compile(r"\b[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]+){2,}\b")
+
+# 提取冷却状态存在 fact_meta.json 的这个保留 key 下（不进事实条目）
+_EXTRACT_STATE_KEY = "__extract_state__"
 
 
 def _fact_meta_file() -> Path:
@@ -1159,10 +1179,55 @@ def _evidence_hit(entry: str, evidence: str) -> bool:
     return any(w in evidence for w in _widgets(entry))
 
 
-def corroborate_facts(evidence: str) -> int:
-    """用本次 run 的证据点亮被印证的事实，返回被加分的条目数。
+def should_extract_facts(pkg: str) -> bool:
+    """同一 App 是否过了 facts 提取冷却期（写入端节流）。"""
+    st = _extract_state()
+    last = float(st.get(pkg or "-") or 0)
+    return (time.time() - last) >= FACT_EXTRACT_COOLDOWN_S
 
-    同义簇内**只给簇代表加分**（hits 最高者）——变体之间靠此收敛：常被印证的
+
+def mark_facts_extracted(pkg: str) -> None:
+    """记录某 App 本次提取时间（供冷却判定）。"""
+    meta = _load_fact_meta()
+    st = meta.get(_EXTRACT_STATE_KEY) or {}
+    st[pkg or "-"] = time.time()
+    # 只保留最近 20 个 App 的时间戳，避免索引无限增长
+    if len(st) > 20:
+        for k in sorted(st, key=lambda k: st[k])[:len(st) - 20]:
+            st.pop(k, None)
+    meta[_EXTRACT_STATE_KEY] = st
+    _save_fact_meta(meta)
+
+
+def _extract_state() -> Dict[str, Any]:
+    return _load_fact_meta().get(_EXTRACT_STATE_KEY) or {}
+
+
+def _run_app(run_record: Dict[str, Any]) -> str:
+    """从 run 记录里取被操作的 App 包名（objective / 轨迹摘要都试）。"""
+    obj = str((run_record or {}).get("objective") or "")
+    return _fact_pkg(obj)
+
+
+def corroborate_facts(evidence: str) -> int:
+    """本次 run 成功：点亮被印证的事实，返回被加分的条目数。"""
+    return _apply_evidence(evidence, positive=True)
+
+
+def contradict_facts(evidence: str) -> int:
+    """本次 run 失败：给被"打脸"的事实记一次反证（对齐 TDB 的 conflict detection）。
+
+    按某条事实描述的路径操作却失败 ⇒ 这条事实至少在当下不可靠。记 ``fails+1``，
+    效用分按 −3/次计；累计到 ``FACT_FAILS_EVICT`` 时，下次 prune 直接淘汰
+    （不再靠分数慢慢排队）——“记忆会认错，也会改错”。
+    """
+    return _apply_evidence(evidence, positive=False)
+
+
+def _apply_evidence(evidence: str, positive: bool) -> int:
+    """把本次 run 的证据写到事实效用索引上（印证 / 反证）。
+
+    同义簇内**只给簇代表加减分**（hits 最高者）——变体之间靠此收敛：常被印证的
     那条分越来越高，其余变体在容量收紧时先被淘汰。这就是"滑动"替代"归并"。
     """
     p = memory_master()
@@ -1181,10 +1246,14 @@ def corroborate_facts(evidence: str) -> int:
         for i in cluster:
             key = _fact_key(items[i])
             rec = meta.get(key) or {"text": items[i], "pkg": _fact_pkg(items[i]),
-                                    "hits": 0, "created": now, "last_seen": now}
+                                    "hits": 0, "fails": 0,
+                                    "created": now, "last_seen": now}
             rec["last_seen"] = now
             if hit and i == leader:
-                rec["hits"] = min(99, int(rec.get("hits") or 0) + 1)
+                if positive:
+                    rec["hits"] = min(99, int(rec.get("hits") or 0) + 1)
+                else:
+                    rec["fails"] = min(99, int(rec.get("fails") or 0) + 1)
                 touched += 1
             meta[key] = rec
     _save_fact_meta(meta)
@@ -1192,10 +1261,12 @@ def corroborate_facts(evidence: str) -> int:
 
 
 def _fact_score(entry: str, meta: Dict[str, Any], now: float) -> float:
-    """效用分 = 印证次数×2 + 新鲜度（30 天内从 1 线性衰减到 0）。"""
+    """效用分 = 印证×2 − 反证×3 + 新鲜度（30 天内从 1 线性衰减到 0）。"""
     rec = meta.get(_fact_key(entry)) or {}
     age_days = max(0.0, (now - float(rec.get("created") or now)) / 86400.0)
-    return int(rec.get("hits") or 0) * 2.0 + max(0.0, 1.0 - age_days / 30.0)
+    return (int(rec.get("hits") or 0) * 2.0
+            - int(rec.get("fails") or 0) * 3.0
+            + max(0.0, 1.0 - age_days / 30.0))
 
 
 def prune_memory(now: float = None) -> int:
@@ -1218,6 +1289,10 @@ def prune_memory(now: float = None) -> int:
         return _fact_score(items[i], meta, now)
 
     drop = set()
+    # ⓪ 反复被打脸的事实：不再排队，直接淘汰（反证 = 这条已经不可靠）
+    for i, it in enumerate(items):
+        if int((meta.get(_fact_key(it)) or {}).get("fails") or 0) >= FACT_FAILS_EVICT:
+            drop.add(i)
     # ① 近乎逐字重复的条目（严格门槛）：删除保守，只砍"几乎一样"的
     for c in _similar_clusters(items, _PRUNE_MERGE_THRESHOLD, raw_only=True):
         if len(c) > 1:
@@ -1357,15 +1432,21 @@ def prune_tasks(max_runs: int = TASK_KEEP_RUNS, max_days: int = TASK_KEEP_DAYS,
     return removed
 
 
-def maintain_capacity(evidence: str = "") -> Dict[str, int]:
-    """一次跑完「印证 + 四项容量维护」，返回各项清理条数。
+def maintain_capacity(evidence: str = "", success: bool = True) -> Dict[str, int]:
+    """一次跑完「印证或反证 + 四项容量维护」，返回各项清理条数。
+
+    ``success=False`` 时走反证：本次跑过的 App/控件对应的事实记一次失败，
+    累计到阈值直接淘汰（对齐 TDB 的 conflict detection）。
 
     Omni 可复用：与去重正交，属于"知识资产必须有上限"的那一层治理。
     """
-    out = {"corroborated": 0, "facts_pruned": 0, "skills_pruned": 0,
-           "rollouts_pruned": 0, "tasks_pruned": 0}
+    out = {"corroborated": 0, "contradicted": 0, "facts_pruned": 0,
+           "skills_pruned": 0, "rollouts_pruned": 0, "tasks_pruned": 0}
     try:
-        out["corroborated"] = corroborate_facts(evidence)
+        if success:
+            out["corroborated"] = corroborate_facts(evidence)
+        else:
+            out["contradicted"] = contradict_facts(evidence)
     except Exception:
         pass
     try:

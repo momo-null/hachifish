@@ -150,6 +150,42 @@ def test_prune_prefers_well_corroborated_facts():
         C.FACTS_PER_APP_MAX = old
 
 
+def test_contradiction_penalises_and_evicts():
+    """失败 run 会给相关事实记反证；累计到阈值直接淘汰（对齐 TDB 冲突检测）。"""
+    setup_tmp_root()
+    write_facts(CLOCK_FACTS[:3])
+    evidence = '2. tap_by_id({"view_id": "alarm_fab"}) -> ERR: view not found'
+    for _ in range(C.FACT_FAILS_EVICT):
+        C.contradict_facts(evidence)
+    meta = C._load_fact_meta()
+    assert sum(int(v.get("fails") or 0) for v in meta.values()
+               if isinstance(v, dict) and "fails" in v) >= C.FACT_FAILS_EVICT
+    dropped = C.prune_memory()
+    assert dropped >= 1
+    assert CLOCK_FACTS[0] not in read_facts()
+
+
+def test_score_penalises_fails():
+    setup_tmp_root()
+    write_facts([CLOCK_FACTS[0], CLOCK_FACTS[1]])
+    now = time.time()
+    C.corroborate_facts('1. tap_by_id({"view_id": "alarm_fab"}) -> ok')
+    C.contradict_facts('1. tap_by_id({"view_id": "material_timepicker_mode_button"}) -> ERR')
+    meta = C._load_fact_meta()
+    s_ok = C._fact_score(CLOCK_FACTS[0], meta, now)
+    s_bad = C._fact_score(CLOCK_FACTS[1], meta, now)
+    assert s_ok > s_bad
+
+
+def test_extract_cooldown():
+    """写入端节流：同一 App 冷却期内不重复提取（省 LLM 调用 + 防灌水）。"""
+    setup_tmp_root()
+    assert C.should_extract_facts("org.fossify.clock")
+    C.mark_facts_extracted("org.fossify.clock")
+    assert not C.should_extract_facts("org.fossify.clock")
+    assert C.should_extract_facts("org.fossify.notes")   # 别的 App 不受影响
+
+
 def test_prune_rollouts_keeps_newest():
     setup_tmp_root()
     d = P.memory_rollouts()
