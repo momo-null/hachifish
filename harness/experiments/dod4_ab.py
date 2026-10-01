@@ -58,19 +58,51 @@ def http(method, path, body=None, timeout=20):
         return parse_repr(r.read().decode("utf-8"))
 
 
-def clear_knowledge():
-    """清空设备端知识（A 组每个 run 前）+ 记录当时确实为空。"""
-    adb("shell", "run-as", "com.hachimi.app", "rm", "-rf",
-        "files/memory", "files/skills")
+def restore_snapshot(name):
+    """恢复冻结快照（每 run 前调用，保证知识条件恒定）。"""
+    import subprocess
+    out = subprocess.run(
+        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      "..", "tools", "kb_snapshot.py"), "load", name],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if out.returncode != 0:
+        raise RuntimeError("snapshot load failed: %s" % (out.stdout or out.stderr))
     time.sleep(1)
-    return True
+
+
+def _kb_files():
+    """设备端知识文件清单（空 = 知识为零）。"""
+    out = adb("shell", "run-as", "com.hachimi.app", "ls",
+              "files/memory", "files/skills")
+    names = []
+    for l in out.splitlines():
+        l = l.strip()
+        if not l or l.endswith(":") or "No such" in l:
+            continue
+        names.append(l)
+    return names
+
+
+def clear_knowledge(max_attempts=3):
+    """清空设备端知识（A 组每个 run 前）——**必须复验为空**。
+
+    坑（2026-10-01）：Curator 在 run 结束后**异步**蒸馏，立刻 rm 之后文件可能
+    在下一秒被写回来，导致"标称清零、实际有知识"，A 组基线被污染。这里循环
+    删除 + 复验，直到真正为空。
+    """
+    for _ in range(max_attempts):
+        adb("shell", "run-as", "com.hachimi.app", "rm", "-rf",
+            "files/memory", "files/skills")
+        time.sleep(1.5)
+        if not _kb_files():
+            return True
+    print("  WARN: knowledge not fully cleared")
+    return False
 
 
 def knowledge_snapshot():
-    """知识概况（供每 run 前后对照：是否真的有东西可注入）。"""
-    out = adb("shell", "run-as", "com.hachimi.app", "sh", "-c",
-              "'ls files/memory files/memory/rollouts files/skills 2>/dev/null | tr \"\\n\" \" | \"'")
-    return " ".join(out.split())
+    """知识概况字符串（供每 run 前后对照）。"""
+    return ",".join(_kb_files()) or "(empty)"
 
 
 PERCEPTION = {"observe", "look", "screenshot"}
@@ -126,6 +158,7 @@ def main():
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--no-clean", action="store_true",
                     help="B 组首跑也不清知识（继承上一任务的沉淀）")
+    ap.add_argument("--snapshot", help="每个 run 前恢复该冻结快照（组间知识恒定）")
     args = ap.parse_args()
 
     with open(TASKS_FILE, encoding="utf-8") as f:
@@ -138,7 +171,12 @@ def main():
     print("DoD4 %s x%d [%s]" % (args.task, args.runs, args.group))
     for i in range(args.runs):
         print("\n== run %d/%d ==" % (i + 1, args.runs))
-        if args.group == "A" or (i == 0 and not args.no_clean):
+        if args.snapshot:
+            # 冻结快照：每个 run 前都恢复同一份知识 —— 组间知识条件恒定，
+            # 排除「跑一次就多沉淀几条」造成的漂移（2026-10-01 收口实验）。
+            restore_snapshot(args.snapshot)
+            print("  snapshot loaded=%s -> %s" % (args.snapshot, knowledge_snapshot()))
+        elif args.group == "A" or (i == 0 and not args.no_clean):
             # A 每次清；B 默认只在首跑前清（两组从同一「零知识」起点出发，
             # 差别纯粹来自跑过程中的沉淀，B2/B3 才带知识）。
             # --no-clean：B 组连首跑都不清 —— 用于「继承上一任务的沉淀」这一

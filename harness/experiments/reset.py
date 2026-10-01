@@ -484,27 +484,79 @@ def cleanup_files():
     return True
 
 
-def seed_notes():
-    """T1/T5/T6/T10/T11/T13/T15 种子：重建内容含 111111 的便签。
-    经回环 + 剧本大脑走 Hachimi 自身无障碍通道（零 u2 依赖——u2 instrumentation
-    与无障碍互斥，拆除后 Flyme 重绑退避可达分钟级，见 2026-09-27 实测）。
-    1.7.0 适配（2026-09-28 实测）：主屏列表条目=内联编辑器，点入直接 type_text
-    即写入并自动保存；done_when 由内核 verify_done 全文探测强校验。
-    前置：cleanup_notes 已跑（无内容条目，防旧产物让 done_when 躺赢）。"""
-    body = {
-        "objective": "seed note", "done_when": "111111", "max_steps": 8,
-        "script": [
-            {"name": "launch_app", "args": {"package": "org.fossify.notes"}},
-            {"name": "wait", "args": {"seconds": 2}},
-            {"name": "tap_by_id", "args": {"view_id": "org.fossify.notes:id/text_note_view"}},
-            {"name": "type_text", "args": {"text": "111111555555555555"}},
-            {"name": "wait", "args": {"seconds": 1}},
-            {"name": "task_done", "args": {"summary": "seeded"}},
-        ],
-    }
-    if _run_scripted(body):
-        print("  seed note 111111 via in-place editor")
+NOTES_LABEL_FIELD = "org.fossify.notes:id/locked_note_title"
+NOTE_ROW_ID = "org.fossify.notes:id/text_note_view"
+
+
+def _focus_note_row():
+    """把焦点落到一条可编辑的便签行，返回 True=成功。
+
+    两条腿（2026-10-01）：
+    1) 列表里已有可点行（含占位符行）→ 直接 tap_by_id 进入内联编辑器；
+    2) 清理后连占位行都不在树里（旧脚本因此 `view not found` 卡死，seed 报废）
+       → 走工具栏 new_note 新建；若弹出 1.7.0 的新便签弹框（必须先填标签，
+       否则 OK 静默无效）先填标签再确认。
+    """
+    if _real_items(_observe_tree() or [], NOTE_ROW_ID):
+        bridge_call("tap_by_id", "--es view_id " + NOTE_ROW_ID)
+        time.sleep(1.5)
         return True
+    print("  seed_notes: 无占位行 -> 走工具栏 new_note 新建")
+    bridge_call("tap_by_id", "--es view_id org.fossify.notes:id/new_note")
+    time.sleep(2.5)
+    tree = _observe_tree() or []
+    # 1.7.0 的「新建便签」弹框带类型选择（文本便签 / 核对清单），默认类型会跟着
+    # 上次选择走 —— 停在清单类型时新 tab 根本没有 text_note_view，seed 必然失败
+    # （2026-10-01：实验跑到一半 Notes 变成 checklist tab，连续 3 次 seed 全灭）。
+    # 显式点「文本便签」，把环境拉回确定态。
+    if _real_items(tree, "org.fossify.notes:id/type_text_note"):
+        bridge_call("tap_by_id", "--es view_id org.fossify.notes:id/type_text_note")
+        time.sleep(1.5)
+        tree = _observe_tree() or []
+    if _real_items(tree, NOTES_LABEL_FIELD):
+        bridge_call("tap_by_id", "--es view_id " + NOTES_LABEL_FIELD)
+        time.sleep(1)
+        # 标签必须**唯一**：与已有分类 tab 重名时 OK 静默无效、弹框不关
+        # （2026-10-01：标签写死 "seed" 撞上上次留下的同名 tab，连续 3 次 seed 全灭）
+        bridge_call("type_text", "--es text seed_%s"
+                    % time.strftime("%H%M%S", time.localtime()))
+        time.sleep(1)
+        bridge_call("tap_by_id", "--es view_id android:id/button1")
+        time.sleep(2.5)
+        tree = _observe_tree() or []
+    if not _real_items(tree, NOTE_ROW_ID):
+        return False
+    bridge_call("tap_by_id", "--es view_id " + NOTE_ROW_ID)
+    time.sleep(1.5)
+    return True
+
+
+def seed_notes(retries=2):
+    """T1/T5/T6/T10/T11/T13/T15 种子：重建内容含 111111 的便签。
+
+    走 DebugBridge 原语（不经回环剧本大脑）：无 LLM token 消耗，且能按树状态做
+    条件分支（2026-10-01：改为棋盘式脚本后不再被「空列表无占位行」卡死）。
+    1.7.0 适配：列表条目 = 内联编辑器，点入直接 type_text 即写入并自动保存。
+    前置：cleanup_notes 已跑（防旧产物让 done_when 躺赢）。
+    """
+    forward()
+    adb("shell", "am", "force-stop", "org.fossify.notes")
+    time.sleep(1)
+    bridge_call("launch_app", "--es package org.fossify.notes")
+    time.sleep(3)
+    for attempt in range(retries + 1):
+        if _focus_note_row():
+            bridge_call("type_text", "--es text 111111555555555555")
+            time.sleep(2)
+            tree = _observe_tree() or []
+            if any("111111" in (n.get("text") or "") for n in tree):
+                print("  seed note 111111 via notes editor")
+                return True
+        print("  seed_notes: 第 %d 次没写进便签，重试" % (attempt + 1))
+        adb("shell", "am", "force-stop", "org.fossify.notes")
+        time.sleep(1)
+        bridge_call("launch_app", "--es package org.fossify.notes")
+        time.sleep(3)
     raise RuntimeError("seed_notes: in-place seed failed")
 
 
