@@ -339,9 +339,9 @@ class Curator:
             return []
         facts: List[str] = []
         for ln in (reply.get("content") or "").splitlines():
-            ln = ln.strip()
-            if ln.startswith("- ") and len(ln) > 6:
-                facts.append(ln[2:].strip()[:200])
+            ln = _strip_bullet(ln)
+            if len(ln) > 6:
+                facts.append(ln[:200])
             if len(facts) >= 5:
                 break
         if facts:
@@ -830,29 +830,77 @@ def _trajectory_digest(run_record: Dict[str, Any], max_steps: int = 40) -> str:
 # LLM 辅助合并，属于后续项（见 doc/knowledge_redesign.md §6.3 遗留）。
 _SIMILAR_THRESHOLD = 0.35
 
+# 两条目各自点名了不同具体控件时的更高门槛（见 _similar 注释）。
+# 取 0.55：高于同义句对实测上限（0.43），留一档余量。
+_DISJOINT_WIDGET_THRESHOLD = 0.55
+
+# 共享具体控件时的降档门槛（见 _similar 注释）：真同义对实测 0.31，
+# 共享控件却讲两件事的 pair 实测 0.19 —— 取 0.25 卡在两者之间。
+_WIDGET_HIT_OVERLAP = 0.25
+
 # 具体控件 id（非通用）作为强信号：两条事实都提到同一个具体控件，
 # 极可能讲的是同一件事（例如都讲 material_timepicker_mode_button）。
-# 覆盖两种写法：反引号里的短 id（alarm_fab）与完整 resource-id
-# （org.fossify.clock:id/alarm_fab）—— 后者含 `:`/`/`，旧正则匹配不到，
-# 会让"alarm_fab 可点"的两条变体漏网（2026-10-01 实测残留）。
-_WIDGET_RE = re.compile(r"[a-z][a-z0-9_]{4,}(?:[.:/][a-z0-9_]+)+")
-_GENERIC_WIDGETS = {"android:id/button1", "android:id/button2"}
+#
+# 三种写法都要覆盖（2026-10-02 实测）：完整 resource-id
+# （org.fossify.clock:id/alarm_fab）、反引号里的短 id（`alarm_fab`）、
+# 以及裸写的 snake_case id（alarm_fab / material_timepicker_mode_button）。
+#
+# **不能**把包名当成控件：旧版用「点分 token」匹配，于是 `fossify.clock`
+# 被当成具体控件 —— 同一 App 的任意两条事实都"共享控件"而被误合并
+# （真机 dry-run 实证：底部导航坐标点按 与 悬浮按钮 id 点击 被并成一条）。
+_RES_ID_RE = re.compile(r"[a-z][a-z0-9_.]*:[a-z0-9_]+/([a-z0-9_]+)")
+_BACKTICK_ID_RE = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
+_SNAKE_ID_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+# 工具名也是 snake_case，但不是控件（否则"都要 type_text"会被当成同义证据）
+_TOOL_WORDS = frozenset({
+    "type_text", "tap_xy", "tap_by_id", "press_back", "press_home", "press_enter",
+    "launch_app", "observe", "screenshot", "look", "wait", "task_done", "swipe",
+    "long_press", "read_view", "scroll",
+})
+_GENERIC_WIDGETS = {"button1", "button2", "android", "id"}
+
+
+def _strip_bullet(text: str) -> str:
+    """去掉条目开头的列表符号（含 LLM 偶发的嵌套写法 ``- - xxx``）。
+
+    2026-10-02 真机：模型返回过 ``- - 文本…``，旧代码只剥一层 ``- ``，
+    于是 MEMORY.md 里出现 ``- - 文本…`` 双层符号，条目内容自带 "- " 前缀，
+    既影响展示也干扰语义比对。
+    """
+    # ``(?:[-*•]+\s*)+``：重复剥 —— "- - x" 只剥一层会留下 "- x"
+    return re.sub(r"^(?:[-*•]+\s*)+", "", (text or "").strip()).strip()
 
 
 def _widgets(text: str) -> set:
-    """条目里的具体控件 id（排除 android:id/button1 这类到处都有的通用件）。"""
-    return {m for m in _WIDGET_RE.findall(text or "")} - _GENERIC_WIDGETS
+    """条目里的具体控件 id（排除通用件与工具名；包名不算控件）。"""
+    t = text or ""
+    out = set(_RES_ID_RE.findall(t)) | set(_BACKTICK_ID_RE.findall(t))
+    out |= {m for m in _SNAKE_ID_RE.findall(t) if m not in _TOOL_WORDS}
+    return out - _GENERIC_WIDGETS
 
 
-def _similar(a: str, b: str) -> bool:
-    """两条目是否同义：共享具体控件 id，或语义指纹重叠率 >= 阈值。"""
-    if _widgets(a) & _widgets(b):
-        return True
+def _similar(a: str, b: str, threshold: float = None) -> bool:
+    """两条目是否同义：共享具体控件 id，或语义指纹重叠率 >= 阈值。
+
+    两条都点名了**互不相交**的具体控件 ⇒ 讲的是不同控件，需更强的文字证据
+    才算同义（阈值抬到 ``_DISJOINT_WIDGET_THRESHOLD``）。2026-10-02 真机实证：
+    「时间选择器切文本模式要点 material_timepicker_mode_button」与「必须先点
+    edit_alarm_time 打开对话框」在 0.35 阈值下被误并，丢失了后者的关键信息。
+    """
+    threshold = _SIMILAR_THRESHOLD if threshold is None else float(threshold)
+    wa, wb = _widgets(a), _widgets(b)
+    if wa & wb:
+        # 共享控件只把门槛降到 _WIDGET_HIT_OVERLAP，不再无条件判同义：
+        # 真机实证「edit_alarm_time 的 id 列举」与「必须先点它打开对话框」
+        # 共享控件却是两件事（文字重叠仅 0.19，真同义对实测 0.31）。
+        threshold = min(threshold, _WIDGET_HIT_OVERLAP)
+    elif wa and wb:
+        threshold = max(threshold, _DISJOINT_WIDGET_THRESHOLD)
     fp_a = _fact_fingerprint(a)
     fp_b = _fact_fingerprint(b)
     if not fp_a or not fp_b:
         return False
-    return len(fp_a & fp_b) / max(1, min(len(fp_a), len(fp_b))) >= _SIMILAR_THRESHOLD
+    return len(fp_a & fp_b) / max(1, min(len(fp_a), len(fp_b))) >= threshold
 
 
 def _fact_fingerprint(text: str) -> set:
@@ -875,23 +923,14 @@ def semantic_dedup(items: List[str], threshold: float = None) -> List[str]:  # n
     """
     threshold = _SIMILAR_THRESHOLD if threshold is None else float(threshold)
     out: List[str] = []
-    seen: List[set] = []
     for it in items or []:
-        s = str(it or "").strip()
+        s = _strip_bullet(it)
         if not s:
             continue
-        fp = _fact_fingerprint(s)
-        dup = False
-        for prev in seen:
-            if not prev or not fp:
-                continue
-            inter = len(prev & fp)
-            if inter / max(1, min(len(prev), len(fp))) >= threshold:
-                dup = True
-                break
-        if dup:
+        # 与 _merge_memory_sections 共用 _similar：控件 id 强信号 + 指纹重叠，
+        # 两条路径判定一致（此前 semantic_dedup 只比指纹，控件规则被漏掉）。
+        if any(_similar(s, kept, threshold) for kept in out):
             continue
-        seen.append(fp)
         out.append(s)
     return out
 
@@ -913,14 +952,88 @@ def _parse_rollout_sections(text: str):
             cur = None
             continue
         if cur == "facts" and s.startswith("- "):
-            v = s[2:].strip()
+            v = _strip_bullet(s[2:])
             if v and v != "(暂无)":
                 facts.append(v)
         elif cur == "lessons" and s.startswith("- "):
-            v = s[2:].strip()
+            v = _strip_bullet(s[2:])
             if v and v != "(暂无)":
                 lessons.append(v)
     return facts, lessons
+
+
+_MEMORY_HEADER = "# OmniAgent 全局长期记忆"
+_FACT_SEC = "## 长期事实"
+_LESSON_SEC = "## 教训"
+
+
+def _split_memory_sections(existing: str) -> Dict[str, List[str]]:
+    """MEMORY.md → {分区标题: [条目]}（``## `` 分区，``- `` 条目）。"""
+    sections: Dict[str, List[str]] = {_FACT_SEC: [], _LESSON_SEC: []}
+    cur = None
+    for line in (existing or "").splitlines():
+        s = line.strip()
+        if s.startswith("# ") and not s.startswith("## "):
+            cur = None
+            continue
+        if s.startswith("## "):
+            cur = s
+            sections.setdefault(cur, [])
+            continue
+        if cur in sections and s.startswith("- "):
+            sections[cur].append(_strip_bullet(s[2:]))
+    return sections
+
+
+def _render_memory_sections(sections: Dict[str, List[str]]) -> str:
+    """{分区: [条目]} → MEMORY.md 文本（双分区固定顺序，空分区写 ``(暂无)``）。"""
+    out = [_MEMORY_HEADER, ""]
+    for marker in (_FACT_SEC, _LESSON_SEC):
+        out.append(marker)
+        items = sections.get(marker) or []
+        if items:
+            out.extend("- %s" % it for it in items)
+        else:
+            out.append("- (暂无)")
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def compact_memory_sections(text: str):
+    """回溯合并**已有**条目（P2-R 语义去重收口），返回 ``(新文本, 合并掉条数)``。
+
+    为什么需要单独一个函数：``_merge_memory_sections`` 的去重只发生在**新增**
+    条目对存量（保护人工编辑内容），**存量条目之间从不互相合并**。于是调参前
+    沉淀下的重复会永久留在 MEMORY.md —— 2026-10-02 实测：阈值由 0.45 校准到
+    0.35 后，设备上 12 条事实里仍留着 3 个「自动保存」变体。本函数对存量做
+    一次性合并；纯函数不落盘，Omni 可直接复用。
+    """
+    sections = _split_memory_sections(text)
+    removed = 0
+    for key in list(sections):
+        items = sections[key] or []
+        kept = semantic_dedup(items)
+        removed += len(items) - len(kept)
+        sections[key] = kept
+    return _render_memory_sections(sections), removed
+
+
+def compact_memory_master() -> int:
+    """对设备端 MEMORY.md 执行回溯合并并落盘，返回合并掉的条数（0 = 无重复）。"""
+    master = memory_master()
+    if not master.exists():
+        return 0
+    try:
+        existing = master.read_text(encoding="utf-8")
+    except Exception:
+        return 0
+    new_text, removed = compact_memory_sections(existing)
+    if removed and new_text != existing:
+        try:
+            master.write_text(new_text, encoding="utf-8")
+        except Exception:
+            return 0
+    return removed
 
 
 def _merge_memory_sections(existing: str, new_facts: List[str], new_lessons: List[str]):
@@ -928,30 +1041,19 @@ def _merge_memory_sections(existing: str, new_facts: List[str], new_lessons: Lis
 
     返回 ``(新文本, 追加facts数, 追加lessons数)``。
 
-    去重规则（§3.1）：条目全文 strip + 小写比对，杜绝重复沉淀；
-    仅追加不覆写，保护人工编辑内容；首次自动创建固定头部。
+    去重规则（§3.1）：条目全文 strip + 小写比对，杜绝重复沉淀；再加上语义
+    指纹/控件 id 同义判定（P2-R）。仅追加不覆写，保护人工编辑内容——**存量
+    条目之间的合并见** :func:`compact_memory_sections`。
     """
-    fact_sec, lesson_sec = "## 长期事实", "## 教训"
-    sections = {fact_sec: [], lesson_sec: []}
-    cur = None
-    for line in existing.splitlines():
-        s = line.strip()
-        if s.startswith("# ") and not s.startswith("## "):
-            cur = None
-            continue
-        if s.startswith("## "):
-            cur = s
-            if cur not in sections:
-                sections[cur] = []
-            continue
-        if cur in sections and s.startswith("- "):
-            sections[cur].append(s[2:].strip())
+    fact_sec, lesson_sec = _FACT_SEC, _LESSON_SEC
+    sections = _split_memory_sections(existing)
 
     def _add(items: List[str], new: List[str]) -> int:
         seen = {x.strip().lower() for x in items if x}
         added = 0
         for n in new:
-            key = n.strip().lower()
+            item = _strip_bullet(n)
+            key = item.lower()
             if not key:
                 continue
             if key in seen:                      # 1) 精确重复
@@ -959,22 +1061,13 @@ def _merge_memory_sections(existing: str, new_facts: List[str], new_lessons: Lis
             if any(_similar(key, s) for s in seen):   # 2) 同义重复（语义指纹）
                 continue
             seen.add(key)
-            items.append(n.strip())
+            items.append(item)
             added += 1
         return added
 
     added_f = _add(sections[fact_sec], new_facts)
     added_l = _add(sections[lesson_sec], new_lessons)
-
-    out = ["# OmniAgent 全局长期记忆", ""]
-    for marker in (fact_sec, lesson_sec):
-        out.append(marker)
-        if sections[marker]:
-            out.extend(f"- {it}" for it in sections[marker])
-        else:
-            out.append("- (暂无)")
-        out.append("")
-    return "\n".join(out).rstrip() + "\n", added_f, added_l
+    return _render_memory_sections(sections), added_f, added_l
 
 
 def _write_merged_ids(path: Path, ids: set) -> None:

@@ -236,6 +236,7 @@ class KnowledgePage(private val act: Activity) {
                 }
             })
         }
+        actionBtn("合并重复", danger = false) { compactMemory() }
         actionBtn("导出全部知识", danger = false) { exportKnowledge() }
         actionBtn("清空", danger = true) { clearDialog() }
         bodyHost.addView(actions, Ds.vp(bottom = Ds.dp(act, 10)))
@@ -313,7 +314,38 @@ class KnowledgePage(private val act: Activity) {
             "任务执行时由大肥鱼自维护参考；产品级汇总视图后置。"))
     }
 
-    // ---------------- 管理动作（P2 DoD3 清空 / DoD5 导出） ----------------
+    // ---------------- 管理动作（P2 DoD3 清空 / DoD5 导出 / P2-R 合并重复） ----------------
+
+    /** 合并重复（P2-R）：对存量事实做回溯合并。
+     *  语义去重只在「新增 vs 存量」时生效（保护人工编辑），调参前沉淀的同义
+     *  变体会一直留在库里 —— 这里给一次显式收口，并回显合并掉几条。 */
+    private fun compactMemory() {
+        val bridge = KernelHostService.pyBridgeModule
+        if (bridge == null) {
+            android.widget.Toast.makeText(act, "内核启动中，稍后再试",
+                android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        Thread {
+            try {
+                val r = JSONObject(bridge.callAttr("knowledge_compact_json").toString())
+                val removed = r.optInt("removed")
+                main.post {
+                    android.widget.Toast.makeText(
+                        act,
+                        if (removed > 0) "已合并 $removed 条同义重复" else "没有发现同义重复",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                    load(section)
+                }
+            } catch (e: Exception) {
+                main.post {
+                    android.widget.Toast.makeText(
+                        act, "合并失败：${e.message}",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
 
     /** 一键清空（DoD3）：记忆-only 或 连技能一起；画像/角色卡是用户资产不动。 */
     private fun clearDialog() {

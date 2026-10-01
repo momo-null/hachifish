@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from hachimi_kernel import runtime_paths as P                     # noqa: E402
 from hachimi_kernel.curator import (                              # noqa: E402
     Curator, semantic_dedup, _similar,
+    compact_memory_sections, compact_memory_master,
 )
 
 
@@ -94,3 +95,87 @@ def test_merge_memory_skips_paraphrase():
 def _merge(existing, facts, lessons):
     from hachimi_kernel.curator import _merge_memory_sections
     return _merge_memory_sections(existing, facts, lessons)
+
+
+# ---------------- 存量回溯合并（compact） ----------------
+
+def test_compact_merges_legacy_duplicates():
+    """调参前沉淀的同义变体：新增去重挡不住，compact 必须能收口。"""
+    text = ("# OmniAgent 全局长期记忆\n\n## 长期事实\n"
+            "- 在 Fossify Notes 编辑笔记后按返回键即自动保存，无需显式点击保存按钮\n"
+            "- Fossify Notes 编辑正文后按 back 返回会自动保存，无需额外点击保存按钮\n"
+            "- 新建弹窗的标题字段被锁定，需点按后才能输入\n\n"
+            "## 教训\n- (暂无)\n")
+    new_text, removed = compact_memory_sections(text)
+    assert removed == 1, (removed, new_text)
+    assert new_text.count("- ") == 3                  # 2 事实 + 1 占位
+    assert "标题字段被锁定" in new_text
+
+
+def test_compact_is_idempotent():
+    text = ("# OmniAgent 全局长期记忆\n\n## 长期事实\n"
+            "- 编辑笔记后按返回键自动保存\n"
+            "- 编辑正文后按 back 返回会自动保存\n\n"
+            "## 教训\n- (暂无)\n")
+    once, removed1 = compact_memory_sections(text)
+    twice, removed2 = compact_memory_sections(once)
+    assert removed1 == 1 and removed2 == 0
+
+
+def test_compact_keeps_distinct_facts():
+    text = ("# OmniAgent 全局长期记忆\n\n## 长期事实\n"
+            "- 新建弹窗的标题字段被锁定，需点按后才能输入\n"
+            "- 正文编辑区是占位行控件，需先点按取焦点\n\n"
+            "## 教训\n- (暂无)\n")
+    _, removed = compact_memory_sections(text)
+    assert removed == 0
+
+
+def test_shared_widget_still_needs_text_agreement():
+    """共享控件 ≠ 同一件事：真机这两条共享 edit_alarm_time（重叠 0.19）。"""
+    a = "时间选择器位于独立对话框层，必须先点 `edit_alarm_time` 打开再点确认按钮，否则直接点击 ok 按钮不生效"
+    b = "闹钟标签输入框 resource-id 为 org.fossify.clock:id/edit_alarm，时间显示控件为 org.fossify.clock:id/edit_alarm_time。"
+    assert not _similar(a, b)
+
+
+def test_shared_widget_merges_when_text_agrees():
+    """共享控件 + 文字吻合（重叠 0.31）：同一按钮的两种写法，应合并。"""
+    a = "在 org.fossify.clock 中，闹钟列表底部的添加按钮可通过 id `alarm_fab` 点击；若使用坐标点按底部区域也能触发新建闹钟。"
+    b = "在 org.fossify.clock 中，当底部导航或列表区可见时，主页面右下角的新建闹钟悬浮按钮 resource-id 为 org.fossify.clock:id/alarm_fab，可直接按 id 点按。"
+    assert _similar(a, b)
+
+
+def test_disjoint_widgets_need_strong_text_agreement():
+    """各自点名不同控件：文字只在中度相似（0.21）时不合并。"""
+    a = "时间选择器切换到文本输入模式需点击 `material_timepicker_mode_button`，之后输入框可直接输入时间。"
+    b = "时间选择器位于独立对话框层，必须先点 `edit_alarm_time` 打开再点确认按钮，否则直接点击 ok 按钮不生效"
+    assert not _similar(a, b)
+
+
+def test_strip_bullet_handles_nested_markers():
+    """真机出现过 LLM 返回 ``- - xxx``，只剥一层会留下 "- " 前缀。"""
+    from hachimi_kernel.curator import _strip_bullet
+    assert _strip_bullet("- - 文本输入模式下需分别点按") == "文本输入模式下需分别点按"
+    assert _strip_bullet("- 正常条目") == "正常条目"
+
+
+def test_compact_normalizes_legacy_double_bullets():
+    text = ("# OmniAgent 全局长期记忆\n\n## 长期事实\n"
+            "- - 闹钟标签输入框 resource-id 为 org.fossify.clock:id/edit_alarm\n\n"
+            "## 教训\n- (暂无)\n")
+    new_text, removed = compact_memory_sections(text)
+    assert removed == 0
+    assert "- - " not in new_text
+    assert "- 闹钟标签输入框" in new_text
+
+
+def test_compact_memory_master_writes_file():
+    setup_tmp_root()
+    P.memory_master().write_text(
+        "# OmniAgent 全局长期记忆\n\n## 长期事实\n"
+        "- 在 org.fossify.clock 中，添加闹钟入口为 alarm_fab 悬浮按钮\n"
+        "- 在 org.fossify.clock 中，新建闹钟悬浮按钮 resource-id 为 org.fossify.clock:id/alarm_fab\n\n"
+        "## 教训\n- (暂无)\n", encoding="utf-8")
+    assert compact_memory_master() == 1
+    assert "alarm_fab" in P.memory_master().read_text(encoding="utf-8")
+    assert compact_memory_master() == 0        # 再跑一次无重复

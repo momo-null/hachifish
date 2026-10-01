@@ -994,6 +994,29 @@ def knowledge_clear_json(scope="memory"):
                           ensure_ascii=False)
 
 
+def knowledge_compact_json():
+    """回溯合并 MEMORY.md 存量重复条目（P2-R 语义去重收口）。
+
+    ``_merge_memory_sections`` 的语义去重只作用于**新增**条目（保护人工编辑），
+    调参前沉淀的重复会一直留在库里 —— 知识页「合并重复」按钮 / 迁移时手动触发。
+    返回 ``{ok, removed}``；removed=0 表示当前无同义重复。
+    """
+    try:
+        from hachimi_kernel.curator import compact_memory_master
+        before = 0
+        p = P.memory_master()
+        if p.exists():
+            before = len(p.read_text(encoding="utf-8").splitlines())
+        removed = compact_memory_master()
+        print("[knowledge] compact memory: removed=%d duplicate entries" % removed,
+              flush=True)
+        return json.dumps({"ok": True, "removed": removed, "lines_before": before},
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                           "removed": 0}, ensure_ascii=False)
+
+
 def knowledge_export_json():
     """导出数据面（DoD5）：知识域全部 md 文件（skills/ + memory/ 全目录）。
 
