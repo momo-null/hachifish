@@ -56,7 +56,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
 
     private val prefs get() = act.getSharedPreferences(PREFS_NAME, 0)
 
-    private val role = RoleStore.read(act)
+    /** 角色配置：onResume 重读——角色设置页改完返回即生效（称呼/头像），不再要求重启。 */
+    private var role = RoleStore.read(act)
 
     // ---------------- 视图 ----------------
 
@@ -171,7 +172,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             setOnClickListener { onClick() }
         }
 
-    /** 空状态（V2）：压力大肥鱼 + 主人称呼 + 建议 chips。 */
+    /** 空闲态（V2）：吃白饭大肥鱼 + 主人称呼 + 建议 chips。 */
     private fun buildEmpty(): LinearLayout = LinearLayout(act).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
@@ -180,7 +181,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         setPadding(p, Ds.dp(act, 40), p, p)
     }.also { box ->
         box.addView(ImageView(act).apply {
-            setImageResource(FishAssets.EMPTY)
+            setImageResource(FishAssets.TASK)
             adjustViewBounds = true
             maxHeight = Ds.dp(act, 150)
         }, LinearLayout.LayoutParams(
@@ -425,6 +426,9 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
 
     fun onResume() {
         NarrativePanel.addListener(this)
+        // 角色设置页返回即刷新（roleName/头像/称呼均为失焦即存，无「保存」按钮）
+        role = RoleStore.read(act)
+        headerName.text = role.roleName
         maybeRestoreLastSession()
     }
 
@@ -819,7 +823,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             })
             // 用户头像：气泡右侧，用「用户角色」头像（上传图 > 称呼首字），与大肥鱼（左）对称
             row.addView(ImageView(act).apply {
-                setImageBitmap(userAvatar30)
+                setImageBitmap(userAvatar28())
             }, LinearLayout.LayoutParams(Ds.dp(act, 28), Ds.dp(act, 28)).apply {
                 leftMargin = Ds.dp(act, 8); topMargin = Ds.dp(act, 2)
             })
@@ -1088,6 +1092,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 if (k.skills.isNotEmpty()) parts.add("技能「${k.skills.joinToString("」「")}」")
                 append(if (parts.isEmpty()) "本次无知识可注入"
                        else "已注入：${parts.joinToString(" + ")}")
+                // P2-R Phase 3：注入块体量可见（去重后字节数）——知识页之外的运行时观测点
+                if (k.chars > 0) append("（%d 字符）".format(k.chars))
             }
             row.addView(TextView(act).apply {
                 text = "🧠 $what"
@@ -1100,25 +1106,36 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
 
         private val avatar30 by lazy { FishAssets.circle(act, FishAssets.AVATAR, 28) }
 
-        /** 用户角色头像（28dp）：上传图 > 称呼首字圆（与大肥鱼头像区分，P1.5 UI）。 */
-        private val userAvatar30 by lazy {
-            RoleStore.userAvatarFile(act, role.userAvatarPath)?.let { f ->
-                android.graphics.BitmapFactory.decodeFile(f.absolutePath)?.let { raw ->
-                    return@lazy FishAssets.circle(raw, Ds.dp(act, 28))
+        /** 用户角色头像（28dp）：上传图 > 称呼首字圆（与大肥鱼头像区分，P1.5 UI）。
+         *  缓存按 path+mtime 失效：角色页换头像回到聊天即重解码，无需重启。 */
+        private var userAvatarKey: Pair<String, Long>? = null
+        private var userAvatarBmp: android.graphics.Bitmap? = null
+
+        private fun userAvatar28(): android.graphics.Bitmap {
+            val f = RoleStore.userAvatarFile(act, role.userAvatarPath)
+            val key = f?.let { it.absolutePath to it.lastModified() }
+            userAvatarBmp?.let { if (key == userAvatarKey) return it }
+            val bmp = f?.let { ff ->
+                android.graphics.BitmapFactory.decodeFile(ff.absolutePath)
+                    ?.let { raw -> FishAssets.circle(raw, Ds.dp(act, 28)) }
+            } ?: run {
+                val size = Ds.dp(act, 28)
+                val out = android.graphics.Bitmap.createBitmap(
+                    size, size, android.graphics.Bitmap.Config.ARGB_8888)
+                val canvas = android.graphics.Canvas(out)
+                canvas.drawColor(Ds.PRIMARY)
+                val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.WHITE; textSize = size * 0.44f
+                    textAlign = android.graphics.Paint.Align.CENTER
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
                 }
+                val y = size / 2f - (paint.descent() + paint.ascent()) / 2
+                canvas.drawText(role.userInitial, size / 2f, y, paint)
+                out
             }
-            val size = Ds.dp(act, 28)
-            val out = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
-            val canvas = android.graphics.Canvas(out)
-            canvas.drawColor(Ds.PRIMARY)
-            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.WHITE; textSize = size * 0.44f
-                textAlign = android.graphics.Paint.Align.CENTER
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-            }
-            val y = size / 2f - (paint.descent() + paint.ascent()) / 2
-            canvas.drawText(role.userInitial, size / 2f, y, paint)
-            out
+            userAvatarKey = key
+            userAvatarBmp = bmp
+            return bmp
         }
     }
 }

@@ -346,7 +346,7 @@ class MiniLoop(object):
                     % (name, streak))
                 self._fail_streak[name] = 0
         step = self._record(step_no, name, args, result, None, 0)
-        self._push_tool_result(name, args, result)
+        self._push_tool_result(name, args, result, ref="step #%d" % step_no)
         return result, step, False
 
     def _verify(self):
@@ -383,9 +383,12 @@ class MiniLoop(object):
             "ts": round(time.time(), 3),
         }
 
-    def _push_tool_result(self, name, args, result):
+    def _push_tool_result(self, name, args, result, ref=""):
         # assistant 消息保留内核内部 schema（{name, args}）；wire 包装（id/tool_call_id/
-        # reasoning_content 回传）由 brain 侧负责
+        # reasoning_content 回传）由 brain 侧负责。
+        # P2-R Phase 2b：进 LLM 消息前做上下文卸载（observe 完整树 → 可操作骨架，
+        # 证据留在轨迹 step.result）；轨迹与 verify 均拿完整数据，不受影响。
+        from hachimi_kernel.context_offload import offload_tool_result
         reply = self._pending_reply or {}
         m = {"role": "assistant", "content": reply.get("content"),
              "tool_calls": [{"name": name, "args": args}]}
@@ -393,7 +396,9 @@ class MiniLoop(object):
             m["reasoning_content"] = reply["reasoning_content"]
         self._messages.append(m)
         self._messages.append({"role": "tool", "name": name,
-                               "content": json.dumps(result, ensure_ascii=False)})
+                               "content": json.dumps(
+                                   offload_tool_result(name, result, ref=ref),
+                                   ensure_ascii=False)})
 
     def _tool_specs(self):
         specs = [{"name": n, "description": t.get("description", ""),
