@@ -17,9 +17,11 @@ Hermes Autonomous Background Curator 范式；Master Spec §6 决策「仅触发
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -31,7 +33,9 @@ from hachimi_kernel.world_model import WorldModel
 from hachimi_kernel.skill_library import SkillLibrary, Skill
 from hachimi_kernel.runtime_paths import (
     task_dir,
+    tasks_root,
     global_memory,
+    global_skills,
     memory_rollouts,
     memory_rollout_file,
     memory_master,
@@ -207,6 +211,15 @@ class Curator:
                 report.dedup_hit_rate = getattr(self, "_last_dedup_hit_rate", 0.0)
                 self._persist_curator_metric(
                     report.dedup_hit_rate, report.skills_promoted, report.skills_created)
+                # P2-R §8.2：每个 run 收尾做一次容量维护（印证 + 淘汰 + 清理）。
+                # 证据=轨迹摘要：本次跑过的 App/控件会点亮对应事实，让"常用"胜出。
+                try:
+                    cap = maintain_capacity(evidence=_trajectory_digest(run_record))
+                    if any(cap.values()):
+                        print("[curator] capacity maintained: %s" % cap, flush=True)
+                except Exception as e:
+                    report.errors.append("maintain_capacity: %s: %s"
+                                         % (type(e).__name__, e))
             except Exception as e:
                 report.errors.append(f"distill_task_memory: {type(e).__name__}: {e}")
 
@@ -903,8 +916,11 @@ def _widgets(text: str) -> set:
     return out - _GENERIC_WIDGETS
 
 
-def _similar(a: str, b: str, threshold: float = None) -> bool:
+def _similar(a: str, b: str, threshold: float = None, raw_only: bool = False) -> bool:
     """两条目是否同义：共享具体控件 id，或语义指纹重叠率 >= 阈值。
+
+    ``raw_only=True``：只用**词面指纹**判定，忽略"共享控件/引用短语"的降门槛
+    捷径 —— 删除路径专用（那条捷径是为召回设计的，用它删数据会误伤）。
 
     两条都点名了**互不相交**的具体控件 ⇒ 讲的是不同控件，需更强的文字证据
     才算同义（阈值抬到 ``_DISJOINT_WIDGET_THRESHOLD``）。2026-10-02 真机实证：
@@ -912,6 +928,11 @@ def _similar(a: str, b: str, threshold: float = None) -> bool:
     edit_alarm_time 打开对话框」在 0.35 阈值下被误并，丢失了后者的关键信息。
     """
     threshold = _SIMILAR_THRESHOLD if threshold is None else float(threshold)
+    if raw_only:
+        fa, fb = _fact_fingerprint(a), _fact_fingerprint(b)
+        if not fa or not fb:
+            return False
+        return len(fa & fb) / max(1, min(len(fa), len(fb))) >= threshold
     wa, wb = _widgets(a), _widgets(b)
     if wa & wb:
         # 共享控件只把门槛降到 _WIDGET_HIT_OVERLAP，不再无条件判同义：
@@ -1044,6 +1065,326 @@ def compact_memory_sections(text: str):
         removed += len(items) - len(kept)
         sections[key] = kept
     return _render_memory_sections(sections), removed
+
+
+# ---------------------------------------------------------------------------
+# 容量边界：效用驱动的滑动窗口（P2-R §8.2，doc/knowledge_redesign.md）
+#
+# 定位：**不追求完美归并，只保证自洽**。手机端知识是"有槽位的缓存"而不是
+# 数据库 —— 漏掉的同义变体只占一个槽位，而槽位满了会按效用淘汰最差的，
+# 于是"弱者淘汰"天然完成了收敛，不必靠 embedding 提高归并率。
+#
+# 机制三条：
+#   1. 印证（corroborate）：每次 run 用轨迹证据点亮命中的事实（hits+1）；
+#      同义簇内只加分给簇代表 —— 被反复印证的表述分数越来越高。
+#   2. 效用分：hits*2 + 新鲜度（30 天线性衰减到 0）。
+#   3. 淘汰次序：同义簇内非代表 → 单 App 超容（每个 App 保底 N 条）→ 全局超容。
+# ---------------------------------------------------------------------------
+
+FACTS_PER_APP_MAX = 12      # 单 App 事实槽位（实测单 App 沉淀 ~9 条）
+FACTS_APP_FLOOR = 3         # 单 App 保底：不允许把某个 App 的事实清空
+FACTS_TOTAL_MAX = 40        # 全局事实槽位
+SKILLS_MAX = 20             # 全局技能槽位（entry_id 唯一，同名套路累计不新增）
+ROLLOUTS_MAX = 30           # rollout 保留条数
+# 淘汰用的同义门槛：比 _SIMILAR_THRESHOLD 严格得多。
+# 印证聚类可以松（判错了只是把分数加给另一条），**删除必须保守** —— 真机实证
+# (7,9) 两条共享 edit_alarm_time 却是不同事实，用 0.35 聚类会把有用的一条删掉。
+_PRUNE_MERGE_THRESHOLD = 0.5
+
+TASK_KEEP_RUNS = 50         # 设备端保留最近 N 个 run 的资产
+TASK_KEEP_DAYS = 7
+TASK_MAX_MB = 100
+
+_PKG_RE = re.compile(r"\b[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]+){2,}\b")
+
+
+def _fact_meta_file() -> Path:
+    """事实效用索引（旁挂 json，不改 MEMORY.md 结构、不破坏人工编辑）。"""
+    return global_memory() / "fact_meta.json"
+
+
+def _fact_key(entry: str) -> str:
+    return hashlib.sha1(_strip_bullet(entry).lower().encode("utf-8")).hexdigest()[:12]
+
+
+def _load_fact_meta() -> Dict[str, Any]:
+    p = _fact_meta_file()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _save_fact_meta(meta: Dict[str, Any]) -> None:
+    try:
+        _fact_meta_file().write_text(
+            json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _fact_pkg(entry: str) -> str:
+    """条目所属的 App 包名（无则空串，归入"通用"）。"""
+    m = _PKG_RE.findall(entry or "")
+    return m[0] if m else ""
+
+
+def _similar_clusters(items: List[str], threshold: float = None,
+                      raw_only: bool = False) -> List[List[int]]:
+    """按 :func:`_similar` 把条目贪心聚成同义簇（返回下标簇）。
+
+    ``threshold`` 省略时用基础阈值 —— 用于**印证聚类**（判错只是把分加给别人）；
+    删除路径必须显式传更严的 ``_PRUNE_MERGE_THRESHOLD``。
+    """
+    clusters: List[List[int]] = []
+    for i, it in enumerate(items):
+        for c in clusters:
+            if any(_similar(it, items[j], threshold, raw_only) for j in c):
+                c.append(i)
+                break
+        else:
+            clusters.append([i])
+    return clusters
+
+
+def _evidence_hit(entry: str, evidence: str) -> bool:
+    """本次 run 的轨迹证据是否印证了这条事实（包名或具体控件出现）。"""
+    if not evidence:
+        return False
+    pkg = _fact_pkg(entry)
+    if pkg and pkg in evidence:
+        return True
+    return any(w in evidence for w in _widgets(entry))
+
+
+def corroborate_facts(evidence: str) -> int:
+    """用本次 run 的证据点亮被印证的事实，返回被加分的条目数。
+
+    同义簇内**只给簇代表加分**（hits 最高者）——变体之间靠此收敛：常被印证的
+    那条分越来越高，其余变体在容量收紧时先被淘汰。这就是"滑动"替代"归并"。
+    """
+    p = memory_master()
+    if not p.exists():
+        return 0
+    items = _split_memory_sections(p.read_text(encoding="utf-8")).get(_FACT_SEC) or []
+    if not items or not evidence:
+        return 0
+    meta = _load_fact_meta()
+    now = time.time()
+    touched = 0
+    for cluster in _similar_clusters(items):
+        hit = any(_evidence_hit(items[i], evidence) for i in cluster)
+        leader = max(cluster,
+                     key=lambda i: int((meta.get(_fact_key(items[i])) or {}).get("hits") or 0))
+        for i in cluster:
+            key = _fact_key(items[i])
+            rec = meta.get(key) or {"text": items[i], "pkg": _fact_pkg(items[i]),
+                                    "hits": 0, "created": now, "last_seen": now}
+            rec["last_seen"] = now
+            if hit and i == leader:
+                rec["hits"] = min(99, int(rec.get("hits") or 0) + 1)
+                touched += 1
+            meta[key] = rec
+    _save_fact_meta(meta)
+    return touched
+
+
+def _fact_score(entry: str, meta: Dict[str, Any], now: float) -> float:
+    """效用分 = 印证次数×2 + 新鲜度（30 天内从 1 线性衰减到 0）。"""
+    rec = meta.get(_fact_key(entry)) or {}
+    age_days = max(0.0, (now - float(rec.get("created") or now)) / 86400.0)
+    return int(rec.get("hits") or 0) * 2.0 + max(0.0, 1.0 - age_days / 30.0)
+
+
+def prune_memory(now: float = None) -> int:
+    """按容量边界淘汰事实，返回淘汰条数（0 = 未超容）。
+
+    淘汰次序：①同义簇内非代表 → ②单 App 超容（保底 ``FACTS_APP_FLOOR``）
+    → ③全局超容。被淘汰条目的效用索引一并删除。
+    """
+    p = memory_master()
+    if not p.exists():
+        return 0
+    sections = _split_memory_sections(p.read_text(encoding="utf-8"))
+    items = list(sections.get(_FACT_SEC) or [])
+    if not items:
+        return 0
+    meta = _load_fact_meta()
+    now = time.time() if now is None else now
+
+    def score(i) -> float:
+        return _fact_score(items[i], meta, now)
+
+    drop = set()
+    # ① 近乎逐字重复的条目（严格门槛）：删除保守，只砍"几乎一样"的
+    for c in _similar_clusters(items, _PRUNE_MERGE_THRESHOLD, raw_only=True):
+        if len(c) > 1:
+            leader = max(c, key=lambda i: (score(i), -i))
+            drop.update(i for i in c if i != leader)
+
+    keep = [i for i in range(len(items)) if i not in drop]
+    by_pkg: Dict[str, List[int]] = {}
+    for i in keep:
+        by_pkg.setdefault(_fact_pkg(items[i]) or "-", []).append(i)
+    for pkg, idxs in by_pkg.items():
+        excess = len(idxs) - FACTS_PER_APP_MAX
+        if excess <= 0:
+            continue
+        ranked = sorted(idxs, key=score)
+        removable = max(0, len(idxs) - FACTS_APP_FLOOR)
+        for i in ranked[:min(excess, removable)]:
+            drop.add(i)
+
+    keep = [i for i in range(len(items)) if i not in drop]
+    if len(keep) > FACTS_TOTAL_MAX:
+        ranked = sorted(keep, key=score)
+        drop.update(ranked[:len(keep) - FACTS_TOTAL_MAX])
+
+    if not drop:
+        return 0
+    survivors = [items[i] for i in range(len(items)) if i not in drop]
+    sections[_FACT_SEC] = survivors
+    try:
+        p.write_text(_render_memory_sections(sections), encoding="utf-8")
+    except Exception:
+        return 0
+    for i in drop:
+        meta.pop(_fact_key(items[i]), None)
+    _save_fact_meta(meta)
+    print("[curator] prune memory: -%d facts (kept %d)" % (len(drop), len(survivors)),
+          flush=True)
+    return len(drop)
+
+
+def prune_skills(max_keep: int = SKILLS_MAX) -> int:
+    """技能超容时按「成功次数 − 失败次数 + 新鲜度」淘汰最低者。"""
+    try:
+        from hachimi_kernel.skill_library import SkillLibrary
+        d = SkillLibrary._global_dir()
+        if not d.exists():
+            return 0
+        files = sorted(d.glob("*.md"))
+        if len(files) <= max_keep:
+            return 0
+        now = time.time()
+
+        def score(f) -> float:
+            s = SkillLibrary._parse(f)
+            if s is None:
+                return 999.0
+            m = s.metadata
+            last = 0.0
+            if m.last_used:
+                try:
+                    last = datetime.fromisoformat(
+                        str(m.last_used).replace("Z", "")).timestamp()
+                except Exception:
+                    last = 0.0
+            age_days = max(0.0, (now - last) / 86400.0) if last else 999.0
+            return (int(m.success_count or 0) * 2 - int(m.failure_count or 0)
+                    + max(0.0, 1.0 - age_days / 30.0))
+
+        removed = 0
+        for f in sorted(files, key=score)[:len(files) - max_keep]:
+            try:
+                f.unlink()
+                removed += 1
+            except Exception:
+                pass
+        return removed
+    except Exception:
+        return 0
+
+
+def prune_rollouts(max_keep: int = ROLLOUTS_MAX) -> int:
+    """rollout 只留最近 ``max_keep`` 条（按 mtime）。"""
+    d = memory_rollouts()
+    if not d.exists():
+        return 0
+    files = sorted(d.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+    removed = 0
+    for f in files[max_keep:]:
+        try:
+            f.unlink()
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
+def prune_tasks(max_runs: int = TASK_KEEP_RUNS, max_days: int = TASK_KEEP_DAYS,
+                max_mb: int = TASK_MAX_MB) -> int:
+    """设备端 run 资产清理：条数 / 天数 / 体积三选一触发（真机实测增速最快）。"""
+    root = tasks_root()
+    if not root.exists():
+        return 0
+    now = time.time()
+
+    def _size(d: Path) -> int:
+        return sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+
+    dirs = [d for d in root.iterdir() if d.is_dir()]
+    dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    removed = 0
+    for d in dirs[max_runs:]:
+        shutil.rmtree(d, ignore_errors=True)
+        removed += 1
+    cutoff = now - max_days * 86400
+    for d in dirs[:max_runs]:
+        try:
+            if d.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+                removed += 1
+        except Exception:
+            pass
+    try:
+        total = _size(root)
+    except Exception:
+        return removed
+    if total > max_mb * 1024 * 1024:
+        for d in sorted([d for d in root.iterdir() if d.is_dir()],
+                        key=lambda d: d.stat().st_mtime):
+            if total <= max_mb * 1024 * 1024:
+                break
+            try:
+                total -= _size(d)
+            except Exception:
+                pass
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+    return removed
+
+
+def maintain_capacity(evidence: str = "") -> Dict[str, int]:
+    """一次跑完「印证 + 四项容量维护」，返回各项清理条数。
+
+    Omni 可复用：与去重正交，属于"知识资产必须有上限"的那一层治理。
+    """
+    out = {"corroborated": 0, "facts_pruned": 0, "skills_pruned": 0,
+           "rollouts_pruned": 0, "tasks_pruned": 0}
+    try:
+        out["corroborated"] = corroborate_facts(evidence)
+    except Exception:
+        pass
+    try:
+        out["facts_pruned"] = prune_memory()
+    except Exception:
+        pass
+    try:
+        out["skills_pruned"] = prune_skills()
+    except Exception:
+        pass
+    try:
+        out["rollouts_pruned"] = prune_rollouts()
+    except Exception:
+        pass
+    try:
+        out["tasks_pruned"] = prune_tasks()
+    except Exception:
+        pass
+    return out
 
 
 def compact_memory_master() -> int:

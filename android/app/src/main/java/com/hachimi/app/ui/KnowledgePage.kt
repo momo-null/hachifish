@@ -236,7 +236,7 @@ class KnowledgePage(private val act: Activity) {
                 }
             })
         }
-        actionBtn("合并重复", danger = false) { compactMemory() }
+        actionBtn("整理知识", danger = false) { compactMemory() }
         actionBtn("导出全部知识", danger = false) { exportKnowledge() }
         actionBtn("清空", danger = true) { clearDialog() }
         bodyHost.addView(actions, Ds.vp(bottom = Ds.dp(act, 10)))
@@ -330,11 +330,17 @@ class KnowledgePage(private val act: Activity) {
             try {
                 val r = JSONObject(bridge.callAttr("knowledge_compact_json").toString())
                 val removed = r.optInt("removed")
+                val pruned = r.optJSONObject("pruned")
+                val facts = pruned?.optInt("facts_pruned") ?: 0
+                val tasks = pruned?.optInt("tasks_pruned") ?: 0
+                val msg = when {
+                    removed > 0 || facts > 0 || tasks > 0 ->
+                        "合并 $removed 条重复，淘汰 $facts 条超容事实，清理 $tasks 个过期 run"
+                    else -> "知识库很整洁，无需整理"
+                }
                 main.post {
                     android.widget.Toast.makeText(
-                        act,
-                        if (removed > 0) "已合并 $removed 条同义重复" else "没有发现同义重复",
-                        android.widget.Toast.LENGTH_SHORT).show()
+                        act, msg, android.widget.Toast.LENGTH_SHORT).show()
                     load(section)
                 }
             } catch (e: Exception) {

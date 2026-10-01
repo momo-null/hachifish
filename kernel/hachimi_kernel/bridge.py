@@ -995,23 +995,27 @@ def knowledge_clear_json(scope="memory"):
 
 
 def knowledge_compact_json():
-    """回溯合并 MEMORY.md 存量重复条目（P2-R 语义去重收口）。
+    """整理知识：回溯合并存量重复 + 按容量边界淘汰（P2-R §8.2）。
 
-    ``_merge_memory_sections`` 的语义去重只作用于**新增**条目（保护人工编辑），
-    调参前沉淀的重复会一直留在库里 —— 知识页「合并重复」按钮 / 迁移时手动触发。
-    返回 ``{ok, removed}``；removed=0 表示当前无同义重复。
+    - 合并：``_merge_memory_sections`` 的语义去重只作用于**新增**条目（保护人工
+      编辑），调参前沉淀的重复会一直留在库里；
+    - 淘汰：知识是**有槽位的缓存**，超容时按「印证次数 + 新鲜度」淘汰最差的，
+      并把过期 rollout / run 资产一并清理（手机端不是企业服务，必须有上限）。
+
+    返回 ``{ok, removed, pruned}``；removed=0 / pruned=0 表示当前无需整理。
     """
     try:
-        from hachimi_kernel.curator import compact_memory_master
+        from hachimi_kernel.curator import compact_memory_master, maintain_capacity
         before = 0
         p = P.memory_master()
         if p.exists():
             before = len(p.read_text(encoding="utf-8").splitlines())
         removed = compact_memory_master()
-        print("[knowledge] compact memory: removed=%d duplicate entries" % removed,
-              flush=True)
-        return json.dumps({"ok": True, "removed": removed, "lines_before": before},
-                          ensure_ascii=False)
+        cap = maintain_capacity()
+        print("[knowledge] compact: removed=%d duplicates, capacity=%s"
+              % (removed, cap), flush=True)
+        return json.dumps({"ok": True, "removed": removed, "lines_before": before,
+                           "pruned": cap}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e),
                            "removed": 0}, ensure_ascii=False)
