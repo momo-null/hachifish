@@ -1,0 +1,238 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hachifish · 会话列表交互流程预览（V13 实际效果）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#F4F3EE; color:#1A1B1C; font-family:'SF Pro Display','PingFang SC','Segoe UI',Arial,sans-serif; line-height:1.5; padding:28px 24px 90px; }
+  h1 { font-size:22px; font-weight:700; color:#0C447C; margin-bottom:4px; }
+  .sub { color:#888780; font-size:13px; margin-bottom:36px; }
+  :root {
+    --bg:#F4F3EE; --primary:#185FA5; --accent:#85B7EB; --light:#B5D4F4;
+    --text:#1A1B1C; --text2:#6B7280; --text3:#9AA0A6;
+    --card:#FFFFFF; --border:#E4E3DD; --green:#52C41A; --red:#EA6668;
+  }
+  .flow { display:flex; flex-wrap:wrap; gap:36px; align-items:flex-start; }
+  .stage { display:flex; flex-direction:column; align-items:center; }
+  .step-tag { font-size:12px; font-weight:700; color:#fff; background:#185FA5; border-radius:12px; padding:3px 12px; margin-bottom:10px; }
+  .phone { width:330px; height:660px; background:#F4F3EE; border:9px solid #E4E3DD; border-radius:44px; overflow:hidden; position:relative; box-shadow:0 16px 40px rgba(0,0,0,.08); display:flex; flex-direction:column; }
+  .status-bar { height:40px; display:flex; justify-content:center; align-items:center; background:#F4F3EE; border-bottom:1px solid #E4E3DD; }
+  .status-text { font-size:12px; color:#888780; }
+  .screen { flex:1; display:flex; flex-direction:column; overflow:hidden; background:#F4F3EE; position:relative; }
+  .chat-header { display:flex; align-items:center; gap:8px; padding:10px 12px; background:#fff; border-bottom:1px solid #E4E3DD; }
+  .chat-header-avatar { width:34px; height:34px; border-radius:50%; background:#B5D4F4; overflow:hidden; display:flex; align-items:center; justify-content:center; font-size:17px; flex-shrink:0; }
+  .chat-header-avatar img { width:100%; height:100%; object-fit:cover; }
+  .chat-header-info { flex:1; }
+  .chat-header-name { font-size:14px; font-weight:600; color:#1A1B1C; }
+  .chat-header-status { font-size:11px; color:#52C41A; display:flex; align-items:center; gap:4px; }
+  .chat-header-status::before { content:''; width:6px; height:6px; background:#52C41A; border-radius:50%; }
+  .chat-header-status.idle { color:#888780; } .chat-header-status.idle::before { background:#888780; }
+  .hbtn { width:32px; height:32px; border-radius:50%; border:none; background:transparent; font-size:15px; cursor:pointer; color:#6B7280; display:flex; align-items:center; justify-content:center; }
+  .hbtn:active { background:#F4F3EE; }
+  .hbtn.hl { background:#185FA5; color:#fff; outline:3px solid rgba(24,95,165,.25); outline-offset:2px; animation:pulseHl 1.4s infinite; }
+  @keyframes pulseHl { 0%,100%{outline-offset:2px} 50%{outline-offset:5px} }
+  .chat-area { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .msg-row { display:flex; gap:8px; align-items:flex-end; }
+  .msg-row.user { flex-direction:row-reverse; }
+  .msg-avatar { width:28px; height:28px; border-radius:50%; flex-shrink:0; background:#B5D4F4; display:flex; align-items:center; justify-content:center; font-size:13px; overflow:hidden; }
+  .msg-avatar img { width:100%; height:100%; object-fit:cover; }
+  .msg-row.user .msg-avatar { background:#185FA5; color:#fff; font-size:12px; font-weight:600; }
+  .msg-bubble { padding:10px 14px; border-radius:16px; font-size:13.5px; line-height:1.5; max-width:72%; }
+  .msg-row.user .msg-bubble { background:#185FA5; color:#fff; border-bottom-right-radius:5px; }
+  .msg-row.assistant .msg-bubble { background:#fff; color:#1A1B1C; border:1px solid #E4E3DD; border-bottom-left-radius:5px; }
+  .tool-card { align-self:stretch; margin-left:36px; background:#fff; border:1px solid #E4E3DD; border-radius:12px; padding:9px 11px; }
+  .tool-head { display:flex; align-items:center; gap:7px; }
+  .tool-name { font-size:11.5px; font-weight:600; font-family:ui-monospace,monospace; color:#1A1B1C; }
+  .tool-badge { margin-left:auto; font-size:9px; font-weight:700; padding:2px 7px; border-radius:4px; background:#52C41A; color:#fff; }
+  .done-panel { margin:0 2px; background:#fff; border:1px solid #E4E3DD; border-radius:14px; padding:12px; position:relative; }
+  .done-head { display:flex; align-items:center; gap:9px; margin-bottom:8px; }
+  .done-ic { width:28px; height:28px; border-radius:50%; background:#1452C41A; color:#3D8B13; display:flex; align-items:center; justify-content:center; font-weight:700; }
+  .done-t { font-size:14px; font-weight:600; }
+  .done-s { font-size:10.5px; color:#888780; }
+  .done-fish { position:absolute; right:8px; bottom:4px; width:74px; }
+  .input-area { padding:8px 10px 10px; background:#fff; border-top:1px solid #E4E3DD; display:flex; gap:8px; align-items:center; }
+  .input-box { flex:1; background:#F4F3EE; border-radius:20px; padding:10px 14px; font-size:13px; color:#9AA0A6; }
+  .send-btn { width:34px; height:34px; background:#185FA5; color:#fff; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:15px; }
+
+  /* 会话面板（V13 焦点） */
+  .sessions { position:absolute; inset:0; background:#F4F3EE; display:flex; flex-direction:column; animation:slideUp .28s ease-out; }
+  @keyframes slideUp { from{transform:translateY(4%); opacity:0} to{transform:none; opacity:1} }
+  .sessions-head { display:flex; align-items:center; gap:8px; padding:12px 14px; background:#fff; border-bottom:1px solid #E4E3DD; }
+  .sessions-title { flex:1; font-size:15px; font-weight:600; }
+  .new-btn { font-size:12px; font-weight:600; color:#fff; background:#185FA5; border:none; border-radius:9px; padding:7px 13px; cursor:pointer; }
+  .close-btn { font-size:15px; color:#888780; background:none; border:none; cursor:pointer; padding:4px 6px; }
+  .sessions-list { flex:1; overflow-y:auto; padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+  .s-row { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #E4E3DD; border-radius:12px; padding:12px; cursor:pointer; }
+  .s-row:active { background:#FBFBF9; }
+  .s-row.current { border:1.5px solid #185FA5; box-shadow:0 2px 8px rgba(24,95,165,.10); }
+  .s-glyph { font-size:14px; width:16px; text-align:center; }
+  .s-col { flex:1; min-width:0; }
+  .s-title { font-size:13px; color:#1A1B1C; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .s-sub { font-size:10.5px; color:#888780; margin-top:1px; }
+  .s-tag { font-size:10px; font-weight:700; color:#185FA5; background:#E8F1FA; border-radius:4px; padding:2px 7px; }
+
+  /* 切换中/完成后态 */
+  .loading-dots { display:flex; gap:4px; padding:4px 0 40px; justify-content:center; }
+  .ld { width:7px; height:7px; background:#B5D4F4; border-radius:50%; animation:blink 1.2s infinite; }
+  .ld:nth-child(2){animation-delay:.2s} .ld:nth-child(3){animation-delay:.4s}
+  @keyframes blink { 0%,100%{opacity:.3} 50%{opacity:1} }
+  .toast { position:absolute; bottom:76px; left:50%; transform:translateX(-50%); background:#1A1B1C; color:#fff; font-size:11.5px; padding:8px 16px; border-radius:10px; white-space:nowrap; z-index:5; }
+
+  .arrow { font-size:30px; color:#85B7EB; align-self:center; margin-top:280px; }
+  .stage-cap { margin-top:12px; max-width:330px; text-align:center; font-size:12.5px; color:#888780; }
+  .stage-cap b { color:#0C447C; }
+  .notes { margin-top:44px; background:#fff; border:1px solid #E4E3DD; border-radius:16px; padding:22px 26px; }
+  .notes h3 { font-size:15px; color:#0C447C; margin-bottom:10px; }
+  .notes li { font-size:13px; color:#6B7280; margin:6px 0 6px 18px; }
+</style>
+</head>
+<body>
+
+<h1>会话列表 · 交互流程预览</h1>
+<div class="sub">V13 实际效果三步流：聊天页（🗂 在头部右侧）→ 展开会话面板 → 点击切换回对话流 · 与已实现代码逐像素对应</div>
+
+<div class="flow">
+
+<!-- 第一步：聊天页常态（🗂 高亮） -->
+<div class="stage">
+  <div class="step-tag">① 聊天页 · 常态</div>
+  <div class="phone">
+    <div class="status-bar"><span class="status-text">Hachifish</span></div>
+    <div class="screen">
+      <div class="chat-header">
+        <div class="chat-header-avatar"><img src="../assets/big_fish/avatar.png" alt="" onerror="this.outerHTML='🐋'"></div>
+        <div class="chat-header-info">
+          <div class="chat-header-name">大肥鱼</div>
+          <div class="chat-header-status">任务完成 · 求夸奖</div>
+        </div>
+        <button class="hbtn">⏸</button><button class="hbtn">⏹</button>
+        <button class="hbtn hl">🗂</button>
+      </div>
+      <div class="chat-area">
+        <div class="msg-row user"><div class="msg-avatar">主</div><div class="msg-bubble">打开便签，写一条「买牛奶」提醒</div></div>
+        <div class="msg-row assistant"><div class="msg-avatar"><img src="../assets/big_fish/avatar.png" alt="" onerror="this.outerHTML='🐋'"></div><div class="msg-bubble">收到！先看看桌面都有啥～</div></div>
+        <div class="tool-card">
+          <div class="tool-head"><span>📁</span><span class="tool-name">move_files</span><span class="tool-badge">DONE</span></div>
+        </div>
+        <div class="done-panel">
+          <div class="done-head">
+            <div class="done-ic">✓</div>
+            <div><div class="done-t">办好了~</div><div class="done-s">23 个文件 · 23.5s</div></div>
+          </div>
+          <img class="done-fish" src="../assets/big_fish/04_done.png" alt="" onerror="this.outerHTML='<div style=&quot;position:absolute;right:8px;bottom:4px;font-size:34px;&quot;>🐋</div>'">
+        </div>
+      </div>
+      <div class="input-area"><div class="input-box">主人，说点什么…</div><div class="send-btn">↑</div></div>
+    </div>
+  </div>
+  <div class="stage-cap"><b>🗂 在头部最右</b>——任务运行中该按钮点击会提示「先停止再切换」；平时点击展开会话面板</div>
+</div>
+
+<div class="arrow">→</div>
+
+<!-- 第二步：会话面板展开 -->
+<div class="stage">
+  <div class="step-tag">② 点击 🗂 · 会话面板展开</div>
+  <div class="phone">
+    <div class="status-bar"><span class="status-text">Hachifish</span></div>
+    <div class="screen">
+      <!-- 底层：被盖住的对话流（隐约可见） -->
+      <div class="chat-header" style="filter:blur(0);">
+        <div class="chat-header-avatar"><img src="../assets/big_fish/avatar.png" alt="" onerror="this.outerHTML='🐋'"></div>
+        <div class="chat-header-info"><div class="chat-header-name">大肥鱼</div><div class="chat-header-status idle">待命中</div></div>
+      </div>
+      <div class="sessions">
+        <div class="sessions-head">
+          <div class="sessions-title">会话</div>
+          <button class="new-btn">＋ 新建会话</button>
+          <button class="close-btn">✕</button>
+        </div>
+        <div class="sessions-list">
+          <div class="s-row current">
+            <div class="s-glyph" style="color:#3D8B13">✓</div>
+            <div class="s-col">
+              <div class="s-title">打开便签，写一条「买牛奶」提醒</div>
+              <div class="s-sub">2 小时前 · 8 步</div>
+            </div>
+            <span class="s-tag">当前</span>
+          </div>
+          <div class="s-row">
+            <div class="s-glyph" style="color:#3D8B13">✓</div>
+            <div class="s-col">
+              <div class="s-title">你好，你是谁？</div>
+              <div class="s-sub">昨天 · 对话</div>
+            </div>
+          </div>
+          <div class="s-row">
+            <div class="s-glyph" style="color:#A04042">✗</div>
+            <div class="s-col">
+              <div class="s-title">打开时钟，定一个 7:30 的闹钟</div>
+              <div class="s-sub">3 天前 · 失败</div>
+            </div>
+          </div>
+          <div class="s-row">
+            <div class="s-glyph" style="color:#9AA0A6">·</div>
+            <div class="s-col">
+              <div class="s-title">问问大肥鱼你能帮我做什么</div>
+              <div class="s-sub">09-21 · 待命</div>
+            </div>
+          </div>
+          <div class="s-row">
+            <div class="s-glyph" style="color:#9AA0A6">·</div>
+            <div class="s-col">
+              <div class="s-title">打开便签写点东西</div>
+              <div class="s-sub">09-18 · 待命</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="stage-cap">行 = <b>状态符 + 首条消息 + 相对时间·步数</b>；当前会话描边高亮；✕ 或点行即收起/切换；「＋新建会话」清空流、下条消息开新 task</div>
+</div>
+
+<div class="arrow">→</div>
+
+<!-- 第三步：切换后回到对话流 -->
+<div class="stage">
+  <div class="step-tag">③ 点选「你好，你是谁？」· 切换完成</div>
+  <div class="phone">
+    <div class="status-bar"><span class="status-text">Hachifish</span></div>
+    <div class="screen">
+      <div class="chat-header">
+        <div class="chat-header-avatar"><img src="../assets/big_fish/avatar.png" alt="" onerror="this.outerHTML='🐋'"></div>
+        <div class="chat-header-info">
+          <div class="chat-header-name">大肥鱼</div>
+          <div class="chat-header-status idle">待命中</div>
+        </div>
+        <button class="hbtn">🗂</button>
+      </div>
+      <div class="chat-area">
+        <div class="msg-row user"><div class="msg-avatar">主</div><div class="msg-bubble">你好，你是谁？</div></div>
+        <div class="msg-row assistant"><div class="msg-avatar"><img src="../assets/big_fish/avatar.png" alt="" onerror="this.outerHTML='🐋'"></div><div class="msg-bubble">主人你好呀～我是大肥鱼，你的手机小帮手！派个活给我吧？</div></div>
+        <div class="toast">已切换到该会话，继续聊</div>
+      </div>
+      <div class="input-area"><div class="input-box">主人，说点什么…</div><div class="send-btn">↑</div></div>
+    </div>
+  </div>
+  <div class="stage-cap">切到的会话历史<b>完整回放</b>（session jsonl 单一真源）；顶部轻提示确认；输入即续聊该会话（同 task_id 追加轮次）</div>
+</div>
+
+</div>
+
+<div class="notes">
+  <h3>与实现的对应关系</h3>
+  <ul>
+    <li><b>入口位置</b>：ChatPage 头部 controlBtn("🗂") → openSessions() —— 对应左图头部右侧按钮</li>
+    <li><b>面板形态</b>：body 内覆盖层（FrameLayout 叠在对话流上），非跳转新页 —— 对应中图滑出面板</li>
+    <li><b>数据面</b>：list_tasks_json（行数据）+ session_messages_json（切换回放）—— kernel K6 已实现并有端到端测试</li>
+    <li><b>状态符</b>：SessionUi.stateLabel —— ✓ 完成（含对话轮）/ ✗ 失败 / ▶ 进行中 / · 待命</li>
+    <li><b>冷启动</b>：App 重启自动恢复 last_task_id 会话（不弹面板，直接回到左图形态并已回放历史）</li>
+    <li><b>运行中保护</b>：sending=true 时点 🗂 只提示不展开，防止事件流串台</li>
+  </ul>
+</div>
+
+</body>
+</html>

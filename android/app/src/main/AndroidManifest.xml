@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 红线 R2：权限最小集。任何新增权限须在 spec/redlines.md 评审记录 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- specialUse 类型 FGS 的配套权限（内核前台宿主；normal 级，零用户交互） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 前台引导模式悬浮叙述面板（S3）：TYPE_APPLICATION_OVERLAY 需要 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Android 11+ 包可见性：launch_app 原语需要能看到可启动的测试 App（架构 §4.1 原语 7） -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Hachimi.Light"
+        android:allowBackup="false">
+
+        <!-- 知识导出 zip 分享（P2 DoD5）：仅暴露 cacheDir/share/ -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.hachimi.app.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <activity android:name=".MainActivity" android:exported="true"
+            android:windowSoftInputMode="adjustResize|stateHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- P0：BYOK 设置页（Keystore 存取，product_milestones.md P0 DoD3） -->
+        <activity android:name=".SettingsActivity" android:exported="false" />
+
+        <!-- P4：角色设置页（大肥鱼×我 双区；人设→character.md 注入） -->
+        <activity android:name=".RoleSettingsActivity" android:exported="false" />
+
+        <!-- 八原语调试面板（原 MainActivity 调试形态，研究/排障用） -->
+        <activity android:name=".DebugPanelActivity" android:exported="false" />
+
+        <!-- S1 首次初始化四步引导（权限引导仅首次出现） -->
+        <activity android:name=".OnboardingActivity" android:exported="false" />
+
+        <!-- S4 真分屏控制台页：Hachimi 分屏后本 Activity 即 agent 下半屏 -->
+        <activity android:name=".ConsoleActivity" android:exported="false" />
+
+        <!-- 任务详情页（执行轨迹回放 + 同任务继续对话） -->
+        <activity android:name=".TaskDetailActivity" android:exported="false" />
+
+        <!-- S8 实验模式骨架（设置→实验→版本号连点 5 次进入） -->
+        <activity android:name=".ExperimentActivity" android:exported="false" />
+
+        <!-- Canvas 盲区测试页（P1 DoD3 fixture）：自绘目标零语义，仅组件显式可达 -->
+        <activity android:name=".CanvasProbeActivity" android:exported="true"
+            android:label="CanvasProbe" />
+
+        <!-- 授权门控弹层（S3 GateUI）：由无障碍服务在敏感操作前拉起 -->
+        <activity
+            android:name=".gate.GateActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.Dialog"
+            android:excludeFromRecents="true" />
+
+        <service
+            android:name=".HachimiAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- 内核宿主：specialUse 类型（Android 14+ 要求 FGS 必须带合法类型：
+             mediaProjection 未授权即炸、type=0/无类型也炸——2026-09-30 魅族
+             Android 16 三种死法实录；specialUse 无授权/无时限，aapt2 编译期
+             解析对旧平台无害），投影升格职责移交 ProjectionService -->
+        <service
+            android:name=".KernelHostService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="embedded-python-kernel-and-loopback-host" />
+        </service>
+
+        <!-- 录屏前台服务：仅在用户完成 MediaProjection 授权后由 ProjectionService.start
+             拉起（此时 project_media appop 在，类型校验必过） -->
+        <service
+            android:name=".ProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- 调试桥：仅 debuggable 构建生效（代码内门控），release 哑接收器 -->
+        <receiver
+            android:name=".DebugBridgeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.hachimi.app.DEBUG_PRIMITIVE" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

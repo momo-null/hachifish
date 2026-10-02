@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hachifish</string>
+    <string name="a11y_title">Hachifish 操作通道</string>
+    <string name="a11y_description">Hachifish 通过官方无障碍 API 观察界面结构并执行点击/输入/手势操作。仅用于本机研究实验，可在系统设置中随时关闭。</string>
+    <string name="notif_channel_kernel">内核服务</string>
+    <string name="notif_kernel_title">Hachifish 内核运行中</string>
+    <string name="hello_stub">Hachifish v0.1 · M1\' 骨架\n红色虚线定位、悬浮叙述面板与模式切换随里程碑推进接入。</string>
+</resources>

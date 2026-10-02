@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 知识导出 zip 分享路径（P2 DoD5）：仅暴露 cacheDir/share 根 -->
+<paths>
+    <cache-path name="share" path="share/" />
+</paths>
