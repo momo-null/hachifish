@@ -50,6 +50,28 @@ def read_facts():
         P.memory_master().read_text(encoding="utf-8")).get(C._FACT_SEC) or []
 
 
+class _MarkBrain:
+    """假 brain：按关键词勾选被印证/打脸的条目（印证判定已从脚本移出）。"""
+
+    def __init__(self, keywords):
+        self.keywords = keywords
+
+    def chat(self, messages, tools):
+        import json
+        prompt = messages[-1]["content"]
+        picked = []
+        for ln in prompt.splitlines():
+            ln = ln.strip()
+            if not ln[:1].isdigit():
+                continue
+            num, _, text = ln.partition(". ")
+            if any(k in text for k in self.keywords):
+                picked.append(int(num))
+        return {"content": json.dumps(
+            {"corroborated": picked, "contradicted": picked, "note": "stub"},
+            ensure_ascii=False)}
+
+
 def test_defaults_are_bounded():
     """容量常量必须存在且有限（手机端不是企业服务，必须有上限）。"""
     for name in ("FACTS_PER_APP_MAX", "FACTS_TOTAL_MAX", "SKILLS_MAX",
@@ -58,36 +80,30 @@ def test_defaults_are_bounded():
     assert C.FACTS_APP_FLOOR <= C.FACTS_PER_APP_MAX
 
 
-def test_corroborate_bumps_hits_for_seen_app():
-    """本次 run 跑过的 App，其事实被点亮（hits+1）。"""
+def test_corroborate_bumps_hits_for_llm_marked_facts():
+    """印证由 LLM 判定：被勾选的条目 hits+1（无 brain 时不猜，命中为 0）。"""
+    setup_tmp_root()
+    write_facts([CLOCK_FACTS[0]])
+    C.corroborate_facts('1. launch_app({"package": "org.fossify.clock"}) -> ok',
+                        brain=_MarkBrain(["alarm_fab"]))
+    meta = C._load_fact_meta()
+    assert list(meta.values())[0]["hits"] == 1
+    # 无 brain：脚本不再用"包名/控件出现"规则猜印证
     setup_tmp_root()
     write_facts([CLOCK_FACTS[0]])
     C.corroborate_facts('1. launch_app({"package": "org.fossify.clock"}) -> ok')
-    meta = C._load_fact_meta()
-    assert list(meta.values())[0]["hits"] == 1
+    assert not C._load_fact_meta()
 
 
-def test_corroborate_cluster_credits_leader_only():
-    """同义簇内只给代表加分 —— 变体之间靠此收敛（弱者淘汰代替精确归并）。"""
-    setup_tmp_root()
-    a = "org.fossify.notes 编辑笔记后按返回键即自动保存 text_note_view 的内容"
-    b = "org.fossify.notes 编辑正文后按 back 返回会自动保存 text_note_view 的内容"
-    write_facts([a, b])
-    C.corroborate_facts('9. tap_by_id({"view_id": "org.fossify.notes:id/text_note_view"}) -> ok')
-    meta = C._load_fact_meta()
-    # 两条都被登记，但簇内只有代表被加分（另一条保持 0）
-    assert sum(int(v["hits"]) for v in meta.values()) == 1
-
-
-def test_prune_drops_near_verbatim_duplicate_only():
-    """删除路径保守：近乎逐字重复才砍；共享控件但不相同的两条必须都留下。"""
+def test_prune_drops_literal_duplicate_only():
+    """删除路径只砍逐字重复；语义相近的两条都保留（语义归 LLM，不归脚本）。"""
     setup_tmp_root()
     near = CLOCK_FACTS[0]
-    write_facts([near, near + "。", CLOCK_FACTS[2], CLOCK_FACTS[3]])
+    write_facts([near, near, CLOCK_FACTS[2], near + "（同义改写但非逐字）"])
     assert C.prune_memory() == 1
     left = read_facts()
     assert len(left) == 3
-    assert CLOCK_FACTS[2] in left and CLOCK_FACTS[3] in left
+    assert CLOCK_FACTS[2] in left
 
 
 def test_prune_enforces_per_app_cap():
@@ -135,12 +151,10 @@ def test_prune_prefers_well_corroborated_facts():
     C.FACTS_PER_APP_MAX = 3
     try:
         write_facts(CLOCK_FACTS)
-        # 证据只含具体控件、不含包名：包名会把该 App 的所有事实一起点亮，
-        # 那样就分不出高下了（跨 App 竞争时仍然有效，此处要验的是 App 内部）
-        evidence = ('2. tap_by_id({"view_id": "alarm_fab"}) -> ok\n'
-                    '3. tap_by_id({"view_id": "edit_alarm"}) -> ok')
-        for _ in range(3):                     # 反复印证前两条
-            C.corroborate_facts(evidence)
+        # 印证由 LLM 判定：假 brain 勾选含 alarm_fab / edit_alarm 的两条
+        evidence = '2. tap_by_id({"view_id": "alarm_fab"}) -> ok'
+        for _ in range(3):                     # 反复印证那两条
+            C.corroborate_facts(evidence, brain=_MarkBrain(["alarm_fab", "edit_alarm"]))
         C.prune_memory()
         left = read_facts()
         assert CLOCK_FACTS[0] in left          # alarm_fab
@@ -156,7 +170,7 @@ def test_contradiction_penalises_and_evicts():
     write_facts(CLOCK_FACTS[:3])
     evidence = '2. tap_by_id({"view_id": "alarm_fab"}) -> ERR: view not found'
     for _ in range(C.FACT_FAILS_EVICT):
-        C.contradict_facts(evidence)
+        C.contradict_facts(evidence, brain=_MarkBrain(["alarm_fab"]))
     meta = C._load_fact_meta()
     assert sum(int(v.get("fails") or 0) for v in meta.values()
                if isinstance(v, dict) and "fails" in v) >= C.FACT_FAILS_EVICT
@@ -169,8 +183,11 @@ def test_score_penalises_fails():
     setup_tmp_root()
     write_facts([CLOCK_FACTS[0], CLOCK_FACTS[1]])
     now = time.time()
-    C.corroborate_facts('1. tap_by_id({"view_id": "alarm_fab"}) -> ok')
-    C.contradict_facts('1. tap_by_id({"view_id": "material_timepicker_mode_button"}) -> ERR')
+    C.corroborate_facts('1. tap_by_id({"view_id": "alarm_fab"}) -> ok',
+                        brain=_MarkBrain(["alarm_fab"]))
+    C.contradict_facts(
+        '1. tap_by_id({"view_id": "material_timepicker_mode_button"}) -> ERR',
+        brain=_MarkBrain(["material_timepicker_mode_button"]))
     meta = C._load_fact_meta()
     s_ok = C._fact_score(CLOCK_FACTS[0], meta, now)
     s_bad = C._fact_score(CLOCK_FACTS[1], meta, now)

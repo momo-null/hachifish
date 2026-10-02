@@ -16,7 +16,7 @@ import org.json.JSONObject
 
 /**
  * 知识 Tab（K7 接真数据，redesign_plan 原里程碑 P2 完成）：
- * - 技能：kernel skills_list_json（Curator 蒸馏/晋升产出的全局 skill）
+ * - 技能：kernel skills_list_json（**人工维护**的全局 skill；自蒸馏已于 2026-10-02 下线）
  * - 记忆：memory_json（MEMORY.md 聚合视图）+ rollouts_list_json（蒸馏记录）
  * - 弱注入开关状态实时回显（设置页 ↔ 头部 tag 双向同步）
  * 世界模型段保留诚实占位（task 级资产，产品视图后置）。

@@ -58,18 +58,38 @@ def test_ops_are_sanitized():
     assert "上次任务的字面内容" not in block, block
 
 
-# ---------------- 2. 相关度 top-k ----------------
+# ---------------- 2. 选档 top-k（LLM 判定；无 brain 保持原序） ----------------
 
-def test_ranking_prefers_package_hit():
+def test_selection_follows_llm_pick():
     setup_tmp_root()
     a = _mk_skill("clock-skill", "org.fossify.clock")
     b = _mk_skill("notes-skill", "org.fossify.notes")
-    block = KI.build_knowledge_block(
-        "", _payload(a, b),
-        objective="Open the app org.fossify.notes, create a note")
-    i_notes = block.index("notes-skill")
-    i_clock = block.index("clock-skill")
-    assert i_notes < i_clock, block
+
+    class _Pick:
+        def chat(self, messages, tools):
+            return {"content": '{"picked": ["notes-skill"]}'}
+
+    import json as _json
+    from hachimi_kernel.skill_library import set_retrieval_brain
+    set_retrieval_brain(_Pick())
+    try:
+        block = KI.build_knowledge_block(
+            "", _payload(a, b),
+            objective="Open the app org.fossify.notes, create a note")
+    finally:
+        set_retrieval_brain(None)
+    assert "notes-skill" in block and "clock-skill" not in block, block
+
+
+def test_selection_without_brain_keeps_original_order():
+    setup_tmp_root()
+    a = _mk_skill("clock-skill", "org.fossify.clock")
+    b = _mk_skill("notes-skill", "org.fossify.notes")
+    from hachimi_kernel.skill_library import set_retrieval_brain
+    set_retrieval_brain(None)
+    block = KI.build_knowledge_block("", _payload(a, b),
+                                     objective="任意任务描述")
+    assert block.index("clock-skill") < block.index("notes-skill"), block
 
 
 def test_max_skills_truncates():

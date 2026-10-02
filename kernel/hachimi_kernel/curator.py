@@ -1,19 +1,29 @@
 """M4b.3 Curator：触发式静默维护知识库锐度。
 
 Hermes Autonomous Background Curator 范式；Master Spec §6 决策「仅触发式，不挂定时器」。
-任务完成后触发一次（由 ``tool_loop._finish`` 调 ``run_once``），做四件维护：
+任务完成后触发一次（由 ``tool_loop._finish`` 调 ``run_once``），做三件维护：
 
 1. **prune_trajectories**：清理过期轨迹（raw 30 天 / failures 14 天），调 TrajectoryStore.prune。
 2. **refine_world_model**：精炼 world-model facts —— 去重已 Merge 的冗余、移除陈旧事实。
-3. **review_candidate_skills**：从成功 RunRecord 提取 candidate + 晋升判定（N=3 门）。
-4. **flag_low_quality**：高 retry / 高 brain_intervention / 非稳定成功的轨迹 → 标
+3. **flag_low_quality**：高 retry / 高 brain_intervention / 非稳定成功的轨迹 → 标
    ``excluded_from_sft``，供未来数据集构建过滤。
+
+外加**任务记忆蒸馏**（``distill_task_memory``：轨迹 → 环境事实 → MEMORY.md）与容量维护。
+
+**skill 平面已改为人工维护（2026-10-02 定案）**：自蒸馏不再产出 skill。
+依据：facts 与 skill playbook 同源同一次 LLM 调用、内容 3/3 重叠（本是同一件东西被
+拆成两层）；facts 有效靠的是**载体形态**（短 / 常驻 / 陈述句）而非内容分类——M 臂里
+``android:id/button1`` 这类锚点型条目同样有效；skill 无跨 App 泛化能力，唯一真实用途是
+同 App 近似任务省步（= 操作缓存，天然属于 facts）。四组真机对照里 skill 两种形态
+（机械动作序列 / LLM playbook）均未优于无知识基线，而 facts 三轮方向一致为正。
+⇒ 保留 ``skills/*.md`` 与 ``load_skill`` / ``search_skill`` 供**人工编写**的技能使用，
+自动蒸馏产 skill 的入口（原 ``review_candidate_skills``）已删除。
 
 设计红线：
 - 零场景硬编码（task_id 来自参数，资产跟 task 走）。
 - **非决策者**：不介入任务执行，只在任务后静默维护。
 - 所有操作幂等、容错（单文件损坏不中断整体 prune）。
-- 返回 CuratorReport 供 telemetry / debug。
+- 返回 CuratorReport 供 telemetry / debug（``skills_*`` 字段保留恒 0，勿删）。
 """
 from __future__ import annotations
 
@@ -30,7 +40,6 @@ from typing import Any, Dict, List, Optional
 
 from hachimi_kernel.trajectory import TrajectoryStore
 from hachimi_kernel.world_model import WorldModel
-from hachimi_kernel.skill_library import SkillLibrary, Skill
 from hachimi_kernel.runtime_paths import (
     task_dir,
     tasks_root,
@@ -62,7 +71,8 @@ DEFAULTS: Dict[str, Any] = {
     # flag_low_quality 阈值
     "high_retry_threshold": 3,        # retry_count >= 此值 → low_quality
     "high_intervention_threshold": 0.5,  # brain_intervention_rate >= 此值 → low_quality
-    "min_steps_for_skill": 2,         # 少于此步数的成功轨迹不提取 skill（太短无信息）
+    "min_steps_for_skill": 2,         # 少于此步数不蒸馏（太短无信息；skill 平面下线后
+    #                                   # 它只作用于 facts / lessons 短路，名字保留为兼容）
 }
 
 # 注入视图（memory_summary.md）截断上限（字符）。唯一出处：PUT /memory 与合并再生
@@ -136,9 +146,11 @@ class Curator:
         # K4：纠偏采集开关（红线②：默认关）。仅当显式 true 才把 user_corrections 入库。
         self.corrective_source: bool = bool(cfg.get("corrective_source", False))
         self._last_dedup_hit_rate: float = 0.0  # K5：最近一次蒸馏的去重命中率
-        # P2-R：可选蒸馏大脑（facts LLM 提取用）。Curator 自身仍零 brain 依赖 ——
-        # bridge 注入 BYOK client；None = 纯启发式（facts 无源时保持空）。
+        # P2-R：可选蒸馏大脑（facts/skill LLM 提取用）。Curator 自身仍零 brain
+        # 依赖 —— bridge 注入 BYOK client；None = 纯启发式（facts 为空、
+        # **不再产生任何技能**：机械转录已被证伪，2026-10-02 拍板）。
         self.brain = None
+        self._extract_cache = None      # (run_record 身份, facts, skill_raw)
 
     # ==================================================================
     # 公开入口：任务完成后触发一次
@@ -152,7 +164,7 @@ class Curator:
 
         Args:
             run_record: 刚结束的 RunRecord dict（含 success/steps/retry_count 等）。
-                        若提供，则用于 review_candidate_skills + flag_low_quality。
+                        若提供，则用于 flag_low_quality + 任务记忆蒸馏。
 
         Returns:
             CuratorReport
@@ -174,17 +186,7 @@ class Curator:
         except Exception as e:
             report.errors.append(f"refine_world_model: {type(e).__name__}: {e}")
 
-        # 3. review candidate skills（从刚结束的 run_record 提取）
-        if run_record is not None:
-            try:
-                skill_result = self.review_candidate_skills(run_record)
-                report.skills_reviewed = skill_result["reviewed"]
-                report.skills_promoted = skill_result["promoted"]
-                report.skills_created = skill_result["created"]
-            except Exception as e:
-                report.errors.append(f"review_candidate_skills: {type(e).__name__}: {e}")
-
-        # 4. flag low-quality（从刚结束的 run_record 判定）
+        # 3. flag low-quality（从刚结束的 run_record 判定）
         if run_record is not None:
             try:
                 flagged = self.flag_low_quality(run_record)
@@ -215,7 +217,8 @@ class Curator:
                 # 证据=轨迹摘要：本次跑过的 App/控件会点亮对应事实，让"常用"胜出。
                 try:
                     cap = maintain_capacity(evidence=_trajectory_digest(run_record),
-                                            success=bool(run_record.get("success")))
+                                            success=bool(run_record.get("success")),
+                                            brain=self.brain)
                     if any(cap.values()):
                         print("[curator] capacity maintained: %s" % cap, flush=True)
                 except Exception as e:
@@ -319,87 +322,93 @@ class Curator:
 
     # ==================================================================
     # 3. facts LLM 提取（P2-R：环境事实生产者，对齐 TDB extraction）
+    #
+    # **2026-10-02：skill 字段整体删除。** 原来一次调用同时产出 facts + skill，
+    # 但两者同源、内容 3/3 重叠（见模块 docstring 的定案依据）。facts 是唯一有实测
+    # 收益的资产；skill 改由人工维护。⇒ 本 prompt 只产出 facts，条数上限提到 5。
     # ==================================================================
 
-    _FACTS_PROMPT = (
-        "你是知识蒸馏器。下面是一次手机 GUI 任务的成功执行轨迹（已脱敏，"
+    _EXTRACT_PROMPT = (
+        "你是手机 GUI 任务的知识蒸馏器。下面是一次成功执行轨迹（已脱敏："
         "type_text 的具体内容以 <text> 代替）。\n"
-        "提取 2-5 条【跨任务可复用的环境事实】：只描述应用/系统的行为规律与 UI "
-        "陷阱（例如「某按钮在 X 条件下静默无效」「空列表没有占位行」「某类控件 "
-        "不可点需坐标点按」），禁止包含本次任务的临时内容（具体输入文本、任务目"
-        "标、页面临时状态）。每条一行，以 \"- \" 开头，直接输出条目，不要解释。\n\n"
+        "输出**一个 JSON 对象**（可用 ```json 包裹，不要输出别的解释）：\n"
+        '{{"facts": ["跨任务可复用的环境事实 1-5 条：只写应用/系统行为规律与 UI 陷阱'
+        '（如「某按钮在 X 条件下静默无效」「某类控件不可点需坐标点按」），'
+        '禁止包含本次任务的临时内容"]}}\n'
+        "facts 的写法要求：\n"
+        "1. 每条是一句陈述，≤60 字，描述**环境本身**的规律，不写操作步骤；\n"
+        "2. 禁止出现本次任务的临时内容（搜索词、标签文本、具体闹钟时间等）；\n"
+        "3. 若轨迹只有操作过程、观察不到环境规律，就交白卷（facts 为空列表）——"
+        "交白卷是正确答案，凑数写出来的假规律是错误答案。\n\n"
         "轨迹：\n{digest}"
     )
 
-    def _extract_facts_via_llm(self, run_record: Dict[str, Any]) -> List[str]:
-        """成功轨迹 → LLM 提取环境事实（P2-R；对齐 TDB extraction 环节）。
+    def _llm_extract(self, run_record: Dict[str, Any]):
+        """成功轨迹 → LLM 蒸馏出环境事实。
 
-        - 无 brain / 轨迹无内容 / 调用失败 / 无产出 → ``[]``（绝不拖垮蒸馏）；
-        - **写入端节流**（对齐 TDB `everyNConversations` / `maxMemoriesPerSession`）：
-          同一 App 在 ``FACT_EXTRACT_COOLDOWN_S`` 内不重复提取（LLM 调用既花钱
-          又往池子里灌水），单次产出上限 ``FACTS_PER_RUN_MAX``；
-        - 输出经条目级清洗（strip / 长度截断），去重交给 ``_merge_memory_sections``。
+        同一 run_record 对象只调用一次（``_extract_facts_via_llm`` 用缓存）。
+        无 brain / 轨迹空 / 调用失败 → ``[]``，绝不拖垮蒸馏。
         """
+        cached = getattr(self, "_extract_cache", None)
+        if cached is not None and cached[0] is run_record:
+            return cached[1]
         if self.brain is None:
             return []
         digest = _trajectory_digest(run_record)
         if not digest:
             return []
-        pkg = _run_app(run_record) or _fact_pkg(digest)
-        if not should_extract_facts(pkg):
-            print("[curator] facts extract skipped (cooldown, app=%s)" % (pkg or "-"),
-                  flush=True)
-            return []
+        reply = None
         try:
             reply = self.brain.chat(
                 [{"role": "user",
-                  "content": self._FACTS_PROMPT.format(digest=digest)}], [])
+                  "content": self._EXTRACT_PROMPT.format(digest=digest)}], [])
         except Exception as e:
-            print("[curator] facts extract failed: %s: %s"
+            print("[curator] llm extract failed: %s: %s"
                   % (type(e).__name__, e), flush=True)
-            return []
         facts: List[str] = []
-        for ln in (reply.get("content") or "").splitlines():
-            ln = _strip_bullet(ln)
-            if len(ln) > 6:
-                facts.append(ln[:200])
-            if len(facts) >= FACTS_PER_RUN_MAX:
-                break
-        mark_facts_extracted(pkg)
+        data = _parse_llm_json((reply or {}).get("content"))
+        if isinstance(data, dict):
+            for ln in (data.get("facts") or []):
+                ln = _strip_bullet(str(ln or ""))
+                if len(ln) > 6:
+                    facts.append(ln[:200])
+                if len(facts) >= FACTS_PER_RUN_MAX:
+                    break
+        else:
+            # 兜底：模型没吐 JSON 时按行格式收 facts
+            for ln in ((reply or {}).get("content") or "").splitlines():
+                ln = _strip_bullet(ln)
+                if len(ln) > 6:
+                    facts.append(ln[:200])
+                if len(facts) >= FACTS_PER_RUN_MAX:
+                    break
+        self._extract_cache = (run_record, facts)
         if facts:
             print("[curator] facts extracted: %d" % len(facts), flush=True)
         return facts
 
+    def _extract_facts_via_llm(self, run_record: Dict[str, Any]) -> List[str]:
+        """成功轨迹 → LLM 提取环境事实（事实侧消费 `_llm_extract` 的结果）。
 
-    def review_candidate_skills(self, run_record: Dict[str, Any]) -> Dict[str, Any]:
-        """从成功 RunRecord 提取 candidate skill + 晋升判定。
-
-        Returns:
-            {reviewed, promoted, created}
+        **写入端节流**（对齐 TDB `everyNConversations`）：同一 App 在
+        ``FACT_EXTRACT_COOLDOWN_S`` 内不重复**合并** facts（LLM 调用本身照常
+        发生 —— 冷却只挡入库，不挡提取）。
         """
-        result = {"reviewed": 0, "promoted": 0, "created": 0}
+        facts = self._llm_extract(run_record)
+        if not facts:
+            return []
+        digest = _trajectory_digest(run_record)
+        pkg = _run_app(run_record) or _fact_pkg(digest)
+        if not should_extract_facts(pkg):
+            print("[curator] facts merge skipped (cooldown, app=%s)" % (pkg or "-"),
+                  flush=True)
+            return []
+        mark_facts_extracted(pkg)
+        # 本次 run 的 App 归属直接落进侧挂索引（不再让每条事实靠文本正则抽包名：
+        # 纯描述性事实抽不出包名 ⇒ 效用永远最低档，滑动窗口里第一个被淘汰）。
+        self._fact_pkg_hint = pkg
+        return facts
 
-        if not run_record.get("success"):
-            return result
-
-        steps = int(run_record.get("steps", 0))
-        if steps < self.min_steps_for_skill:
-            return result
-
-        # 从 run_record 提取 candidate
-        lib = SkillLibrary(task_id=self.task_id)
-        candidate = SkillLibrary.from_run_record(run_record, task_id=self.task_id)
-        if candidate is None:
-            return result
-
-        result["reviewed"] = 1
-        promote_result = lib.promote_or_insert(candidate)
-        if promote_result.get("action") == "created":
-            result["created"] = 1
-        if promote_result.get("promoted"):
-            result["promoted"] = 1
-
-        return result
 
     # ==================================================================
     # 4. flag_low_quality
@@ -719,7 +728,9 @@ class Curator:
 
         master = memory_master()
         existing = master.read_text(encoding="utf-8") if master.exists() else ""
-        new_text, added_f, added_l = _merge_memory_sections(existing, new_facts, new_lessons)
+        new_text, added_f, added_l = _merge_memory_sections(
+            existing, new_facts, new_lessons, brain=self.brain)
+        _register_fact_pkgs(new_facts, getattr(self, "_fact_pkg_hint", ""))
         try:
             master.write_text(new_text, encoding="utf-8")
         except Exception:
@@ -845,152 +856,209 @@ def _trajectory_digest(run_record: Dict[str, Any], max_steps: int = 40) -> str:
     return "\n".join(lines)
 
 
-# 语义去重阈值（重叠率 = 交集 / min(两指纹大小)）。
-# 实测校准（真机提取出的同义句对）：同义 0.29~0.43，不同事实 <= 0.06。
-# 取 0.35：覆盖大部分同义改写，与"不同事实"仍有 6 倍安全边际。
-# 局限：用词完全不同的同义改写（实测最低 0.29）仍会漏 —— 需要 embedding 或
-# LLM 辅助合并，属于后续项（见 doc/knowledge_redesign.md §6.3 遗留）。
-_SIMILAR_THRESHOLD = 0.35
-
-# 两条目各自点名了不同具体控件时的更高门槛（见 _similar 注释）。
-# 取 0.55：高于同义句对实测上限（0.43），留一档余量。
-_DISJOINT_WIDGET_THRESHOLD = 0.55
-
-# 共享具体控件时的降档门槛（见 _similar 注释）：真同义对实测 0.31，
-# 共享控件却讲两件事的 pair 实测 0.19 —— 取 0.25 卡在两者之间。
-_WIDGET_HIT_OVERLAP = 0.25
-
-# 共享引用短语时的降档门槛（见 _similar 注释）：真同义 pair 实测 0.26。
-_ANCHOR_OVERLAP = 0.20
-
-# 具体控件 id（非通用）作为强信号：两条事实都提到同一个具体控件，
-# 极可能讲的是同一件事（例如都讲 material_timepicker_mode_button）。
+# ---------------------------------------------------------------------------
+# 语义判断一律交给 LLM（用户红线：不要脚本化的语义判断）
 #
-# 三种写法都要覆盖（2026-10-02 实测）：完整 resource-id
-# （org.fossify.clock:id/alarm_fab）、反引号里的短 id（`alarm_fab`）、
-# 以及裸写的 snake_case id（alarm_fab / material_timepicker_mode_button）。
+# 被删除的旧实现（2026-10-02 连根移除）：重叠率阈值 0.35 / 控件共享 0.25 /
+# 控件互斥 0.55 / 锚点 0.20、控件 id 正则（resource-id / 反引号短 id /
+# snake_case）、CJK bigram 词面指纹、贪心同义聚类、按"包名或控件出现"判印证。
+# 它们把语义问题写成了规则 + 参数，然后靠真机调参——"规则做不到语义识别"
+# 是本项目反复验证的结论（objective 全等匹配、N=3 晋升形同虚设、entry_id
+# 从未在真机生效，均出自同一类错误）。
 #
-# **不能**把包名当成控件：旧版用「点分 token」匹配，于是 `fossify.clock`
-# 被当成具体控件 —— 同一 App 的任意两条事实都"共享控件"而被误合并
-# （真机 dry-run 实证：底部导航坐标点按 与 悬浮按钮 id 点击 被并成一条）。
-_RES_ID_RE = re.compile(r"[a-z][a-z0-9_.]*:[a-z0-9_]+/([a-z0-9_]+)")
-_BACKTICK_ID_RE = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
-_BACKTICK_ALL_RE = re.compile(r"`([^`]+)`")
-_SNAKE_ID_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
-# 工具名也是 snake_case，但不是控件（否则"都要 type_text"会被当成同义证据）
-_TOOL_WORDS = frozenset({
-    "type_text", "tap_xy", "tap_by_id", "press_back", "press_home", "press_enter",
-    "launch_app", "observe", "screenshot", "look", "wait", "task_done", "swipe",
-    "long_press", "read_view", "scroll",
-})
-_GENERIC_WIDGETS = {"button1", "button2", "android", "id"}
+# 脚本保留的只有簿记职责：逐字精确去重、计数、预算、排序、落盘。
+# ---------------------------------------------------------------------------
+
+_DEDUP_PROMPT = (
+    "你在维护一个手机 GUI agent 的长期记忆库。已有条目与新提取条目如下。\n"
+    "判断每条**新条目**与已有条目的关系，只允许三种裁决：\n"
+    "- duplicate：与某条已有条目讲同一件事（同义改写）⇒ 不入库；\n"
+    "- merge：与某条已有条目讲同一件事但新条目有新增信息 ⇒ 输出把两条合并后的"
+    "一句话（不得丢掉任一方的关键信息）；\n"
+    "- independent：讲的是不同的事（哪怕用词相似、提到同一个控件）⇒ 入库。\n"
+    "判断依据是语义，不是字面相似度：提到同一个控件但讲不同的事（例："
+    "\"该 id 列举\"vs\"必须先点它才打开对话框\"）必须判 independent。\n"
+    "输出一个 JSON 对象：\n"
+    '{{"verdicts": [{{"new": "新条目原文", "decision": "duplicate|merge|independent",'
+    ' "target": "被合并的已有条目原文（duplicate/merge 必填）",'
+    ' "merged": "合并后的一句话（仅 merge 必填）"}}]}}\n'
+    "已有条目：\n{existing}\n\n新条目：\n{incoming}\n"
+)
+
+
+def exact_dedup(items: List[str]) -> List[str]:
+    """逐字精确去重（簿记）：strip + 小写全文比对，保留先到者。"""
+    seen = set()
+    out: List[str] = []
+    for it in items or []:
+        s = _strip_bullet(it)
+        k = s.lower()
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    return out
+
+
+def llm_dedup(existing: List[str], incoming: List[str],
+              brain=None) -> tuple:
+    """LLM 判定同义/合并/独立 → ``(合并后的 existing, 采纳的 incoming)``。
+
+    无 brain / 调用失败 / 解析失败 ⇒ 退化为**逐字精确去重**（宁可不合并，
+    也不靠规则猜语义；重复条目由容量淘汰兜底）。
+    """
+    existing = [s for s in (existing or []) if s and s.strip()]
+    incoming = [s for s in (incoming or []) if s and s.strip()]
+    if not incoming:
+        return existing, []
+    existing = exact_dedup(existing)
+    incoming = exact_dedup([x for x in incoming
+                            if x.lower() not in {e.lower() for e in existing}])
+    if not incoming or brain is None:
+        return existing, incoming
+    try:
+        reply = brain.chat([{"role": "user", "content": _DEDUP_PROMPT.format(
+            existing="\n".join("- %s" % e for e in existing),
+            incoming="\n".join("- %s" % i for i in incoming))}], [])
+        data = _parse_llm_json((reply or {}).get("content"))
+    except Exception as e:
+        print("[curator] llm dedup failed: %s: %s" % (type(e).__name__, e), flush=True)
+        return existing, incoming
+    if not isinstance(data, dict):
+        return existing, incoming
+    merged_map: Dict[str, str] = {}     # 已有条目原文 -> 合并后文本
+    verdict_by_new: Dict[str, str] = {}  # 新条目原文 -> duplicate | independent
+    for v in (data.get("verdicts") or []):
+        if not isinstance(v, dict):
+            continue
+        new = _strip_bullet(str(v.get("new") or ""))
+        dec = str(v.get("decision") or "").strip().lower()
+        tgt = _strip_bullet(str(v.get("target") or ""))
+        mrg = _strip_bullet(str(v.get("merged") or ""))
+        if not new or dec not in ("duplicate", "merge", "independent"):
+            continue
+        verdict_by_new[new] = dec
+        if dec == "merge" and tgt and mrg:
+            merged_map[tgt] = mrg
+    if not verdict_by_new:
+        return existing, incoming
+    out_existing = [merged_map.get(e, e) for e in existing]
+    kept_new = [i for i in incoming
+                if verdict_by_new.get(i, "independent") == "independent"]
+    return out_existing, kept_new
+
+
+_MARKS_PROMPT = (
+    "下面是手机 GUI agent 一次任务的**执行结果摘要**与它记忆库里的事实条目。\n"
+    "判断：这次执行**印证**了哪些条目（条目描述的现象在轨迹里确实出现了/被依赖），"
+    "以及**打脸**了哪些条目（按条目说的做却没生效或行为相反）。\n"
+    "只输出确实被涉及的条目编号，不确定就不选。\n"
+    '{{"corroborated": [编号...], "contradicted": [编号...], "note": "一句话说明"}}\n'
+    "轨迹摘要：\n{evidence}\n\n事实条目：\n{items}\n"
+)
+
+
+_POOL_PROMPT = (
+    "你在维护一个手机 GUI agent 的长期记忆库，下面是**同一分区**的已有条目列表。\n"
+    "找出讲同一件事的重复条目（同义改写）：每组保留信息最全的一条，其余标为删除；"
+    "若重复条目各有对方没有的信息，输出合并后的一句话。\n"
+    "判断依据是语义而非字面相似：提到同一控件但讲不同事的必须各自保留"
+    "（例：\"该 id 的列举\" vs \"必须先点它才打开对话框\"）。\n"
+    "输出一个 JSON 对象：\n"
+    '{{"drop": ["要删除的重复条目原文"], '
+    '"rewrite": [{{"keep": "保留的条目原文", "text": "合并后的一句话"}}]}}\n'
+    "条目列表：\n{items}\n"
+)
+
+
+def llm_dedup_pool(items: List[str], brain=None) -> List[str]:
+    """存量条目之间互判去重（compact 用）→ 返回保留后的列表。
+
+    无 brain ⇒ 只做逐字精确去重。LLM 不可用时不猜：宁可留重复，由容量淘汰兜底。
+    """
+    items = exact_dedup(items)
+    if len(items) < 2 or brain is None:
+        return items
+    try:
+        reply = brain.chat([{"role": "user", "content": _POOL_PROMPT.format(
+            items="\n".join("- %s" % it for it in items))}], [])
+        data = _parse_llm_json((reply or {}).get("content"))
+    except Exception as e:
+        print("[curator] llm pool dedup failed: %s: %s" % (type(e).__name__, e),
+              flush=True)
+        return items
+    if not isinstance(data, dict):
+        return items
+    drop = {_strip_bullet(str(x or "")) for x in (data.get("drop") or [])}
+    rewrite = {}
+    for r in (data.get("rewrite") or []):
+        if isinstance(r, dict):
+            keep = _strip_bullet(str(r.get("keep") or ""))
+            txt = _strip_bullet(str(r.get("text") or ""))
+            if keep and txt:
+                rewrite[keep] = txt
+    out = []
+    for it in items:
+        if it in drop:
+            continue
+        out.append(rewrite.get(it, it))
+    return exact_dedup(out)
+
+
+def llm_marks(items: List[str], evidence: str, brain=None,
+              positive: bool = True) -> List[int]:
+    """LLM 判定本次轨迹印证/打脸了哪些事实条目（返回下标）。
+
+    无 brain ⇒ 返回空（**不猜**）。脚本不做"包名或控件出现即命中"的规则判断。
+    """
+    if brain is None or not items or not evidence:
+        return []
+    try:
+        reply = brain.chat([{"role": "user", "content": _MARKS_PROMPT.format(
+            evidence=evidence[:4000],
+            items="\n".join("%d. %s" % (i + 1, it[:200]) for i, it in enumerate(items)))}], [])
+        data = _parse_llm_json((reply or {}).get("content"))
+    except Exception as e:
+        print("[curator] llm marks failed: %s: %s" % (type(e).__name__, e), flush=True)
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("corroborated" if positive else "contradicted") or []
+    out = []
+    for x in raw:
+        try:
+            i = int(x) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i < len(items):
+            out.append(i)
+    return out
 
 
 def _strip_bullet(text: str) -> str:
-    """去掉条目开头的列表符号（含 LLM 偶发的嵌套写法 ``- - xxx``）。
-
-    2026-10-02 真机：模型返回过 ``- - 文本…``，旧代码只剥一层 ``- ``，
-    于是 MEMORY.md 里出现 ``- - 文本…`` 双层符号，条目内容自带 "- " 前缀，
-    既影响展示也干扰语义比对。
-    """
+    """去掉条目开头的列表符号（含 LLM 偶发的嵌套写法 ``- - xxx``）。"""
     # ``(?:[-*•]+\s*)+``：重复剥 —— "- - x" 只剥一层会留下 "- x"
     return re.sub(r"^(?:[-*•]+\s*)+", "", (text or "").strip()).strip()
 
 
-def _anchors(text: str) -> set:
-    """条目里的**引用短语**（反引号内、含空格或标点，即非纯控件 id 的串）。
-
-    两条事实引用同一句原文（如 ``projection not started``）几乎必然在讲同一件
-    事 —— 真机实证：这类同义改写词面重叠只有 0.26（低于 0.35 阈值）而漏网。
-    """
-    out = set()
-    for m in _BACKTICK_ALL_RE.findall(text or ""):
-        s = m.strip()
-        if len(s) >= 8 and ((" " in s) or (not re.fullmatch(r"[a-z0-9_.:/]+", s))):
-            out.add(s.lower())
-    return out
-
-
-def _anchor_hit(anchors: set, other: str) -> bool:
-    """``anchors`` 中任意引用短语是否作为原文出现在 ``other`` 里。"""
-    t = (other or "").lower()
-    return any(an in t for an in anchors or ())
-
-
-def _widgets(text: str) -> set:
-    """条目里的具体控件 id（排除通用件与工具名；包名不算控件）。"""
-    t = text or ""
-    out = set(_RES_ID_RE.findall(t)) | set(_BACKTICK_ID_RE.findall(t))
-    out |= {m for m in _SNAKE_ID_RE.findall(t) if m not in _TOOL_WORDS}
-    return out - _GENERIC_WIDGETS
-
-
-def _similar(a: str, b: str, threshold: float = None, raw_only: bool = False) -> bool:
-    """两条目是否同义：共享具体控件 id，或语义指纹重叠率 >= 阈值。
-
-    ``raw_only=True``：只用**词面指纹**判定，忽略"共享控件/引用短语"的降门槛
-    捷径 —— 删除路径专用（那条捷径是为召回设计的，用它删数据会误伤）。
-
-    两条都点名了**互不相交**的具体控件 ⇒ 讲的是不同控件，需更强的文字证据
-    才算同义（阈值抬到 ``_DISJOINT_WIDGET_THRESHOLD``）。2026-10-02 真机实证：
-    「时间选择器切文本模式要点 material_timepicker_mode_button」与「必须先点
-    edit_alarm_time 打开对话框」在 0.35 阈值下被误并，丢失了后者的关键信息。
-    """
-    threshold = _SIMILAR_THRESHOLD if threshold is None else float(threshold)
-    if raw_only:
-        fa, fb = _fact_fingerprint(a), _fact_fingerprint(b)
-        if not fa or not fb:
-            return False
-        return len(fa & fb) / max(1, min(len(fa), len(fb))) >= threshold
-    wa, wb = _widgets(a), _widgets(b)
-    if wa & wb:
-        # 共享控件只把门槛降到 _WIDGET_HIT_OVERLAP，不再无条件判同义：
-        # 真机实证「edit_alarm_time 的 id 列举」与「必须先点它打开对话框」
-        # 共享控件却是两件事（文字重叠仅 0.19，真同义对实测 0.31）。
-        threshold = min(threshold, _WIDGET_HIT_OVERLAP)
-    elif wa and wb:
-        threshold = max(threshold, _DISJOINT_WIDGET_THRESHOLD)
-    # 一方引用、另一方原文复述也算同主题（真机：只有 a 带反引号，b 是裸写）
-    aa, ab = _anchors(a), _anchors(b)
-    if (aa & ab) or _anchor_hit(aa, b) or _anchor_hit(ab, a):
-        threshold = min(threshold, _ANCHOR_OVERLAP)
-    fp_a = _fact_fingerprint(a)
-    fp_b = _fact_fingerprint(b)
-    if not fp_a or not fp_b:
-        return False
-    return len(fp_a & fp_b) / max(1, min(len(fp_a), len(fp_b))) >= threshold
-
-
-def _fact_fingerprint(text: str) -> set:
-    """条目语义指纹 = CJK bigram 集合 ∪ 拉丁词元集合（纯标准库，零 embedding）。
-
-    用于识别 LLM 提取出的**同义不同表述**：条目级精确去重（strip+小写全文比对）
-    挡不住「按返回键自动保存」vs「按 back 返回后即写入列表」这类差异。
-    """
-    from hachimi_kernel.skill_library import _cjk_bigrams
-    toks = {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", text or "")}
-    return (toks | _cjk_bigrams(text or "")) or set(str(text or "")[:40])
-
-
-def semantic_dedup(items: List[str], threshold: float = None) -> List[str]:  # noqa: F821
-    """模糊去重：相似度 = 交集 / min(两集合大小)，超阈值视为同一条，保留先到者。
-
-    Omni 可复用：facts / lessons / 纠偏条目都能用同一函数压掉同义重复，
-    避免记忆块随使用次数线性膨胀（2026-10-01：3 次提取就攒出 12 条，
-    其中"自动保存"类事实出现 3 个变体）。
-    """
-    threshold = _SIMILAR_THRESHOLD if threshold is None else float(threshold)
-    out: List[str] = []
-    for it in items or []:
-        s = _strip_bullet(it)
-        if not s:
-            continue
-        # 与 _merge_memory_sections 共用 _similar：控件 id 强信号 + 指纹重叠，
-        # 两条路径判定一致（此前 semantic_dedup 只比指纹，控件规则被漏掉）。
-        if any(_similar(s, kept, threshold) for kept in out):
-            continue
-        out.append(s)
-    return out
+def _parse_llm_json(text: str) -> Optional[Dict[str, Any]]:
+    """从 LLM 回复里抠 JSON 对象（容忍 ```json 围栏与前后废话）。"""
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", t, re.S)
+    if m:
+        t = m.group(1)
+    else:
+        i, j = t.find("{"), t.rfind("}")
+        if i < 0 or j <= i:
+            return None
+        t = t[i:j + 1]
+    try:
+        data = json.loads(t)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _parse_rollout_sections(text: str):
@@ -1057,20 +1125,17 @@ def _render_memory_sections(sections: Dict[str, List[str]]) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def compact_memory_sections(text: str):
-    """回溯合并**已有**条目（P2-R 语义去重收口），返回 ``(新文本, 合并掉条数)``。
+def compact_memory_sections(text: str, brain=None):
+    """回溯合并**已有**条目（LLM 判定同义），返回 ``(新文本, 合并掉条数)``。
 
-    为什么需要单独一个函数：``_merge_memory_sections`` 的去重只发生在**新增**
-    条目对存量（保护人工编辑内容），**存量条目之间从不互相合并**。于是调参前
-    沉淀下的重复会永久留在 MEMORY.md —— 2026-10-02 实测：阈值由 0.45 校准到
-    0.35 后，设备上 12 条事实里仍留着 3 个「自动保存」变体。本函数对存量做
-    一次性合并；纯函数不落盘，Omni 可直接复用。
+    ``_merge_memory_sections`` 的去重只发生在新增 vs 存量（保护人工编辑），
+    存量之间的合并必须显式调用本函数。无 brain ⇒ 只做逐字精确去重。
     """
     sections = _split_memory_sections(text)
     removed = 0
     for key in list(sections):
         items = sections[key] or []
-        kept = semantic_dedup(items)
+        kept = llm_dedup_pool(items, brain)
         removed += len(items) - len(kept)
         sections[key] = kept
     return _render_memory_sections(sections), removed
@@ -1103,11 +1168,6 @@ FACT_FAILS_EVICT = 3
 FACTS_PER_RUN_MAX = 3
 FACT_EXTRACT_COOLDOWN_S = 300
 
-# 淘汰用的同义门槛：比 _SIMILAR_THRESHOLD 严格得多。
-# 印证聚类可以松（判错了只是把分数加给另一条），**删除必须保守** —— 真机实证
-# (7,9) 两条共享 edit_alarm_time 却是不同事实，用 0.35 聚类会把有用的一条删掉。
-_PRUNE_MERGE_THRESHOLD = 0.5
-
 TASK_KEEP_RUNS = 50         # 设备端保留最近 N 个 run 的资产
 TASK_KEEP_DAYS = 7
 TASK_MAX_MB = 100
@@ -1125,6 +1185,27 @@ def _fact_meta_file() -> Path:
 
 def _fact_key(entry: str) -> str:
     return hashlib.sha1(_strip_bullet(entry).lower().encode("utf-8")).hexdigest()[:12]
+
+
+def _register_fact_pkgs(facts: List[str], pkg: str) -> None:
+    """给本次新增事实登记 App 归属（簿记：来自 run 记录，不从文本猜）。"""
+    if not pkg or not facts:
+        return
+    meta = _load_fact_meta()
+    now = time.time()
+    changed = False
+    for f in facts:
+        key = _fact_key(f)
+        rec = meta.get(key)
+        if rec is None:
+            meta[key] = {"text": f, "pkg": pkg, "hits": 0, "fails": 0,
+                         "created": now, "last_seen": now}
+            changed = True
+        elif not rec.get("pkg"):
+            rec["pkg"] = pkg
+            changed = True
+    if changed:
+        _save_fact_meta(meta)
 
 
 def _load_fact_meta() -> Dict[str, Any]:
@@ -1146,37 +1227,9 @@ def _save_fact_meta(meta: Dict[str, Any]) -> None:
 
 
 def _fact_pkg(entry: str) -> str:
-    """条目所属的 App 包名（无则空串，归入"通用"）。"""
+    """条目所属的 App 包名（无则空串，归入"通用"）。仅用于容量分组记账。"""
     m = _PKG_RE.findall(entry or "")
     return m[0] if m else ""
-
-
-def _similar_clusters(items: List[str], threshold: float = None,
-                      raw_only: bool = False) -> List[List[int]]:
-    """按 :func:`_similar` 把条目贪心聚成同义簇（返回下标簇）。
-
-    ``threshold`` 省略时用基础阈值 —— 用于**印证聚类**（判错只是把分加给别人）；
-    删除路径必须显式传更严的 ``_PRUNE_MERGE_THRESHOLD``。
-    """
-    clusters: List[List[int]] = []
-    for i, it in enumerate(items):
-        for c in clusters:
-            if any(_similar(it, items[j], threshold, raw_only) for j in c):
-                c.append(i)
-                break
-        else:
-            clusters.append([i])
-    return clusters
-
-
-def _evidence_hit(entry: str, evidence: str) -> bool:
-    """本次 run 的轨迹证据是否印证了这条事实（包名或具体控件出现）。"""
-    if not evidence:
-        return False
-    pkg = _fact_pkg(entry)
-    if pkg and pkg in evidence:
-        return True
-    return any(w in evidence for w in _widgets(entry))
 
 
 def should_extract_facts(pkg: str) -> bool:
@@ -1209,55 +1262,50 @@ def _run_app(run_record: Dict[str, Any]) -> str:
     return _fact_pkg(obj)
 
 
-def corroborate_facts(evidence: str) -> int:
-    """本次 run 成功：点亮被印证的事实，返回被加分的条目数。"""
-    return _apply_evidence(evidence, positive=True)
+def corroborate_facts(evidence: str, brain=None) -> int:
+    """本次 run 成功：LLM 判定哪些事实被印证，返回被加分的条目数。"""
+    return _apply_evidence(evidence, positive=True, brain=brain)
 
 
-def contradict_facts(evidence: str) -> int:
-    """本次 run 失败：给被"打脸"的事实记一次反证（对齐 TDB 的 conflict detection）。
+def contradict_facts(evidence: str, brain=None) -> int:
+    """本次 run 失败：LLM 判定哪些事实被"打脸"，记一次反证。
 
     按某条事实描述的路径操作却失败 ⇒ 这条事实至少在当下不可靠。记 ``fails+1``，
-    效用分按 −3/次计；累计到 ``FACT_FAILS_EVICT`` 时，下次 prune 直接淘汰
-    （不再靠分数慢慢排队）——“记忆会认错，也会改错”。
+    效用分按 −3/次计；累计到 ``FACT_FAILS_EVICT`` 时，下次 prune 直接淘汰。
     """
-    return _apply_evidence(evidence, positive=False)
+    return _apply_evidence(evidence, positive=False, brain=brain)
 
 
-def _apply_evidence(evidence: str, positive: bool) -> int:
+def _apply_evidence(evidence: str, positive: bool, brain=None) -> int:
     """把本次 run 的证据写到事实效用索引上（印证 / 反证）。
 
-    同义簇内**只给簇代表加减分**（hits 最高者）——变体之间靠此收敛：常被印证的
-    那条分越来越高，其余变体在容量收紧时先被淘汰。这就是"滑动"替代"归并"。
+    **判定交给 LLM**（:func:`llm_marks`）：脚本不做"包名或控件 id 出现即命中"
+    的规则判断（那是把语义写成正则）。无 brain ⇒ 什么都不做（不猜）。
     """
     p = memory_master()
     if not p.exists():
         return 0
     items = _split_memory_sections(p.read_text(encoding="utf-8")).get(_FACT_SEC) or []
-    if not items or not evidence:
+    if not items or not evidence or brain is None:
+        return 0
+    marked = llm_marks(items, evidence, brain, positive=positive)
+    if not marked:
         return 0
     meta = _load_fact_meta()
     now = time.time()
-    touched = 0
-    for cluster in _similar_clusters(items):
-        hit = any(_evidence_hit(items[i], evidence) for i in cluster)
-        leader = max(cluster,
-                     key=lambda i: int((meta.get(_fact_key(items[i])) or {}).get("hits") or 0))
-        for i in cluster:
-            key = _fact_key(items[i])
-            rec = meta.get(key) or {"text": items[i], "pkg": _fact_pkg(items[i]),
-                                    "hits": 0, "fails": 0,
-                                    "created": now, "last_seen": now}
-            rec["last_seen"] = now
-            if hit and i == leader:
-                if positive:
-                    rec["hits"] = min(99, int(rec.get("hits") or 0) + 1)
-                else:
-                    rec["fails"] = min(99, int(rec.get("fails") or 0) + 1)
-                touched += 1
-            meta[key] = rec
+    for i in marked:
+        key = _fact_key(items[i])
+        rec = meta.get(key) or {"text": items[i], "pkg": _fact_pkg(items[i]),
+                                "hits": 0, "fails": 0,
+                                "created": now, "last_seen": now}
+        rec["last_seen"] = now
+        if positive:
+            rec["hits"] = min(99, int(rec.get("hits") or 0) + 1)
+        else:
+            rec["fails"] = min(99, int(rec.get("fails") or 0) + 1)
+        meta[key] = rec
     _save_fact_meta(meta)
-    return touched
+    return len(marked)
 
 
 def _fact_score(entry: str, meta: Dict[str, Any], now: float) -> float:
@@ -1272,8 +1320,9 @@ def _fact_score(entry: str, meta: Dict[str, Any], now: float) -> float:
 def prune_memory(now: float = None) -> int:
     """按容量边界淘汰事实，返回淘汰条数（0 = 未超容）。
 
-    淘汰次序：①同义簇内非代表 → ②单 App 超容（保底 ``FACTS_APP_FLOOR``）
-    → ③全局超容。被淘汰条目的效用索引一并删除。
+    淘汰次序：①反复被打脸的事实（反证达阈值）→ ②单 App 超容（保底
+    ``FACTS_APP_FLOOR``）→ ③全局超容。**不做同义聚类淘汰** —— 那是语义判断，
+    已随规则去重一并交给 LLM（合并在写入时完成），删除路径只按效用分排序。
     """
     p = memory_master()
     if not p.exists():
@@ -1293,11 +1342,14 @@ def prune_memory(now: float = None) -> int:
     for i, it in enumerate(items):
         if int((meta.get(_fact_key(it)) or {}).get("fails") or 0) >= FACT_FAILS_EVICT:
             drop.add(i)
-    # ① 近乎逐字重复的条目（严格门槛）：删除保守，只砍"几乎一样"的
-    for c in _similar_clusters(items, _PRUNE_MERGE_THRESHOLD, raw_only=True):
-        if len(c) > 1:
-            leader = max(c, key=lambda i: (score(i), -i))
-            drop.update(i for i in c if i != leader)
+    # ⓪' 逐字重复（簿记级精确去重，删除保守）
+    by_text: Dict[str, int] = {}
+    for i, it in enumerate(items):
+        k = it.strip().lower()
+        if k in by_text:
+            drop.add(i)          # 保留首次出现的
+        else:
+            by_text[k] = i
 
     keep = [i for i in range(len(items)) if i not in drop]
     by_pkg: Dict[str, List[int]] = {}
@@ -1432,21 +1484,20 @@ def prune_tasks(max_runs: int = TASK_KEEP_RUNS, max_days: int = TASK_KEEP_DAYS,
     return removed
 
 
-def maintain_capacity(evidence: str = "", success: bool = True) -> Dict[str, int]:
+def maintain_capacity(evidence: str = "", success: bool = True,
+                      brain=None) -> Dict[str, int]:
     """一次跑完「印证或反证 + 四项容量维护」，返回各项清理条数。
 
-    ``success=False`` 时走反证：本次跑过的 App/控件对应的事实记一次失败，
-    累计到阈值直接淘汰（对齐 TDB 的 conflict detection）。
-
-    Omni 可复用：与去重正交，属于"知识资产必须有上限"的那一层治理。
+    印证/反证的**判定在 LLM**（无 brain 则跳过，不猜）；淘汰按效用分排序，
+    属簿记职责。Omni 可复用：与去重正交，属于"知识资产必须有上限"的那一层。
     """
     out = {"corroborated": 0, "contradicted": 0, "facts_pruned": 0,
            "skills_pruned": 0, "rollouts_pruned": 0, "tasks_pruned": 0}
     try:
         if success:
-            out["corroborated"] = corroborate_facts(evidence)
+            out["corroborated"] = corroborate_facts(evidence, brain=brain)
         else:
-            out["contradicted"] = contradict_facts(evidence)
+            out["contradicted"] = contradict_facts(evidence, brain=brain)
     except Exception:
         pass
     try:
@@ -1468,8 +1519,8 @@ def maintain_capacity(evidence: str = "", success: bool = True) -> Dict[str, int
     return out
 
 
-def compact_memory_master() -> int:
-    """对设备端 MEMORY.md 执行回溯合并并落盘，返回合并掉的条数（0 = 无重复）。"""
+def compact_memory_master(brain=None) -> int:
+    """对设备端 MEMORY.md 执行回溯合并（LLM 判定）并落盘，返回合并条数。"""
     master = memory_master()
     if not master.exists():
         return 0
@@ -1477,7 +1528,7 @@ def compact_memory_master() -> int:
         existing = master.read_text(encoding="utf-8")
     except Exception:
         return 0
-    new_text, removed = compact_memory_sections(existing)
+    new_text, removed = compact_memory_sections(existing, brain=brain)
     if removed and new_text != existing:
         try:
             master.write_text(new_text, encoding="utf-8")
@@ -1486,34 +1537,22 @@ def compact_memory_master() -> int:
     return removed
 
 
-def _merge_memory_sections(existing: str, new_facts: List[str], new_lessons: List[str]):
+def _merge_memory_sections(existing: str, new_facts: List[str],
+                           new_lessons: List[str], brain=None):
     """把新 facts/lessons 去重追加进 MEMORY.md 双分区。
 
-    返回 ``(新文本, 追加facts数, 追加lessons数)``。
-
-    去重规则（§3.1）：条目全文 strip + 小写比对，杜绝重复沉淀；再加上语义
-    指纹/控件 id 同义判定（P2-R）。仅追加不覆写，保护人工编辑内容——**存量
-    条目之间的合并见** :func:`compact_memory_sections`。
+    返回 ``(新文本, 追加facts数, 追加lessons数)``。语义去重交给 LLM
+    （:func:`llm_dedup`）；无 brain 时只做逐字精确去重。仅追加不覆写，
+    保护人工编辑内容——**存量条目之间的合并见** :func:`compact_memory_sections`。
     """
     fact_sec, lesson_sec = _FACT_SEC, _LESSON_SEC
     sections = _split_memory_sections(existing)
 
     def _add(items: List[str], new: List[str]) -> int:
-        seen = {x.strip().lower() for x in items if x}
-        added = 0
-        for n in new:
-            item = _strip_bullet(n)
-            key = item.lower()
-            if not key:
-                continue
-            if key in seen:                      # 1) 精确重复
-                continue
-            if any(_similar(key, s) for s in seen):   # 2) 同义重复（语义指纹）
-                continue
-            seen.add(key)
-            items.append(item)
-            added += 1
-        return added
+        before = len(items)
+        merged, kept = llm_dedup(items, new, brain)
+        items[:] = merged + kept
+        return len(items) - before
 
     added_f = _add(sections[fact_sec], new_facts)
     added_l = _add(sections[lesson_sec], new_lessons)

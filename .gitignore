@@ -25,6 +25,10 @@ Thumbs.db
 .zcode/
 .zcodeignore
 
+# harness run logs (experiment data under results/ IS tracked on purpose)
+*.log
+*.err
+
 # 本地密钥 / BYOK 配置（绝不入库）
 *.local.json
 *.local.env

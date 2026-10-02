@@ -96,6 +96,23 @@ def main():
         time.sleep(0.05)
     check("坏 task_id 仍正常收尾", s.get("phase") == "done")
 
+    # 5) R10：终态语义与结果文本随 run 落盘（会话回放还原终态的唯一真源）
+    meta2 = TaskStore.create("R10 落盘", "")
+    tid2 = meta2["task_id"]
+    st_new = TrajectoryStore(tid2, "aaa")
+    st_new.finish_run(objective="R10 落盘", done_when="", expected=None,
+                      backend="accessibility", brain_model="m", exec_model="accessibility",
+                      success=True, steps=0, brain_calls=0, decision_steps=0,
+                      action_count=0, retry_count=0, failures=0, recoveries=0,
+                      status="chat", summary="主人你好呀")
+    rec = json.loads((P.task_trajectory(tid2).parent / "aaa.run.json").read_text(encoding="utf-8"))
+    check("run.json 落盘 status（R10）", rec.get("status") == "chat")
+    check("run.json 落盘 summary（R10）", rec.get("summary") == "主人你好呀")
+    # 旧调用不传 → 空串（回放端按 success 推导 status，不崩）
+    old = json.loads((P.task_trajectory(tid).parent / "111.run.json").read_text(encoding="utf-8"))
+    check("旧 run 无 status/summary 为空串",
+          old.get("status", "") == "" and old.get("summary", "") == "")
+
     print("\n%d failed" % len(fails))
     sys.exit(1 if fails else 0)
 

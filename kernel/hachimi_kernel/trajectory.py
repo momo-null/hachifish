@@ -93,6 +93,8 @@ class RunRecord:
         trajectory_file: str,
         report_file: Optional[str] = None,
         reason: str = "",
+        status: str = "",
+        summary: str = "",
     ):
         self.run_id = run_id
         self.objective = objective
@@ -115,6 +117,11 @@ class RunRecord:
         self.report_file = report_file
         # F1.3：终止/失败原因（成功运行保持空，不写盘）
         self.reason = reason
+        # R10：终态语义（done/chat/incomplete/stopped/error）+ 结果文本。
+        # 与 finish 事件同源（bridge._emit finish），供会话回放精确还原终态面板
+        # ——此前回放只有 success 布尔，无法区分 done/chat，且成功 run 拿不到 summary。
+        self.status = status
+        self.summary = summary
 
     def to_dict(self) -> Dict[str, Any]:
         d = self.__dict__.copy()
@@ -199,6 +206,8 @@ class TrajectoryStore:
         recoveries: int,
         report_file: Optional[str] = None,
         reason: str = "",
+        status: str = "",
+        summary: str = "",
     ) -> RunRecord:
         self._fh.close()
         end_ts = _now_iso()
@@ -223,6 +232,8 @@ class TrajectoryStore:
             trajectory_file=str(self.path),
             report_file=report_file,
             reason=reason,
+            status=status,
+            summary=summary,
         )
         # 主记录
         with open(self.dir / f"{self.run_id}.run.json", "w", encoding="utf-8") as f:

@@ -14,10 +14,45 @@
 实时查找——它们各自拿完整树，不受影响。
 """
 import json
+import os
+import time
 
 # 骨架行数与字符上限：超限截断并标注（证据在轨迹里，不丢）
 MAX_NODES = 40
 MAX_CHARS = 1500
+
+# ---------------------------------------------------------------------------
+# 低带宽模式（实验开关，2026-06-02）
+#
+# 动机：文献《When Skills Don't Help》提出"反馈带宽假设"——环境能给 Agent 的
+# 确定性反馈越多，知识/技能层的边际价值越低。本项目的 observe 返回结构化 UI
+# 树（含 view_id）、秒级反馈、动作结果确定，属高带宽环境；这被用来解释"知识
+# 层在手机 GUI 上收益不显著"。
+#
+# 操纵：**只抹掉发给模型的 view_id**（保留文本、坐标、可点性）。环境从此不再
+# 告诉模型"哪个控件是什么"，控件类知识变成"环境给不了的东西"。若假设成立，
+# 同一批知识在低带宽下的收益应显著上升。
+#
+# 开关：设备上存在 ``files/flags/low_bw`` 即生效（adb run-as touch/rm 切换，
+# 2 秒缓存），不需重编 APK。
+# ---------------------------------------------------------------------------
+_FLAG_CACHE = {"t": 0.0, "v": False}
+_FLAG_TTL_S = 2.0
+
+
+def _low_bandwidth() -> bool:
+    """是否处于低带宽模式（读设备上的 flags/low_bw 文件，带 2s 缓存）。"""
+    now = time.time()
+    if now - _FLAG_CACHE["t"] < _FLAG_TTL_S:
+        return _FLAG_CACHE["v"]
+    val = False
+    try:
+        from hachimi_kernel.runtime_paths import global_memory
+        val = os.path.exists(os.path.join(str(global_memory()), "..", "flags", "low_bw"))
+    except Exception:
+        val = False
+    _FLAG_CACHE.update({"t": now, "v": val})
+    return val
 
 
 def _center(bounds):
@@ -35,7 +70,11 @@ def _skeleton_line(node):
     b = node.get("bounds") or []
     c = _center(b)
     parts = []
-    parts.append("[%s]" % vid if vid else "[-]")
+    # 低带宽模式：控件 id 不下发（环境不再告诉模型"哪个控件是什么"）
+    if vid and not _low_bandwidth():
+        parts.append("[%s]" % vid)
+    else:
+        parts.append("[-]")
     if text:
         t = text if len(text) <= 24 else text[:24] + "…"
         parts.append('"%s"' % t)
@@ -56,6 +95,7 @@ def compress_observe(result, ref=""):
 
     lines, total = [], 0
     kept = 0
+    low_bw = _low_bandwidth()
     for n in tree:
         if not isinstance(n, dict):
             continue
@@ -64,7 +104,8 @@ def compress_observe(result, ref=""):
         clickable = bool(n.get("clickable"))
         b = n.get("bounds") or [0, 0, 0, 0]
         real = len(b) == 4 and b[2] > b[0]          # 零宽僵尸节点剔除
-        if not (vid or (real and (text or clickable))):
+        # 低带宽模式下 id 不再可见 → 只有 id 的节点对模型无意义，按坐标/文本保留
+        if not ((vid and not low_bw) or (real and (text or clickable))):
             continue
         kept += 1
         if len(lines) >= MAX_NODES:

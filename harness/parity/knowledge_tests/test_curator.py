@@ -145,61 +145,24 @@ class TestRefineWorldModel:
         assert removed == 0
 
 
-# === 3. review_candidate_skills =============================================
+# === 3. skill 自动蒸馏：已下线（2026-10-02 定案） ===========================
+#
+# hachimi 侧删除了 Curator.review_candidate_skills 与蒸馏 prompt 的 skill 字段：
+# skill 平面改为**人工维护**。判据见 doc/knowledge_redesign.md 与
+# memory 里的决策 7。OmniAgent 侧尚未同步 ⇒ parity 在两侧对齐前，
+# 下面这条用例锁住"hachimi 侧已下线"这一事实（而不是让 parity 长期红灯）；
+# Omni 侧同步完成后，应把本类改回等价性断言。
 
-class TestReviewCandidateSkills:
-    def test_success_run_creates_candidate(self, tmp_path, monkeypatch):
-        """成功 RunRecord 应提取 candidate skill。"""
+class TestSkillAutodistillRemoved:
+    def test_curator_has_no_skill_distill_entry(self, tmp_path):
         curator = Curator(task_id="testapp")
-        rec = _make_run_record(success=True, steps=5)
+        assert not hasattr(curator, "review_candidate_skills")
+        assert "skill" not in Curator._EXTRACT_PROMPT
 
-        result = curator.review_candidate_skills(rec)
-
-        assert result["reviewed"] == 1
-        assert result["created"] == 1
-        assert result["promoted"] == 0
-
+    def test_skill_library_read_paths_still_work(self, tmp_path):
+        """人工维护的技能仍可被列出（读路径不依赖自动蒸馏）。"""
         lib = SkillLibrary(task_id="testapp")
-        skills = lib.list_all()
-        assert len(skills) >= 1
-
-    def test_failed_run_no_skill(self, tmp_path, monkeypatch):
-        """失败 RunRecord 不提取 skill。"""
-        curator = Curator(task_id="testapp")
-        rec = _make_run_record(success=False)
-
-        result = curator.review_candidate_skills(rec)
-        assert result["reviewed"] == 0
-        assert result["created"] == 0
-
-    def test_short_run_no_skill(self, tmp_path, monkeypatch):
-        """步数太少（< min_steps_for_skill）不提取。"""
-        curator = Curator(task_id="testapp")
-        rec = _make_run_record(success=True, steps=1)
-
-        result = curator.review_candidate_skills(rec)
-        assert result["reviewed"] == 0
-
-    def test_n3_promotion(self, tmp_path, monkeypatch):
-        """连续 3 次成功 → 晋升 active。"""
-        curator = Curator(task_id="testapp")
-        rec = _make_run_record(success=True, objective="点击开始按钮")
-
-        # 第一次 → created
-        r1 = curator.review_candidate_skills(rec)
-        assert r1["created"] == 1 and r1["promoted"] == 0
-
-        # 第二次 → updated（未晋升）
-        r2 = curator.review_candidate_skills(rec)
-        assert r2["promoted"] == 0
-
-        # 第三次 → promoted
-        r3 = curator.review_candidate_skills(rec)
-        assert r3["promoted"] == 1
-
-        lib = SkillLibrary(task_id="testapp")
-        skills = lib.list_all()
-        assert any(s.metadata.status == "active" for s in skills)
+        assert isinstance(lib.list_all(), list)
 
 
 # === 4. flag_low_quality ====================================================
@@ -285,7 +248,9 @@ class TestRunOnce:
 
         assert isinstance(report, CuratorReport)
         assert report.task_id == "testapp"
-        assert report.skills_created == 1
+        # skill 平面改人工维护后，run_once 不再产 skill（字段保留恒 0，见决策 7）
+        assert report.skills_created == 0
+        assert report.skills_promoted == 0
         assert len(report.flagged_low_quality) == 0
         assert len(report.errors) == 0
 

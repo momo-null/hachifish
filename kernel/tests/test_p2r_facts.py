@@ -19,7 +19,7 @@ from hachimi_kernel import runtime_paths as P                     # noqa: E402
 from hachimi_kernel import bridge                                 # noqa: E402
 from hachimi_kernel.curator import Curator                        # noqa: E402
 from hachimi_kernel.skill_library import (                        # noqa: E402
-    SkillLibrary, SkillSubstep, compute_entry_id,
+    Skill, SkillLibrary, SkillSubstep, SkillMetadata, compute_entry_id,
 )
 
 
@@ -127,11 +127,10 @@ def _seed_skill():
     sub = [SkillSubstep("launch_app", {"package": "org.fossify.notes"}),
            SkillSubstep("type_text", {"text": "上次的内容"})]
     lib = SkillLibrary(task_id="t_f")
-    lib.save(SkillLibrary.from_run_record({
-        "success": True, "steps": 3,
-        "objective": "Open the app org.fossify.notes, create a note",
-        "steps_data": [{"tool": s.tool, "args": s.args} for s in sub]},
-        task_id="t_f"))
+    lib.save(Skill(name="skill_Open_the_app_org_fossify_notes__create_a",
+                   objective_pattern="Open the app org.fossify.notes, create a note",
+                   substeps=sub, entry_id=compute_entry_id(sub),
+                   metadata=SkillMetadata(scope="global")))
 
 
 def test_load_skill_exact_and_sanitized():

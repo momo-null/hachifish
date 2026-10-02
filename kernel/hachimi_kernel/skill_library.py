@@ -61,55 +61,125 @@ def _skill_field(s, key, default=""):
     return default if v is None else v
 
 
-def score_skill(skill, query: str) -> int:
-    """条目相对查询的相关度（纯标准库，零 embedding）——统一打分器。
+# ---------------------------------------------------------------------------
+# 检索：**选档由 LLM 做**（2026-10-02 用户红线：语义判断不归脚本）
+#
+# 被删除的旧实现：score_skill —— 包名交集 ×10 > 拉丁词元重叠 > CJK bigram 重叠。
+# 那是把"这个技能和当前任务相关吗"写成正则与权重，再没有事后来校准的余地
+# （keywords 拼进打分文本也救不了：打分仍是词面统计）。
+#
+# 现在：把候选清单交给 LLM 选；无 brain 时**保持原序、不做判断**（不猜）。
+# 注入侧目录与 search_skill 工具共用本实现，避免两套口径。
+# ---------------------------------------------------------------------------
 
-    优先级：结构化字段（包名交集） > 拉丁词元重叠 > CJK bigram 重叠。
-    Omni 与 hachimi 共用：注入排序、`search_skill` 工具、以及 Omni 侧其它
-    入口（面板 / CLI / agent）都可 import 本函数，避免各写一套打分。
-    """
-    obj = (query or "").strip()
-    if not obj:
-        return 0
-    text = " ".join([
-        str(_skill_field(skill, "objective_pattern", "")),
-        str(_skill_field(skill, "ops", "")),
-        str(_skill_field(skill, "name", "")),
-    ])
-    score = 0
-    obj_pkgs = set(_PACKAGE_RE.findall(obj))
-    if obj_pkgs:
-        score += 10 * len({p for p in obj_pkgs if p in text})
-    obj_tokens = {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", obj)}
-    score += len(obj_tokens & {t.lower() for t in re.findall(r"[a-zA-Z]{3,}", text)})
-    obj_cjk = _cjk_bigrams(obj)
-    if obj_cjk:
-        score += len(obj_cjk & _cjk_bigrams(text))
-    return score
+_retrieval_brain = None
+
+
+def set_retrieval_brain(brain) -> None:
+    """注入检索用的 brain（由 :func:`bridge.set_brain` 在配置 BYOK 时调用）。"""
+    global _retrieval_brain
+    _retrieval_brain = brain
+
+
+_SELECT_PROMPT = (
+    "下面是手机 GUI agent 技能库的一个候选清单（每条含名称、适用场景、套路名、"
+    "检索关键词、所属 App 包名）与用户当前的任务描述。\n"
+    "挑出**对完成这个任务真正有用**的条目（最多 {limit} 条）；挑选依据是任务意图"
+    "与条目是否讲同一件事，不是字面相似度。都不相关就返回空数组。\n"
+    "按有用程度从高到低排列。\n"
+    '{{"picked": ["条目名称", "..."]}}\n'
+    "任务：{query}\n\n候选清单：\n{items}\n"
+)
+
+
+def _skill_brief(skill) -> str:
+    """候选清单里给 LLM 看的条目摘要（不含完整步骤，避免上下文膨胀）。"""
+    parts = [("name", str(_skill_field(skill, "name", "") or "")),
+             ("routine", str(_skill_field(skill, "routine", "") or "")),
+             ("desc", str(_skill_field(skill, "description", "") or "")[:80])]
+    kws = [k for k in (_skill_field(skill, "keywords", []) or []) if isinstance(k, str)]
+    if kws:
+        parts.append(("keywords", ",".join(kws)))
+    if isinstance(skill, Skill):
+        pkg = _candidate_pkg(skill)
+        if pkg:
+            parts.append(("pkg", pkg))
+    return " | ".join("%s=%s" % (k, v) for k, v in parts if v)
+
+
+def _llm_pick(skills, query: str, limit: int):
+    """LLM 选档 → 返回选中的条目列表；无 brain / 失败 ⇒ ``None``（=别猜）。"""
+    if _retrieval_brain is None:
+        return None
+    try:
+        reply = _retrieval_brain.chat([{"role": "user", "content": _SELECT_PROMPT.format(
+            limit=max(1, int(limit or 5)), query=(query or "")[:1500],
+            items="\n".join("- %s" % _skill_brief(s) for s in skills))}], [])
+        from hachimi_kernel.curator import _parse_llm_json
+        data = _parse_llm_json((reply or {}).get("content"))
+    except Exception as e:
+        print("[skill] llm select failed: %s: %s" % (type(e).__name__, e), flush=True)
+        return None
+    if not isinstance(data, dict):
+        return None
+    picked = [str(x or "").strip() for x in (data.get("picked") or []) if str(x or "").strip()]
+    if not picked:
+        return []
+    by_name = {str(_skill_field(s, "name", "")): s for s in skills}
+    out = [by_name[n] for n in picked if n in by_name]
+    return out[:max(1, int(limit or 5))]
+
+
+def select_skills(skills, query: str, limit: int = 5) -> List[Any]:
+    """选出与任务相关的条目（LLM 判定；无 brain 或无 query 时保持原序，不猜）。"""
+    items = list(skills or [])
+    if not items:
+        return []
+    if not (query or "").strip():
+        return items[:max(1, int(limit or 5))]
+    picked = _llm_pick(items, query, limit)
+    if picked is None:
+        return items[:max(1, int(limit or 5))]
+    return picked
 
 
 def search_skills(skills, query: str, limit: int = 5):
-    """统一技能检索（P2-R）：相关度排序 + 过滤零分，返回精简结果。
-
-    ``skills`` 可以是 ``Skill`` 对象列表或注入 payload dict 列表；返回
-    ``[{"name","applies","score","entry_id"}]`` —— UI 展示、工具返回、
-    埋点统计共用同一结构，便于 Omni 集成。
-    """
-    if not skills:
-        return []
-    scored = [(score_skill(s, query), s) for s in skills]
-    scored = [(sc, s) for sc, s in scored if sc > 0]
-    scored.sort(key=lambda x: x[0], reverse=True)
+    """统一技能检索：**LLM 选档** + 结构化结果（UI / 工具 / 埋点共用契约）。"""
+    chosen = select_skills(skills, query, limit=limit)
     out = []
-    for sc, s in scored[:max(1, int(limit or 5))]:
+    for rank, s in enumerate(chosen, 1):
         pat = str(_skill_field(s, "objective_pattern", "")).strip()
         out.append({
             "name": str(_skill_field(s, "name", "")),
             "applies": pat[:120] + ("…" if len(pat) > 120 else ""),
-            "score": sc,
+            "rank": rank,
             "entry_id": str(_skill_field(s, "entry_id", "")),
         })
     return out
+
+
+def _skill_pkg_of(skill) -> str:
+    """条目所属 App 包名（Skill 对象取首个 launch_app；dict payload 无则空）。"""
+    return _candidate_pkg(skill) if isinstance(skill, Skill) else ""
+
+
+def record_skill_use(name: str) -> bool:
+    """命中计数（簿记）：``load_skill`` / ``search_skill`` 命中即记一次使用。
+
+    此前 ``_load_skill`` / ``_search_skill`` 不调它 ⇒ ``total_uses`` 恒 1、
+    ``last_used`` 恒空 ⇒ 命中率不可观测、效用淘汰无输入。
+    """
+    d = SkillLibrary._global_dir()
+    for fn in (name, _safe_filename(name)):
+        p = d / (fn + ".md")
+        if p.exists():
+            s = SkillLibrary._parse(p)
+            if s is not None:
+                s.metadata.total_uses += 1
+                s.metadata.last_used = datetime.now(timezone.utc).isoformat()
+                SkillLibrary._save_to(s, d)
+                return True
+    return False
 
 
 def compute_entry_id(substeps: List["SkillSubstep"]) -> str:
@@ -153,8 +223,11 @@ class Skill:
     entry_id: str = ""              # 脱敏动作序列摘要（P2-R Phase 1）：身份主键
     task_id: str = ""
     description: str = ""
+    routine: str = ""               # P2-R v2：LLM 归纳的**规范套路名**（语义身份）
     tags: List[str] = field(default_factory=list)
     substeps: List[SkillSubstep] = field(default_factory=list)
+    playbook: str = ""              # 引导型文字版套路（load_skill 优先返回它而非动作序列）
+    keywords: List[str] = field(default_factory=list)  # LLM 产的检索关键词（意图级同义词）
     metadata: SkillMetadata = field(default_factory=SkillMetadata)
     body: str = ""
     disable_model_invocation: bool = False  # frontmatter 字段：True 时不可被模型直接调用
@@ -176,6 +249,8 @@ class Skill:
             "scope": self.metadata.scope,
             "known_failures": self.metadata.known_failures,
         }, ensure_ascii=False, separators=(",", ":"))
+        # playbook 压成单行（_parse_front 按行解析，多行值会截断）；
+        # disable_model_invocation 必须写出（此前不写出 ⇒ 保存即丢失禁用标记）。
         return (
             f"---\n"
             f"name: {self.name}\n"
@@ -183,9 +258,13 @@ class Skill:
             f"entry_id: {self.entry_id}\n"
             f"task_id: {self.task_id}\n"
             f"description: {self.description}\n"
+            f"routine: {self.routine}\n"
+            f"playbook: {' '.join((self.playbook or '').split())}\n"
+            f"keywords_json: {json.dumps(self.keywords, ensure_ascii=False)}\n"
             f"tags_json: {json.dumps(self.tags, ensure_ascii=False)}\n"
             f"substeps_json: {ss}\n"
             f"metadata_json: {md}\n"
+            f"disable_model_invocation: {str(self.disable_model_invocation).lower()}\n"
             f"---"
         )
 
@@ -194,8 +273,10 @@ class Skill:
             f"# Skill: {self.name}",
             f"## Objective",
             f"`{self.objective_pattern}`",
-            "## Substeps",
         ]
+        if self.playbook:
+            body += ["## Guide", self.playbook]
+        body += ["## Substeps"]
         for i, s in enumerate(self.substeps, 1):
             a = json.dumps(s.args, ensure_ascii=False) if s.args else "{}"
             body.append(f"{i}. `{s.tool}({a})`")
@@ -270,7 +351,8 @@ class SkillLibrary:
         paths.extend(sorted(self._dir().glob("*.md")))
         return paths
 
-    def _save_to(self, skill: Skill, directory: Path) -> str:
+    @staticmethod
+    def _save_to(skill: Skill, directory: Path) -> str:
         if not skill.metadata.created:
             skill.metadata.created = datetime.now(timezone.utc).isoformat()
         text = skill.to_frontmatter() + "\n\n" + skill.to_markdown()
@@ -325,31 +407,6 @@ class SkillLibrary:
                 out.append(s)
         return out
 
-    def find_by_pattern(self, objective: str) -> List[Skill]:
-        obj = (objective or "").strip()
-        if not obj:
-            return []
-        obj_cjk = _cjk_bigrams(obj)
-        # 两层召回：
-        # 1) 精确子串（语言无关，兼容原 objective_pattern 与英文/短关键词，如 "截图"）；
-        # 2) CJK 字符 bigram 重叠（中文语序无关弱匹配；仅取汉字，滤掉 rimworld 等拉丁噪声）。
-        # 按相关性排序（精确命中优先，其次共享 bigram 数），取最相关者。
-        scored = []
-        for s in self.list_all():
-            text = " ".join([
-                s.name, s.objective_pattern, s.description,
-                " ".join(s.tags), (s.body or "")[:1500],
-            ])
-            if obj.lower() in text.lower():
-                scored.append((1000, s))
-                continue
-            if obj_cjk:
-                inter = obj_cjk & _cjk_bigrams(text)
-                if len(inter) >= 2:
-                    scored.append((len(inter), s))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [s for _, s in scored]
-
     def delete(self, name: str) -> bool:
         path = self._path(name)
         if path.exists():
@@ -362,15 +419,25 @@ class SkillLibrary:
         return False
 
     # --- 录制 ----------------------------------------------------------------
-    @classmethod
-    def from_run_record(cls, record: dict, task_id: str) -> Optional[Skill]:
-        if not record.get("success"):
-            return None
+
+    @staticmethod
+    def _meta_tool(tool: str) -> bool:
+        """元/观察动作不进技能操作序列（P2 DoD4 教训）：技能=执行路径，
+        observe/look/screenshot 是模型的验证行为而非套路；task_done/verify
+        是完成声明与校验门，wait 无信息。"""
+        return tool in ("task_done", "verify_done", "wait",
+                        "observe", "look", "screenshot")
+
+    @staticmethod
+    def executed_actions(record: dict) -> List[Dict[str, Any]]:
+        """RunRecord → 实际执行过的动作列表（剔除元/观察动作）。
+
+        skill_library 的 LLM 校验（:func:`validate_skill_summary`）与机械提取
+        （:meth:`from_run_record`）共用同一真源；bridge 的 RunRecord 不带
+        steps_data 时回退读轨迹 jsonl（每行 StepRecord.action）。
+        """
         sd = list(record.get("steps_data") or [])
         if len(sd) < 2 and record.get("trajectory_file"):
-            # P2 修复：bridge 的 RunRecord 不带 steps_data（schema 未含该字段），
-            # 候选技能此前永远拿不到操作序列 → 全局技能目录恒空。
-            # 回退读轨迹 jsonl（绝对路径，单一真源；每行 StepRecord.action）。
             try:
                 tf = Path(str(record["trajectory_file"]))
                 if tf.exists():
@@ -383,56 +450,78 @@ class SkillLibrary:
                             continue
             except Exception:
                 pass
-        # 元动作与观察动作不进技能操作序列（P2 DoD4 教训）：技能=执行路径，
-        # observe/look/screenshot 是模型的验证行为而非套路，注入只添噪声；
-        # task_done/verify 是完成声明与校验门，wait 无信息。
-        sd = [s for s in sd if s.get("tool") not in (
-            "task_done", "verify_done", "wait",
-            "observe", "look", "screenshot")]
-        if len(sd) < 2:
-            return None
-        substeps = [SkillSubstep(tool=s.get("tool", ""), args=s.get("args") or {})
-                    for s in sd if isinstance(s, dict)]
+        return [s for s in sd
+                if isinstance(s, dict) and s.get("tool")
+                and not SkillLibrary._meta_tool(s["tool"])]
+
+    @classmethod
+    def from_summary(cls, summary: Dict[str, Any], record: dict,
+                     task_id: str) -> Optional[Skill]:
+        """LLM 提炼的套路摘要 → Skill（P2-R v2：蒸馏 = 总结，不是转录）。
+
+        ``summary`` 必须先过 :func:`validate_skill_summary`（防幻觉步骤）。
+        **name/routine 都来自 LLM 归纳的规范套路名** —— 短名称不再是
+        ``objective[:40]`` 的写死规则（用户文字可中可英、可随便换措辞，
+        规则起名必然把同一套路拆成多档）。description 直接采用
+        （UI 技能列表因此有可读摘要，2026-10-02 之前恒空）。
+        """
+        substeps = [SkillSubstep(tool=s["tool"], args=s.get("args") or {})
+                    for s in summary["steps"]]
+        routine = str(summary.get("routine") or summary.get("name", "")).strip()[:24]
+        safe = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_]", "_", routine).strip("_")
         return Skill(
-            name=_derive_skill_name(record.get("objective", "")),
-            objective_pattern=record.get("objective", ""),
+            name="skill_%s" % (safe or "unnamed"),
+            routine=routine,
+            objective_pattern=str(record.get("objective", "")),
             entry_id=compute_entry_id(substeps),
             task_id=task_id,
+            description=str(summary.get("description", "")),
+            playbook=str(summary.get("playbook", "")),
+            keywords=[str(k) for k in (summary.get("keywords") or [])],
             substeps=substeps,
             metadata=SkillMetadata(success_count=1, total_uses=1, confidence=1.0,
-                                   status="candidate",
-                                   # P2：直接落全局——注入只读全局技能目录；task 级
-                                   # 技能对下次任务不可见，「越用越顺手」不成立
-                                   scope="global",
+                                   status="candidate", scope="global",
                                    created=datetime.now(timezone.utc).isoformat()),
         )
 
     # --- 晋升判定 ------------------------------------------------------------
-    def promote_or_insert(self, candidate: Skill) -> Dict[str, Any]:
-        """按身份匹配已有技能：entry_id（脱敏序列）优先，objective_pattern 兜底。
+    _IDENTITY_PROMPT = (
+        "你要判断一条**新沉淀的操作套路**是否与技能库里某条**已有套路**讲的是"
+        "同一件事（同义命名、同一步骤、同一目的都算同一件事）。\n"
+        "判据是语义与目的，不是名字是否逐字相同 —— 同一个套路被不同措辞命名"
+        "（如「新建闹钟并保存」vs「新建闹钟并设置时间标签」）仍算同一条。\n"
+        "不同 App 的同一目的**不算**同一条（控件 id 与坐标是 App 私有的）。\n"
+        "都不算同一条时返回 same_as: null。\n"
+        '{{"same_as": "已有条目名称 或 null", "reason": "一句话依据", '
+        '"description": "若已有条目缺描述，给一句合并后的描述（可空）"}}\n'
+        "新套路：\n{candidate}\n\n已有套路：\n{existing}\n"
+    )
 
-        P2-R Phase 1：同一套路的字面参数不同（type_text 文本不同）⇒ 同一
-        entry_id ⇒ 走 record_success 累计（N=3 晋升由此成立），而非另立新档 ——
-        这是「重复根源」的写入端修复。
-        旧文件无 entry_id：现场补算回写（一次性迁移，读时归一）。
+    def promote_or_insert(self, candidate: Skill, brain=None,
+                          prefer_candidate_steps: bool = True) -> Dict[str, Any]:
+        """写入端身份判定：**LLM 判是否同一套路**（``brain=None`` 时只按 name 精确
+        命中兜底，绝不用 routine 字符串相等 / objective 全等这类规则猜）。
+
+        命中原档时用候选的提炼内容覆盖（步骤/playbook/keywords），并累计成功次数
+        （N=3 晋升 active 由此成立）。未命中则新建一档。
         """
-        existing = self.load(candidate.name)
+        existing = self.load(candidate.name)      # 同名 = 同一文件（簿记级身份）
+        if existing is not None and _candidate_pkg(existing) != _candidate_pkg(candidate):
+            existing = None      # 同名但跨 App：包名是硬边界，不合并
         if existing is None:
-            for s in self.list_all():
-                eid = s.entry_id or compute_entry_id(s.substeps)
-                if candidate.entry_id and eid and eid == candidate.entry_id:
-                    existing = s
-                    break
-            if existing is None and not candidate.entry_id:
-                for s in self.list_all():
-                    if s.objective_pattern == candidate.objective_pattern:
-                        existing = s
-                        break
-        if existing:
+            existing = self._llm_same_skill(candidate, brain)
+        if existing is not None:
             if not existing.entry_id:
                 existing.entry_id = candidate.entry_id or compute_entry_id(existing.substeps)
-            if len(candidate.substeps) >= len(existing.substeps):
+            if prefer_candidate_steps and candidate.substeps:
                 existing.substeps = candidate.substeps
+                existing.entry_id = candidate.entry_id or existing.entry_id
+                if candidate.playbook:
+                    existing.playbook = candidate.playbook
+                if candidate.keywords:
+                    existing.keywords = candidate.keywords
+            if not existing.description and candidate.description:
+                existing.description = candidate.description
             promoted = existing.record_success()
             self.save(existing)
             return {"action": "promoted" if promoted else "updated",
@@ -441,6 +530,39 @@ class SkillLibrary:
         self.save(candidate)
         return {"action": "created", "skill_name": candidate.name,
                 "promoted": False, "success_count": 1}
+
+    def _llm_same_skill(self, candidate: Skill, brain=None) -> Optional[Skill]:
+        """LLM 判定候选是否与已有某条同套路；无 brain / 判定失败 ⇒ 不合并。"""
+        pool = [s for s in self.list_all() if s.name != candidate.name]
+        if brain is None or not pool:
+            return None
+        try:
+            reply = brain.chat([{"role": "user", "content": self._IDENTITY_PROMPT.format(
+                candidate=_skill_brief(candidate) + " | steps=%d" % len(candidate.substeps or []),
+                existing="\n".join("- %s | steps=%d"
+                                   % (_skill_brief(s), len(s.substeps or []))
+                                   for s in pool))}], [])
+            from hachimi_kernel.curator import _parse_llm_json
+            data = _parse_llm_json((reply or {}).get("content"))
+        except Exception as e:
+            print("[skill] llm identity failed: %s: %s" % (type(e).__name__, e), flush=True)
+            return None
+        if not isinstance(data, dict):
+            return None
+        same_as = str(data.get("same_as") or "").strip()
+        if not same_as:
+            return None
+        for s in pool:
+            if s.name == same_as:
+                desc = str(data.get("description") or "").strip()[:60]
+                if desc and not s.description:
+                    s.description = desc
+                return s
+        return None
+
+    def record_use(self, name: str) -> bool:
+        """命中计数（簿记）：load_skill / search_skill 命中即记一次使用。"""
+        return record_skill_use(name)
 
     def record_failure_on_pattern(self, objective: str, reason: str = "") -> None:
         for s in self.list_all():
@@ -464,6 +586,9 @@ class SkillLibrary:
                 objective_pattern=data.get("objective_pattern", ""),
                 task_id=data.get("task_id", ""),
                 description=data.get("description", ""),
+                routine=data.get("routine", ""),
+                playbook=data.get("playbook", ""),
+                keywords=_parse_tags(data.get("keywords_json") or data.get("keywords")),
                 tags=_parse_tags(data.get("tags_json") or data.get("tags")),
                 substeps=[SkillSubstep(tool=s.get("tool", ""), args=s.get("args") or {}) for s in ss],
                 metadata=SkillMetadata(
@@ -553,6 +678,93 @@ def _cjk_bigrams(s: str) -> set:
     return {"".join(cjk[i:i + 2]) for i in range(len(cjk) - 1)}
 
 
-def _derive_skill_name(objective: str) -> str:
-    name = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_]", "_", objective.strip()[:40])
-    return f"skill_{name}" if name else "skill_unnamed"
+# ---------------------------------------------------------------------------
+# LLM 提炼套路的校验（P2-R v2：蒸馏=总结，不是转录）
+# ---------------------------------------------------------------------------
+
+def _candidate_pkg(skill: Skill) -> str:
+    """技能步骤里的首个 launch 包名（App 归属；routine 匹配要求同 App）。"""
+    for s in skill.substeps or []:
+        if s.tool == "launch_app" and (s.args or {}).get("package"):
+            return str(s.args["package"])
+    return ""
+
+
+def _exec_index(executed):
+    """实际执行动作的检索索引（工具集合 / view_id 集合 / 包名集合 / 坐标列表）。"""
+    tools = {s["tool"] for s in executed}
+    vids = {str((s.get("args") or {}).get("view_id"))
+            for s in executed if s["tool"] == "tap_by_id"}
+    pkgs = {str((s.get("args") or {}).get("package"))
+            for s in executed if s["tool"] == "launch_app"}
+    taps = [(float((s.get("args") or {}).get("x", -1)),
+             float((s.get("args") or {}).get("y", -1)))
+            for s in executed if s["tool"] == "tap_xy"]
+    return tools, vids, pkgs, taps
+
+
+def validate_skill_summary(raw, record):
+    """LLM 产出 → 可入库的套路摘要；不合法返回 ``None``。
+
+    校验规则（防幻觉，全部可离线复核）：
+    1. name/description 非空；steps 是 2~40 条的列表；
+    2. 每个步骤的工具必须真实执行过（LLM 不得发明动作）；
+    3. tap_by_id 的 view_id / launch_app 的 package 必须在轨迹里出现过；
+    4. tap_xy 坐标必须落在某个实际点按的 ±0.06 邻域内（LLM 量化坐标可容忍）。
+    通过后步骤参数统一过 canonical_args（text → <text>）。
+    """
+    if not isinstance(raw, dict):
+        return None
+    # prompt 只要求 routine（name 由 from_summary 生成 skill_<routine>），
+    # 旧版此处硬性要求 raw["name"] ⇒ LLM 的合法产出被整体拒收（skills_created 恒 0）。
+    name = str(raw.get("name") or raw.get("routine") or "").strip()
+    desc = str(raw.get("description") or "").strip()
+    steps = raw.get("steps")
+    if not name or not desc or not isinstance(steps, list):
+        return None
+    executed = SkillLibrary.executed_actions(record)
+    if len(executed) < 2:
+        return None
+    tools, vids, pkgs, taps = _exec_index(executed)
+    out = []
+    for st in steps:
+        if not isinstance(st, dict):
+            continue
+        tool = str(st.get("tool") or "").strip()
+        if tool not in tools:
+            continue
+        args = st.get("args") or {}
+        if not isinstance(args, dict):
+            continue
+        if tool == "tap_by_id" and args.get("view_id") \
+                and str(args["view_id"]) not in vids:
+            continue
+        if tool == "launch_app" and args.get("package") \
+                and str(args["package"]) not in pkgs:
+            continue
+        if tool == "tap_xy" and args.get("x") is not None:
+            try:
+                x, y = float(args["x"]), float(args.get("y", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if not any(abs(x - tx) <= 0.06 and abs(y - ty) <= 0.06
+                       for tx, ty in taps):
+                continue
+        out.append({"tool": tool, "args": canonical_args(dict(args))})
+    if not (2 <= len(out) <= 40):
+        return None
+    # playbook（引导型文字版）可选：压成单行、限长；不合法不影响整条技能
+    playbook = " ".join(str(raw.get("playbook") or "").split())[:600]
+    # keywords（检索面）：清洗为短词列表，上限 8 个——只影响检索，不校验动作
+    kws = []
+    for k in (raw.get("keywords") or []):
+        k = " ".join(str(k or "").split())[:16]
+        if k and k not in kws:
+            kws.append(k)
+        if len(kws) >= 8:
+            break
+    return {"name": name[:24], "description": desc[:60],
+            "routine": str(raw.get("routine") or "").strip()[:24],
+            "precondition": str(raw.get("precondition") or "")[:60],
+            "verify": str(raw.get("verify") or "")[:60],
+            "playbook": playbook, "keywords": kws, "steps": out}

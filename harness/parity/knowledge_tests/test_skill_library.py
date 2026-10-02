@@ -14,7 +14,7 @@ def _iso_global(tmp_path, monkeypatch):
 
 from omni_core.local.skill_library import (
     Skill, SkillSubstep, SkillMetadata, SkillLibrary,
-    _derive_skill_name, _split_frontmatter,
+    _split_frontmatter,
 )
 import omni_core.local.runtime_paths as _RP
 
@@ -125,28 +125,6 @@ class TestSkillLibrary:
         assert len(matches) == 1
         assert matches[0].name == "a"
 
-    def test_from_run_record_success(self):
-        record = {
-            "success": True,
-            "objective": "截图当前屏幕",
-            "steps_data": [
-                {"tool": "screenshot", "args": {}},
-                {"tool": "task_done", "args": {"reason": "ok"}},
-            ],
-        }
-        s = SkillLibrary.from_run_record(record, "test")
-        assert s is not None
-        assert s.objective_pattern == "截图当前屏幕"
-        assert len(s.substeps) == 2
-
-    def test_from_run_record_failure_returns_none(self):
-        record = {"success": False, "steps_data": [{"tool": "click"}]}
-        assert SkillLibrary.from_run_record(record, "x") is None
-
-    def test_from_run_record_too_few_steps(self):
-        record = {"success": True, "objective": "o", "steps_data": [{"tool": "t"}]}
-        assert SkillLibrary.from_run_record(record, "x") is None
-
 
 # === 集成：N=3 晋升 ===========================================================
 class TestPromotion:
@@ -220,11 +198,6 @@ class TestPromotion:
 
 
 # === 辅助 =====================================================================
-def test_derive_skill_name():
-    assert "skill" in _derive_skill_name("截图当前屏幕")
-    assert _derive_skill_name("中英mix_123") == "skill_中英mix_123"
-
-
 def fake_path(frontmatter_text: str):
     """创建临时 Path 对象用于测试 _parse（不写盘）。"""
     import tempfile

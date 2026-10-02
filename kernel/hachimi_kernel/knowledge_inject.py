@@ -20,7 +20,7 @@ from hachimi_kernel.runtime_paths import (
     memory_summary, task_skills, global_skills, user_profile, character_card,
 )
 from hachimi_kernel.skill_library import (  # noqa: F401  (SkillLibrary 供 catalog 路径)
-    SkillLibrary, _cjk_bigrams, score_skill, search_skills,
+    SkillLibrary, _cjk_bigrams, search_skills, select_skills,
 )
 
 
@@ -44,6 +44,28 @@ def load_memory_text() -> str:
         return p.read_text(encoding="utf-8")[:_SUMMARY_TRUNCATE]
     except Exception:
         return ""
+
+
+def load_memory_items(limit: int = 20) -> list:
+    """本次注入的**事实条目清单**（测量用：knowledge 事件据此上报注入了什么）。
+
+    此前只上报 ``memory: bool``，事后无法回答"这次 run 到底喂了哪几条"——
+    注入质量类的问题（噪声占比、有用条目排位）长期看不见。
+    """
+    out = []
+    try:
+        p = memory_summary()
+        if not p.exists():
+            return []
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            s = ln.strip()
+            if s.startswith("- ") and s[2:].strip() not in ("(暂无)", ""):
+                out.append(s[2:].strip()[:120])
+            if len(out) >= limit:
+                break
+    except Exception:
+        return []
+    return out
 
 
 def load_profile_text() -> str:
@@ -195,14 +217,10 @@ def load_agents_snapshot(layers: List[Tuple[str, Any]], limit: int = 8192) -> Ag
                           digests=digests, limit=int(limit or 0))
 
 
-def _score_skill(skill: Dict[str, Any], objective: str) -> int:
-    """相关度打分：转发到 skill_library.score_skill（Omni 与 hachimi 唯一实现）。
-
-    打分优先级（P2-R Phase 2，对照 doc/knowledge_redesign.md §3.2）：
-    1. 结构化字段：包名交集（最强信号——操作序列与 App 强绑定）；
-    2. 拉丁词元重叠；3. CJK bigram 重叠。纯标准库，零 embedding。
-    """
-    return score_skill(skill, objective)
+def _select_skills(skills: List[Dict[str, Any]], objective: str, limit: int):
+    """技能选档：转发到 skill_library.select_skills（LLM 判定；无 brain 保持原序）。"""
+    from hachimi_kernel.skill_library import select_skills
+    return select_skills(skills, objective, limit=limit)
 
 
 def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]],
@@ -228,8 +246,7 @@ def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]],
         parts.append(memory_text)
         parts.append("")
     if skills:
-        ranked = sorted(skills, key=lambda s: _score_skill(s, objective), reverse=True)
-        picked = ranked[:max(1, int(max_skills or 3))]
+        picked = _select_skills(skills, objective, max(1, int(max_skills or 3)))
         parts.append("## 相关技能")
         used = 0
         for i, s in enumerate(picked):
@@ -241,7 +258,9 @@ def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]],
                 line += "（适用：%s%s）" % (pat[:60], "…" if len(pat) > 60 else "")
             entry = line
             # 目录模式（P2-R）：仅最相关 1 条带完整序列（大概率有用，省一次
-            # 往返），其余只进目录 —— 模型按需 load_skill，池子规模化不挤上下文
+            # 往返），其余只进目录 —— 模型按需 load_skill，池子规模化不挤上下文。
+            # P2-R v3 实测（2026-10-02）：playbook 进常驻注入块反而更差
+            # （P2 45 vs P 33 中位）—— 套路只走 load_skill 按需加载。
             if i == 0 and ops:
                 entry += f"\n  操作序列：{ops}"
             if max_chars and used + len(entry) > int(max_chars) and used > 0:

@@ -175,7 +175,7 @@ def _skill_payloads():
 
 def _search_skill(args):
     """search_skill 实现：走 skill_library.search_skills（与 Omni 同一检索器）。"""
-    from hachimi_kernel.skill_library import search_skills
+    from hachimi_kernel.skill_library import search_skills, record_skill_use
     q = str((args or {}).get("query", "")).strip()
     if not q:
         return {"ok": False, "error": "query required"}
@@ -184,8 +184,13 @@ def _search_skill(args):
     if not hits:
         return {"ok": False, "error": "no skill matched: %s" % q,
                 "available": [p["name"] for p in _skill_payloads()][:10]}
+    for h in hits:                      # 命中计数（簿记）：让效用淘汰有输入
+        try:
+            record_skill_use(h["name"])
+        except Exception:
+            pass
     return {"ok": True, "query": q, "results": hits,
-            "note": "用 load_skill(\"<名称>\") 加载完整操作序列后再执行。"}
+            "note": "用 load_skill(\"<名称>\") 加载该套路的文字引导后再执行。"}
 
 
 def _load_skill(args):
@@ -207,6 +212,20 @@ def _load_skill(args):
     if s is None:
         return {"ok": False, "error": "skill not found: %s" % name,
                 "available": [f.stem for f in sorted(d.glob("*.md"))][:10]}
+    try:                       # 命中计数（簿记）
+        from hachimi_kernel.skill_library import record_skill_use
+        record_skill_use(name)
+    except Exception:
+        pass
+    if s.playbook:
+        # 引导型形态（P2-R v3）：LLM 总结的文字 playbook——模型每步都重新
+        # observe 现场落点，逐帧动作序列消费不动（S 臂"消费≠受益"×3）。
+        # substeps 仍是机器真源（entry_id/防幻觉校验），不再直接进 prompt。
+        return {"ok": True, "name": s.name,
+                "applies": (s.objective_pattern or "")[:120],
+                "guide": s.playbook,
+                "note": "guide 是该套路的文字引导；结合当前屏幕逐条落地，"
+                        "与界面不符处 observe 后调整。"}
     return {"ok": True, "name": s.name,
             "applies": (s.objective_pattern or "")[:120],
             "steps": _skill_ops(s),
@@ -359,6 +378,14 @@ def set_brain(base_url, api_key=None, model=None):
     """Kotlin 注入 BYOK 配置（Keystore 解密后以独立参数传入，避免 JSON 转义）。"""
     global _brain_cfg
     _brain_cfg = {"base_url": base_url, "api_key": api_key, "model": model}
+    try:   # 检索选档与技能身份判定都用这个 brain（语义判断不归脚本）
+        from hachimi_kernel.brain_client import BrainClient
+        from hachimi_kernel.skill_library import set_retrieval_brain
+        set_retrieval_brain(BrainClient(
+            base_url, api_key or "", model or "", timeout=DEFAULT_TIMEOUT,
+            thinking={"type": "disabled"}))
+    except Exception as e:
+        print("[brain] retrieval brain unavailable: %s" % e, flush=True)
     return {"ok": True}
 
 
@@ -751,7 +778,7 @@ def _knowledge_parts(objective: str = ""):
         return "", {"memory": False, "skills": [], "chars": 0}
     try:
         from hachimi_kernel.knowledge_inject import (
-            load_memory_text, build_knowledge_block)
+            load_memory_text, load_memory_items, build_knowledge_block)
         skills = []
         mem = ""
         try:
@@ -775,12 +802,14 @@ def _knowledge_parts(objective: str = ""):
                     skills.append({"name": s.name,
                                    "entry_id": s.entry_id,
                                    "objective_pattern": s.objective_pattern,
-                                   "ops": _skill_ops(s)[:200]})
+                                   "ops": _skill_ops(s)[:200],
+                                   "guide": (s.playbook or "")})
         except Exception:
             skills = []
         block = build_knowledge_block(mem, skills, objective=objective or "")
         return block, {"memory": bool(mem.strip()),
                        "skills": [s["name"] for s in skills],
+                       "facts": load_memory_items(),
                        "chars": len(block)}
     except Exception as e:
         print("[task] knowledge block unavailable: %s: %s" % (type(e).__name__, e),
@@ -820,9 +849,8 @@ def _curator_after_finish(task_id, run_record):
         except Exception as e:
             print("[curator] facts brain unavailable: %s" % e, flush=True)
         report = curator.run_once(run_record=run_record)
-        print("[curator] task=%s pruned=%s skills_promoted=%s errors=%d"
-              % (task_id, report.pruned_files, report.skills_promoted,
-                 len(report.errors)), flush=True)
+        print("[curator] task=%s pruned=%s errors=%d"
+              % (task_id, report.pruned_files, len(report.errors)), flush=True)
     except Exception as e:
         print("[curator] failed (task continues): %s: %s" % (type(e).__name__, e),
               flush=True)
@@ -948,7 +976,10 @@ def skill_toggle_json(name, disabled):
 
 
 def skill_delete_json(name):
-    """删除全局技能文件（DoD3；Curator 下次蒸馏可再生成）。"""
+    """删除全局技能文件（DoD3）。
+
+    skill 自 2026-10-02 起**由人工维护**，删除后不会被蒸馏自动再生成。
+    """
     try:
         f = _skill_file(name)
         if f is None or not f.exists():
@@ -1185,7 +1216,10 @@ def _run(body, stop_flag=_controls):
                         decision_steps=out.get("brain_calls", 0),
                         action_count=out["steps"], retry_count=out["task_done_rejected"],
                         failures=failures, recoveries=0,
-                        reason=out.get("summary", "") if out["status"] not in ("done", "chat") else "")
+                        reason=out.get("summary", "") if out["status"] not in ("done", "chat") else "",
+                        # R10：终态语义与结果文本随 run 落盘（会话回放的唯一真源，
+                        # 此前成功 run 只留 success=True，回放端拿不到 status/summary）
+                        status=out.get("status", ""), summary=out.get("summary", ""))
                     with _lock:
                         _runs[run_id] = {"task_id": task_id, "jsonl": str(store.path),
                                          "run": rec.to_dict()}
@@ -1271,7 +1305,7 @@ def _run(body, stop_flag=_controls):
                                  success=False, steps=len(steps),
                                  brain_calls=0, decision_steps=0, action_count=len(steps),
                                  retry_count=0, failures=len(steps), recoveries=0,
-                                 reason=err[:200])
+                                 reason=err[:200], status="error")
             except Exception:
                 pass
         with _lock:

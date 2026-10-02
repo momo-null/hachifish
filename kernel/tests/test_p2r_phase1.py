@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from hachimi_kernel import runtime_paths as P                     # noqa: E402
 from hachimi_kernel.curator import Curator, _success_path_facts   # noqa: E402
 from hachimi_kernel.skill_library import (                        # noqa: E402
-    SkillLibrary, SkillSubstep, compute_entry_id,
+    Skill, SkillLibrary, SkillSubstep, SkillMetadata, compute_entry_id,
 )
 
 
@@ -69,13 +69,21 @@ def test_promote_or_insert_dedups_by_entry_id():
     setup_tmp_root()
     lib = SkillLibrary(task_id="t_p2r")
 
-    first = lib.promote_or_insert(SkillLibrary.from_run_record(
-        _mk_record("购物清单"), task_id="t_p2r"))
+    def _skill(text):
+        substeps = [SkillSubstep("tap_by_id", {"view_id": "fab"}),
+                    SkillSubstep("type_text", {"text": text})]
+        return Skill(name="skill_固定套路", routine="固定套路",
+                     objective_pattern="固定 objective",
+                     entry_id=compute_entry_id(substeps),
+                     substeps=substeps,
+                     metadata=SkillMetadata(success_count=1, total_uses=1,
+                                            confidence=1.0, scope="global"))
+
+    first = lib.promote_or_insert(_skill("购物清单"))
     assert first["action"] == "created", first
 
     # 同套路、不同字面内容 ⇒ 同 entry_id ⇒ 不另立新档，累计 success
-    second = lib.promote_or_insert(SkillLibrary.from_run_record(
-        _mk_record("明天上午备份实验数据"), task_id="t_p2r"))
+    second = lib.promote_or_insert(_skill("明天上午备份实验数据"))
     assert second["action"] in ("updated", "promoted"), second
     assert second["success_count"] == 2, second
 
