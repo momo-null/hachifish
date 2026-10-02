@@ -242,6 +242,9 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 })
             }
         }
+        // 结果气泡（完整 summary）与终态面板（摘要）是同一 finish 事件的两件产物，
+        // 气泡在前、面板在后；两者同源不同文（digest 短文本返回空串，不重复）。
+        val bubble = ChatMapper.finishBubble(type, fields)
         val item = ChatMapper.item(type, fields)
         val newPhase = ChatMapper.phase(type, fields)
         // 终态恢复输入；控制钮只在干活态出现
@@ -257,21 +260,29 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 input.isEnabled = true
             }
         }
-        if (item != null) {
-            // 首个实质事件替换思考占位（K3a 状态机）
-            if (ChatMapper.replacesThinking(item) && items.lastOrNull() == ChatItem.Thinking) {
-                items.removeAt(items.size - 1)
-            }
-            // 连续同类 observe 折叠（P1.5 UI）：末尾也是 observe ToolCard → count+1 不新增，
-            // 降噪（「查看屏幕 ×N」），保留首次语义与 ok 态。
-            val last = items.lastOrNull()
-            if (item is ChatItem.ToolCard && item.tool.contains("observe") && last is ChatItem.ToolCard
-                && last.tool.contains("observe") && last.count > 0) {
-                items[items.size - 1] = last.copy(count = last.count + 1)
-            } else {
-                items.add(item)
-            }
-            refresh()
+        if (bubble != null) pushItem(bubble)
+        if (item != null) pushItem(item)
+        if (bubble != null || item != null) refresh()
+    }
+
+    /**
+     * 消息流入列唯一入口（现场事件 + 会话回放共用，R10）：Thinking 占位替换与
+     * 连续 observe 折叠两条降噪规则只有一份实现 —— 回放此前自己拼 items，
+     * 规则分裂正是「重进后结果跑到卡片上面」的根源。
+     */
+    private fun pushItem(item: ChatItem) {
+        // 首个实质事件替换思考占位（K3a 状态机）
+        if (ChatMapper.replacesThinking(item) && items.lastOrNull() == ChatItem.Thinking) {
+            items.removeAt(items.size - 1)
+        }
+        // 连续同类 observe 折叠（P1.5 UI）：末尾也是 observe ToolCard → count+1 不新增，
+        // 降噪（「查看屏幕 ×N」），保留首次语义与 ok 态。
+        val last = items.lastOrNull()
+        if (item is ChatItem.ToolCard && item.tool.contains("observe") && last is ChatItem.ToolCard
+            && last.tool.contains("observe") && last.count > 0) {
+            items[items.size - 1] = last.copy(count = last.count + 1)
+        } else {
+            items.add(item)
         }
     }
 
@@ -665,7 +676,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     /**
      * 回放一条会话：session_messages_json（对话）+ task_trace_json（执行轨迹）。
      * 语义（用户需求）：闲聊轮（run 无任何工具步骤）只出对话气泡，保持对话感；
-     * 跑过任务的 run 还原成 tool 卡 + 终态面板，与执行现场视觉一致。
+     * 跑过任务的 run 还原成 tool 卡 + 结果气泡 + 终态面板，与执行现场视觉一致。
      * 交错顺序：按 ts 把消息排在对应 run 之前（用户先说，后跟这轮的轨迹）。
      */
     private fun replaySession(tid: String, keepIfUserTyped: Boolean = false, after: () -> Unit) {
@@ -689,15 +700,34 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
 
     private fun appendReplay(msgs: org.json.JSONArray, trace: JSONObject?) {
         var mi = 0
-        fun flushBefore(ts: String) {
+        /**
+         * 消费 ts <= [ts] 的消息。[skipExact] 同文的 assistant 跳过：它已由本轮
+         * finish 事件的结果气泡承担，再出一遍就是重复（R10 去重）。
+         */
+        fun flushBefore(ts: String, skipExact: String? = null) {
             while (mi < msgs.length() &&
                 (ts.isBlank() || msgs.getJSONObject(mi).optString("ts") <= ts)) {
                 val m = msgs.getJSONObject(mi++)
                 when (m.optString("role")) {
-                    "user" -> items.add(ChatItem.UserMsg(m.optString("content")))
-                    "assistant" -> items.add(ChatItem.AssistantMsg(m.optString("content")))
+                    "user" -> pushItem(ChatItem.UserMsg(m.optString("content")))
+                    "assistant" -> {
+                        val c = m.optString("content")
+                        if (skipExact == null || c.trim() != skipExact.trim()) {
+                            pushItem(ChatItem.AssistantMsg(c))
+                        }
+                    }
                 }
             }
+        }
+        /** 窗口内最后一条 assistant 文案（旧 run 无 summary 时的兜底；不消费游标）。 */
+        fun peekLastAssistant(ts: String): String? {
+            var last: String? = null
+            for (k in mi until msgs.length()) {
+                val m = msgs.getJSONObject(k)
+                if (ts.isNotBlank() && m.optString("ts") > ts) break
+                if (m.optString("role") == "assistant") last = m.optString("content")
+            }
+            return last?.trim()?.takeIf { it.isNotEmpty() }
         }
         val runs = trace?.optJSONArray("runs")
         if (runs == null || runs.length() == 0) { flushBefore(""); return }
@@ -705,6 +735,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             val r = runs.getJSONObject(i)
             val run = r.optJSONObject("run")
             flushBefore(run?.optString("start_ts") ?: "")
+            // 轨迹行 → step 事件：卡片由 ChatMapper 产出、pushItem 入列（折叠与现场同源）
             var shown = 0
             val lines = r.optJSONArray("lines")
             if (lines != null) {
@@ -713,39 +744,38 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                     val tool = ln.optJSONObject("action")?.optString("tool") ?: continue
                     if (tool.isBlank()) continue
                     val res = ln.optJSONObject("result")
-                    addToolCard(
-                        tool,
-                        if (res == null || !res.has("ok")) null else res.optBoolean("ok"),
-                        res?.optString("error")?.takeIf { it.isNotBlank() },
-                        if (ln.has("step")) ln.optInt("step") else null
-                    )
+                    val card = ChatMapper.item("step", mapOf<String, Any?>(
+                        "tool" to tool,
+                        "ok" to (if (res == null || !res.has("ok")) null else res.optBoolean("ok")),
+                        "error" to res?.optString("error")?.takeIf { it.isNotBlank() },
+                        "step" to (if (ln.has("step")) ln.optInt("step") else null)
+                    )) ?: continue
+                    pushItem(card)
                     shown++
                 }
             }
-            // 本轮窗口内的消息（用户消息可能晚于 start_ts 落盘）排在终态面板之前
-            flushBefore(run?.optString("end_ts") ?: "")
-            // 终态面板：仅真跑过步骤的 run 出（纯闲聊轮不出，保持对话语义）
-            if (shown > 0 && run != null) {
-                if (run.optBoolean("success")) {
-                    items.add(ChatItem.DonePanel("", run.optInt("steps", shown), wallClockS(run)))
-                } else {
-                    items.add(ChatItem.FailPanel(
-                        run.optString("reason").takeIf { it.isNotBlank() } ?: "任务未成功完成"))
-                }
-            }
+            if (run == null) continue
+            // 本轮窗口内的消息（用户消息可能晚于 start_ts 落盘）排在终态之前
+            val endTs = run.optString("end_ts")
+            val summary = run.optString("summary").takeIf { it.isNotBlank() }
+                ?: peekLastAssistant(endTs)
+                ?: run.optString("reason").takeIf { it.isNotBlank() }
+                ?: ""
+            flushBefore(endTs, summary)
+            // 终态：还原成 finish 事件走 ChatMapper —— status 由 run 落盘（旧数据按
+            // success 推导：有步骤=done，纯闲聊=chat），闲聊轮不出面板（与现场一致）
+            val finish = mapOf<String, Any?>(
+                "status" to (run.optString("status").takeIf { it.isNotBlank() }
+                    ?: if (run.optBoolean("success")) (if (shown > 0) "done" else "chat")
+                    else "failed"),
+                "summary" to summary,
+                "steps" to run.optInt("steps", shown),
+                "wall_clock_s" to wallClockS(run)
+            )
+            ChatMapper.finishBubble("finish", finish)?.let { pushItem(it) }
+            ChatMapper.item("finish", finish)?.let { pushItem(it) }
         }
         flushBefore("")
-    }
-
-    /** 追加一张 tool 卡：连续 observe 折叠（与执行现场同一降噪规则）。 */
-    private fun addToolCard(tool: String, ok: Boolean?, error: String?, step: Int?) {
-        val last = items.lastOrNull()
-        if (tool.contains("observe") && last is ChatItem.ToolCard
-            && last.tool.contains("observe") && last.count > 0) {
-            items[items.size - 1] = last.copy(count = last.count + 1)
-        } else {
-            items.add(ChatItem.ToolCard(step, tool, ok, error))
-        }
     }
 
     /** run 起止 ISO → 耗时秒（解析失败返回 null，面板自动省略耗时）。 */

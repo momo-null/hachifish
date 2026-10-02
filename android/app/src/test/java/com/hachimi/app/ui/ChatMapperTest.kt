@@ -42,14 +42,48 @@ class ChatMapperTest {
     }
 
     @Test
-    fun `finish done maps to done panel with summary`() {
-        val item = ChatMapper.item("finish", mapOf<String, Any?>(
+    fun `finish done maps to done panel plus full-summary bubble`() {
+        // R10：两处都放 —— 卡片摘要 + 完整结果气泡；短文本卡片留空（不重复抄一遍）
+        val e = mapOf<String, Any?>(
             "status" to "done", "summary" to "便签已创建",
-            "steps" to 6, "wall_clock_s" to 23.5)) as ChatItem.DonePanel
-        assertEquals("便签已创建", item.summary)
+            "steps" to 6, "wall_clock_s" to 23.5)
+        val item = ChatMapper.item("finish", e) as ChatItem.DonePanel
+        assertEquals("", item.summary)
         assertEquals(6, item.steps)
         assertEquals(23.5, item.wallClockS!!, 0.001)
+        assertEquals("便签已创建", (ChatMapper.finishBubble("finish", e) as ChatItem.AssistantMsg).text)
         assertEquals(ChatPhase.DONE, ChatMapper.phase("finish", mapOf("status" to "done")))
+    }
+
+    @Test
+    fun `long multi-sentence summary splits into panel digest and full bubble`() {
+        val head = "便签已经创建好了，并且设置了明天早上八点的提醒，还顺便把标题改成了买牛奶"
+        val full = head + "。另外我还把便签置顶了，方便你明天一眼就看到。"
+        val e = mapOf<String, Any?>("status" to "done", "summary" to full, "steps" to 6)
+        assertEquals(head, (ChatMapper.item("finish", e) as ChatItem.DonePanel).summary)
+        assertEquals(full, (ChatMapper.finishBubble("finish", e) as ChatItem.AssistantMsg).text)
+    }
+
+    @Test
+    fun `digest defers to bubble unless summary is long and multi-sentence`() {
+        assertEquals("", ChatMapper.digest("便签已创建"))                       // 短文本
+        assertEquals("", ChatMapper.digest(""))                                 // 空
+        assertEquals("", ChatMapper.digest("很长的一句完成说明没有任何句读符号".repeat(3)))  // 单句长文
+        // 多句但首句超长：硬截 + 省略号（仍与气泡全文不同文）
+        val multi = "很长的一句完成说明没有任何句读符号".repeat(3) + "。另外还做了第二件事。"
+        val d = ChatMapper.digest(multi)
+        assertTrue(d.endsWith("…"))
+        assertEquals(ChatMapper.DIGEST_MAX + 1, d.length)
+    }
+
+    @Test
+    fun `finish bubble only for done status`() {
+        // chat 轮文案已由 message 事件出过气泡（落盘即同一段），不再重复；
+        // 失败/未完成由失败面板承载原因，不出气泡
+        assertNull(ChatMapper.finishBubble("finish", mapOf("status" to "chat", "summary" to "你好呀")))
+        assertNull(ChatMapper.finishBubble("finish", mapOf("status" to "incomplete", "summary" to "超时")))
+        assertNull(ChatMapper.finishBubble("finish", mapOf("status" to "done", "summary" to "  ")))
+        assertNull(ChatMapper.finishBubble("step", mapOf("status" to "done", "summary" to "x")))
     }
 
     @Test

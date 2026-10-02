@@ -194,12 +194,19 @@ object Ds {
                     0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 val cp = dp(c, 8)
                 setPadding(cp, cp / 2 + dp(c, 2), cp, cp / 2 + dp(c, 2))
-                setOnClickListener { onPick(i) }
             }
             cells.add(cell)
             row.addView(cell)
         }
-        return Seg(row, cells, selected, options)
+        // 构造后立即绘制选中态：此前只把下标存进 Seg 不绘制 —— 未经外部 select()
+        // 的分段控件全是「无高亮」外观（看着像未选择）。
+        val seg = Seg(row, cells, selected, options).also { it.select(selected) }
+        // 点击先绘选中态再回调业务：此前每个调用点各自负责 select()，漏了就变成
+        // 「点了没反应」（设置页运行模式、知识页技能/记忆/世界模型即此坑）。
+        cells.forEachIndexed { i, cell ->
+            cell.setOnClickListener { seg.select(i); onPick(i) }
+        }
+        return seg
     }
 
     class Seg internal constructor(

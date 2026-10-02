@@ -101,6 +101,19 @@ object NarrativePanel {
     /** ConsoleActivity 可见时抑制 overlay（真分屏的下半屏就是控制台，双 UI 互相踩） */
     @Volatile @JvmStatic var consoleVisible = false
 
+    /**
+     * 实验静默模式（R15）：run 期间**完全不挂**任何悬浮层（球/浮条/控制台/红框）。
+     * 球与浮条都是可触摸窗，agent 的 tap_xy 打到它们会被吞掉——2026-10-02 实录：
+     * 冷基线 run 全程在跟自己的 UI 战斗（模型口播 "my gestures are hitting this
+     * panel instead of the phone"）。自动化实验必须能整体关掉；经 debug 广播
+     * ``panel_silent`` 切换。置 true 时立即摘除已挂窗口。
+     */
+    @Volatile @JvmStatic var silent: Boolean = false
+        set(value) {
+            field = value
+            if (value) hide()
+        }
+
     /** 控制台页轮询快照：状态行 / 感知 / 决策 / 时间线（面板内序）。 */
     @JvmStatic
     @Synchronized
@@ -136,7 +149,13 @@ object NarrativePanel {
                 }
                 when (e.optString("event")) {
                     "start" -> {
-                        collapsed = false
+                        // R11：新一轮起手=收起态（只留球，点按展开）；已挂载的面板同步
+                        // 变球，避免上一轮的展开态泄漏到新一轮。
+                        collapsed = true
+                        if (contentView != null || pillView != null) applyLayout()
+                        // 进度复位：收起态下球是第一视线，残留上一轮进度会误导
+                        lastProgressN = 0
+                        lastProgressTotal = 0
                         // 门控会话随任务重置（GateManager 契约「allow_always 仅当前任务」）：
                         // 产品路径（聊天发送 / 回环 /task）都不经过 TasksPage，必须在此统一重置，
                         // 否则上一任务的放行泄漏到所有后续任务（2026-10-01 真机实录）。
@@ -219,6 +238,11 @@ object NarrativePanel {
         }
     }
 
+    /**
+     * 任务信号到达 → 挂载 overlay。**起手一律收起态**（R11：只留大肥鱼球，点按才
+     * 展开）——三个入口同此（TasksPage 派发 / ChatPage 首个 tool step / 回环 /task），
+     * 执行期不再铺开面板遮挡目标 App；展开只由用户点按球触发（[expand]）。
+     */
     @Synchronized
     fun show(context: Context) {
         this.context = context.applicationContext
@@ -226,8 +250,14 @@ object NarrativePanel {
         // WindowManager.addView 需要带 Looper 的线程——在调用线程直接 add 会
         // 留下「已赋值未挂载」的脏状态（2026-09-29 实录）
         main.post {
-            if (contentView == null && canOverlay(this.context!!)) {
-                this.context?.let { attach(it, docked) }
+            collapsed = true
+            when {
+                // R15：静默模式一个窗都不挂（已挂的摘掉）
+                silent -> detachAll()
+                // R15 修复：上一轮遗留的**展开态**面板原样带进新一轮（show 只在
+                // "什么都没挂"时才挂球）——必须强制收回球，而不是放任不管
+                contentView != null || pillView != null -> applyLayout()
+                canOverlay(this.context!!) -> this.context?.let { attachPill(it) }
             }
         }
     }
@@ -259,6 +289,7 @@ object NarrativePanel {
         val c = context ?: return
         main.post {
             detachAll()
+            if (silent) return@post          // R15：静默模式不回挂
             if (!canOverlay(c)) return@post
             // 收起态维持药丸球（不因形态事件被"撑回"完整面板）
             if (collapsed) attachPill(c) else attach(c, docked)
@@ -276,6 +307,7 @@ object NarrativePanel {
      */
     @Synchronized
     fun collapse() {
+        if (silent) return               // R15：静默模式无窗可收
         collapsed = true
         val c = context ?: return
         main.post {
@@ -286,6 +318,7 @@ object NarrativePanel {
 
     @Synchronized
     fun expand() {
+        if (silent) return               // R15：静默模式不展开（球都不在场）
         collapsed = false
         val c = context ?: return
         main.post {
@@ -868,6 +901,7 @@ object NarrativePanel {
         val c = context ?: return
         main.post {
             removeGround()
+            if (silent) return@post          // R15：静默模式连红框都不画
             if (!canOverlay(c)) return@post
             val v = GroundView(c, nx, ny)
             try {

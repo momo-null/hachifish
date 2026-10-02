@@ -127,6 +127,15 @@ class DebugBridgeReceiver : BroadcastReceiver() {
                     com.hachimi.app.gate.GateManager.debugOpenSession()
                     JSONObject().put("ok", true).put("note", "gate session opened for current task")
                 }
+                "panel_silent" -> {
+                    // R15 实验静默开关：run 期间完全不挂悬浮层（球/浮条/控制台/红框）。
+                    // 球与浮条是可触摸窗，会吞 agent 的 tap_xy（2026-10-02 实录）。
+                    val on = if (intent.hasExtra("enabled")) intent.getBooleanExtra("enabled", true) else true
+                    com.hachimi.app.NarrativePanel.silent = on
+                    JSONObject().put("ok", true)
+                        .put("note", if (on) "overlay silenced (no pill/bar/console/ground)"
+                                     else "overlay normal")
+                }
                 "config" -> {
                     // 设备 profile 注入（跨品牌兼容）：把 ROM 专属参数写入应用私有 SharedPreferences
                     // "hachimi_config"，供原语运行时读取。例：tap_bottom_limit=0.93（手势区吞底部触摸）。

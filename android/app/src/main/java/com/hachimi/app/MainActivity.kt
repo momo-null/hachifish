@@ -143,6 +143,9 @@ class MainActivity : Activity() {
         }
         if (tab == 0) chatPage?.onResume()
         if (tab == 1) knowledgePage?.onResume()
+        // 设置页同样如此：此前只有聊天/知识 Tab 在切换时重读状态，设置页从未被
+        // 调用 —— 偏好回显只在 Activity.onResume 生效，表现为「点回设置页全是未选中」。
+        if (tab == 2) settingsPage?.onResume()
     }
 
     private fun LinearLayout.cells(): List<LinearLayout> =

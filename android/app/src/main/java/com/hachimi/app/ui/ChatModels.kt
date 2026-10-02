@@ -83,8 +83,10 @@ object ChatMapper {
             error = e["error"] as? String
         )
         "finish" -> when (e["status"] as? String) {
+            // R10：面板只放摘要（完整文案由 [finishBubble] 的气泡承载），
+            // 两处同源但不同文，避免"结果又在上又在卡里"的重复感。
             "done" -> ChatItem.DonePanel(
-                summary = (e["summary"] as? String) ?: "",
+                summary = digest((e["summary"] as? String) ?: ""),
                 steps = (e["steps"] as? Number)?.toInt() ?: 0,
                 wallClockS = (e["wall_clock_s"] as? Number)?.toDouble()
             )
@@ -119,6 +121,45 @@ object ChatMapper {
         }
         "error" -> ChatPhase.FAILED
         else -> null
+    }
+
+    /** 完成面板摘要长度上限（超过才在卡里重复一句，见 [digest]）。 */
+    const val DIGEST_MAX = 40
+
+    /**
+     * 完成面板的摘要文案（与结果气泡去重，纯函数可测）。
+     *
+     * 卡片**只在"结果明显长于一句"时才重复一句**，其余一律返回空串交给气泡独占：
+     * - 短文本（≤ [max]）：气泡一句话说得完，卡片再抄一遍就是重复；
+     * - 单句长文本（无句末标点，或去掉标点尾巴后≈全文）：摘要≈全文，同样重复；
+     * - 多句长文本：取首句（句号/叹号/问号/换行之前），首句仍超长则硬截 + 省略号。
+     */
+    fun digest(summary: String, max: Int = DIGEST_MAX): String {
+        val s = summary.trim()
+        if (s.length <= max) return ""
+        var cut = s.length
+        for (d in listOf('。', '！', '？', '!', '?', '\n')) {
+            val i = s.indexOf(d)
+            if (i >= 0 && i < cut) cut = i
+        }
+        val head = s.substring(0, cut).trim()
+        // 单句（或只剩标点尾巴）：完整文案交给气泡，卡片不重复
+        if (head.isEmpty() || head.length >= s.length - 2) return ""
+        return if (head.length <= max) head else head.take(max) + "…"
+    }
+
+    /**
+     * finish 事件的**结果气泡**（完整 summary）——与 [item] 的完成面板配套，
+     * 现场与会话回放同走此函数（R10：两处都放，形态不再随入口而变）。
+     *
+     * 仅 status=done 产出：chat 轮的文案已由 message 事件出过气泡（落盘就是同一
+     * 段话，再出一条 = 重复）；未完成/失败由失败面板承载原因，不出气泡。
+     */
+    fun finishBubble(type: String, e: Map<String, Any?>): ChatItem.AssistantMsg? {
+        if (type != "finish") return null
+        if ((e["status"] as? String) != "done") return null
+        return (e["summary"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { ChatItem.AssistantMsg(it) }
     }
 
     /** 事件到达时若存在 Thinking 占位则应移除（首个实质事件替换思考态）。 */
