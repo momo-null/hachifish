@@ -21,7 +21,11 @@ import com.hachimi.app.BrainConfigStore
 import com.hachimi.app.KernelHostService
 import com.hachimi.app.MainActivity
 import com.hachimi.app.NarrativePanel
+import com.hachimi.app.OmniAgentRemote
+import com.hachimi.app.RemoteConfigStore
 import com.hachimi.app.RoleStore
+import com.hachimi.app.SpeechInput
+import com.hachimi.app.TtsSpeaker
 import org.json.JSONObject
 
 /**
@@ -47,6 +51,19 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private var currentTaskId: String? = null
     /** 本轮是否已让位到桌面（首个 tool 步才让位——闲聊不跳桌面，K4）。 */
     private var yieldedHome = false
+    // ---- 远程内核（手机伴侣 C1-C3：Tier 2 遥控模式，doc/plans/omniagent_remote_client_plan.md）----
+    /** 远程会话 task_id（与本地内核 currentTaskId 独立——两套 Tier 的会话不混流）。 */
+    private var remoteTaskId: String? = null
+    /** 远程轮运行中（SSE status.running=true）；false = 轮次边界。 */
+    @Volatile private var remoteRunning = false
+    /** 远程口播流累积：message 事件按 block_id 增量，同块续写同一气泡。 */
+    private var remoteStreamBlock = ""
+    private var remoteStreamText = ""
+    private var remoteBubbleIdx = -1
+    /** 本远程轮是否出现过 tool 卡（轮末相位 DONE vs IDLE）。 */
+    private var remoteHadTools = false
+    /** 🎤 按住说话（C2：按下第一动作 = 打断播报）。 */
+    private var speech: SpeechInput? = null
     // V13 会话列表：面板视图 + 冷启动恢复标记
     private var sessionsPanel: LinearLayout? = null
     private var sessionsList: LinearLayout? = null
@@ -69,6 +86,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private val headerName: TextView
     private val btnPause: TextView
     private val btnStop: TextView
+    private val btnRemote: TextView
+    private val btnMic: TextView
     private val recycler: RecyclerView
     private val emptyBox: LinearLayout
     private val input: EditText
@@ -104,10 +123,14 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         info.addView(headerName); info.addView(headerStatus)
         header.addView(info)
         btnPause = controlBtn("⏸") { bridgeCall("request_pause") }
-        btnStop = controlBtn("⏹") { bridgeCall("request_stop") }
+        btnStop = controlBtn("⏹") { if (remoteRunning) remoteStop() else bridgeCall("request_stop") }
         btnPause.visibility = View.GONE; btnStop.visibility = View.GONE
         header.addView(btnPause); header.addView(btnStop)
         header.addView(controlBtn("🗂") { openSessions() })
+        btnRemote = controlBtn("☁") { showRemoteDialog() }.also {
+            it.alpha = if (RemoteConfigStore.load(act)?.ready == true) 1f else 0.4f
+        }
+        header.addView(btnRemote)
         view.addView(header)
 
         // ---- 消息流 / 空状态 ----
@@ -156,8 +179,33 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             }
             setOnClickListener { send() }
         }
-        inputArea.addView(input); inputArea.addView(btnSend)
+        // 🎤 对讲式（C1/C2）：按下打断播报并收音，松手出字走同一发送路径
+        btnMic = TextView(act).apply {
+            text = "🎤"; textSize = 15f; gravity = Gravity.CENTER
+            background = Ds.round(act, 18, Ds.GRAY_BG)
+            layoutParams = LinearLayout.LayoutParams(Ds.dp(act, 36), Ds.dp(act, 36)).apply {
+                leftMargin = Ds.dp(act, 6)
+            }
+            setOnTouchListener { v, ev ->
+                when (ev.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        TtsSpeaker.stop()   // C2：按住第一动作 = 打断播报
+                        startSpeech()
+                        v.isPressed = true; true
+                    }
+                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_CANCEL -> {
+                        v.isPressed = false
+                        speech?.stopListening()   // 松手出字（onFinal → send）
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }
+        inputArea.addView(input); inputArea.addView(btnMic); inputArea.addView(btnSend)
         view.addView(inputArea)
+        TtsSpeaker.ensure(act)   // TTS 引擎提前热好（语音播报；失败静默关闭）
         refresh()   // 首帧：空态（V2）或欢迎卡（V3，冷启动恢复后被 refresh 替换）
     }
 
@@ -353,10 +401,47 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
 
     // ---------------- 发送（P1：全部按任务派发，链路复刻 TasksPage） ----------------
 
-    private fun send() {
-        val objective = input.text.toString().trim()
+    private fun send(text: String? = null) {
+        val objective = (text ?: input.text.toString()).trim()
         if (objective.isEmpty()) return
-        if (sending) { toast("大肥鱼正在干活，稍等或先停止"); return }
+        // C2 barge-in：远程轮运行中允许说话打断（chat force=true）；本地内核轮维持独占
+        if (sending && !remoteRunning) { toast("大肥鱼正在干活，稍等或先停止"); return }
+        val remoteCfg = RemoteConfigStore.load(act)?.takeIf { it.ready && it.auto }
+        if (remoteCfg != null) {
+            // C3：轮次边界探活（1s 超时）——可达走远程（Tier 2），不可达回本地内核（Tier 1），
+            // 过程不丢话（同一条消息只进一条路径）。
+            Thread {
+                val up = OmniAgentRemote.health(remoteCfg.baseUrl, remoteCfg.token)
+                main.post {
+                    if (up) remoteSend(remoteCfg, objective, force = remoteRunning)
+                    else kernelSend(objective, typed = text == null)
+                }
+            }.start()
+            return
+        }
+        kernelSend(objective, typed = text == null)
+    }
+
+    /** 路径公共前置：用户气泡 + 思考占位 + 输入禁用（两条 Tier 共用；收键盘仅打字路径）。 */
+    private fun prelude(objective: String, typed: Boolean) {
+        sending = true
+        input.isEnabled = false
+        if (typed) {
+            input.setText("")
+            input.clearFocus()
+            (act.getSystemService(Activity.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(input.windowToken, 0)
+        }
+        lastObjective = objective
+        items.add(ChatItem.UserMsg(objective))
+        items.add(ChatItem.Thinking)
+        phase = ChatPhase.THINKING
+        headerStatus.text = phase.label
+        refresh()
+    }
+
+    /** Tier 1（本地内核）：BYOK + Chaquopy start_task_json（原 send 主体的 kernel 部分）。 */
+    private fun kernelSend(objective: String, typed: Boolean) {
         val bridge = KernelHostService.pyBridgeModule
         if (bridge == null) { toast("内核启动中（首次约需 10 秒），稍后再试"); return }
         val cfg = BrainConfigStore.load(act)
@@ -365,21 +450,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             (act as? MainActivity)?.let { a -> a.startActivity(Intent(a, com.hachimi.app.SettingsActivity::class.java)) }
             return
         }
-        sending = true
-        input.isEnabled = false
-        input.setText("")
-        // 点发送即收起输入法（P1.5 UI 反馈 3）：adjustResize 下输入区上移到键盘上方，
-        // 发送后收起键盘让消息流/输入区回到完整可见高度。
-        input.clearFocus()
-        (act.getSystemService(Activity.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
-            .hideSoftInputFromWindow(input.windowToken, 0)
-        lastObjective = objective
+        prelude(objective, typed)
         yieldedHome = false
-        items.add(ChatItem.UserMsg(objective))
-        items.add(ChatItem.Thinking)
-        phase = ChatPhase.THINKING
-        headerStatus.text = phase.label
-        refresh()
         Thread {
             try {
                 bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
@@ -424,6 +496,192 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 }
             }
         }.start()
+    }
+
+    // ---------------- 远程轮（Tier 2，手机伴侣 C1-C3） ----------------
+
+    /** Tier 2（远程内核）：chat 下发 → SSE 订阅 → 气泡/播报/轮次收尾。 */
+    private fun remoteSend(rc: RemoteConfigStore.RemoteConfig, objective: String, force: Boolean) {
+        prelude(objective, typed = false)
+        remoteStreamBlock = ""
+        remoteStreamText = ""
+        remoteBubbleIdx = -1
+        remoteHadTools = false
+        Thread {
+            try {
+                val tid = OmniAgentRemote.chat(rc.baseUrl, rc.token, objective, remoteTaskId, force)
+                remoteTaskId = tid
+                remoteRunning = true
+                main.post {
+                    phase = ChatPhase.WORKING
+                    headerStatus.text = "远程内核 · 干活中"
+                    btnPause.visibility = View.GONE
+                    btnStop.visibility = View.VISIBLE
+                    refresh()
+                }
+                val done = java.util.concurrent.atomic.AtomicBoolean(false)
+                OmniAgentRemote.stream(rc.baseUrl, rc.token, tid, "hachimi-phone") { ev ->
+                    if (done.get()) return@stream false
+                    var end = false
+                    main.post {
+                        end = handleRemoteEvent(ev, rc)
+                        if (end) done.set(true)
+                    }
+                    done.get()
+                }
+            } catch (e: Exception) {
+                main.post { remoteFail(e.message ?: e.javaClass.simpleName) }
+            }
+        }.start()
+    }
+
+    /**
+     * 远程 SSE 事件 → UI（主线程；返回 true = 本轮结束，调用方停止读流）。
+     * 事件映射与本地 Tier 复用同一 ChatMapper（R10：渲染规则只有一份实现）。
+     */
+    private fun handleRemoteEvent(ev: OmniAgentRemote.SseEvent, rc: RemoteConfigStore.RemoteConfig): Boolean {
+        if (act.isDestroyed) return true
+        when (ev.event) {
+            "status" -> if (!ev.data.optBoolean("running", true) && remoteRunning) {
+                // 轮次收尾：恢复输入；相位按有无 tool 步（DONE/IDLE）
+                remoteRunning = false
+                sending = false
+                input.isEnabled = true
+                phase = if (remoteHadTools) ChatPhase.DONE else ChatPhase.IDLE
+                headerStatus.text = phase.label
+                btnStop.visibility = View.GONE
+                refresh()
+                return true
+            }
+            "message" -> {
+                val text = ev.data.optString("content").ifEmpty { ev.data.optString("text") }
+                if (text.isNotEmpty() && remoteRunning) {
+                    val block = ev.data.optString("block_id")
+                    if (block != remoteStreamBlock || remoteBubbleIdx < 0 ||
+                        remoteBubbleIdx >= items.size ||
+                        items[remoteBubbleIdx] !is ChatItem.AssistantMsg) {
+                        if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+                        remoteStreamBlock = block
+                        remoteStreamText = text
+                        pushItem(ChatItem.AssistantMsg(text))
+                        remoteBubbleIdx = items.size - 1
+                    } else {
+                        remoteStreamText += text
+                        items[remoteBubbleIdx] = ChatItem.AssistantMsg(remoteStreamText)
+                    }
+                    refresh()
+                }
+            }
+            "toolcall" -> {
+                val tool = ev.data.optString("name").ifEmpty { ev.data.optString("tool") }
+                if (tool.isNotEmpty() && remoteRunning) {
+                    if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+                    remoteHadTools = true
+                    ChatMapper.item("step", mapOf<String, Any?>(
+                        "tool" to tool, "ok" to null, "error" to null, "step" to null))
+                        ?.let { pushItem(it) }
+                    phase = ChatPhase.WORKING
+                    headerStatus.text = "远程内核 · 干活中"
+                    refresh()
+                }
+            }
+            "chat" -> {
+                val role = ev.data.optString("role")
+                val content = ev.data.optString("content")
+                if ((role == "agent" || role == "assistant") && content.isNotBlank()) {
+                    // 最终结论：替换流式气泡为定稿 + 播报（C1 对讲式；按住 🎤 即打断 = C2）
+                    if (remoteBubbleIdx in items.indices && items[remoteBubbleIdx] is ChatItem.AssistantMsg) {
+                        items[remoteBubbleIdx] = ChatItem.AssistantMsg(content.trim())
+                    } else {
+                        if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+                        pushItem(ChatItem.AssistantMsg(content.trim()))
+                        remoteBubbleIdx = items.size - 1
+                    }
+                    if (rc.speak) TtsSpeaker.speak(content)
+                    refresh()
+                }
+            }
+            "error" -> remoteFail(ev.data.optString("error").ifEmpty { "远程轮出错" })
+        }
+        return false
+    }
+
+    /** 远程轮失败收尾（FailPanel + 恢复输入；不回退 Tier——下一轮探活再决定）。 */
+    private fun remoteFail(reason: String) {
+        sending = false
+        remoteRunning = false
+        input.isEnabled = true
+        if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+        items.add(ChatItem.FailPanel(reason))
+        phase = ChatPhase.FAILED
+        headerStatus.text = phase.label
+        refresh()
+    }
+
+    /** 远程轮硬停止（⏹ / C2 后备通道）。 */
+    private fun remoteStop() {
+        val rc = RemoteConfigStore.load(act) ?: return
+        Thread {
+            try { OmniAgentRemote.stop(rc.baseUrl, rc.token, remoteTaskId) } catch (_: Exception) {}
+        }.start()
+    }
+
+    /** 远程配置对话框（C1 最小形态：base_url + token + 自动切换/播报开关）。 */
+    private fun showRemoteDialog() {
+        val cur = RemoteConfigStore.load(act)
+        val base = EditText(act).apply {
+            hint = "http://<PC 内网 IP>:8000"; textSize = 13f
+            setText(cur?.baseUrl ?: ""); setSingleLine(true)
+        }
+        val token = EditText(act).apply {
+            hint = "server.auth_token（非回环必填）"; textSize = 13f
+            setText(cur?.token ?: ""); setSingleLine(true)
+        }
+        val auto = android.widget.CheckBox(act).apply {
+            text = "自动切换（探活可达走远程，不可途回本地）"; isChecked = cur?.auto ?: true; textSize = 13f
+        }
+        val speak = android.widget.CheckBox(act).apply {
+            text = "语音播报回复（按住 🎤 打断）"; isChecked = cur?.speak ?: true; textSize = 13f
+        }
+        val box = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = Ds.dp(act, 18)
+            setPadding(p, p / 2, p, 0)
+            addView(Ds.small(act, "远程内核 base_url")); addView(base)
+            addView(Ds.small(act, "访问 token")); addView(token)
+            addView(auto); addView(speak)
+        }
+        android.app.AlertDialog.Builder(act)
+            .setTitle("远程内核（OmniAgent）")
+            .setView(android.widget.ScrollView(act).apply { addView(box) })
+            .setPositiveButton("保存") { _, _ ->
+                val cfg = RemoteConfigStore.RemoteConfig(
+                    baseUrl = base.text.toString().trim(),
+                    token = token.text.toString().trim(),
+                    auto = auto.isChecked, speak = speak.isChecked)
+                RemoteConfigStore.save(act, cfg)
+                btnRemote.alpha = if (cfg.ready) 1f else 0.4f
+                toast(if (cfg.ready) "远程内核已保存（自动切换开=${cfg.auto}）" else "远程内核未配置（本地模式）")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 🎤 收音控制器（每轮创建/销毁；SpeechRecognizer 须主线程创建）。 */
+    private fun startSpeech() {
+        main.post {
+            speech?.destroy()
+            speech = SpeechInput(act, onFinal = { t ->
+                main.post {
+                    speech?.destroy()
+                    speech = null
+                    send(text = t)   // 对讲式：松手出字并直接发送（同输入框路径）
+                }
+            }, onError = { e ->
+                main.post { toast(e) }
+            })
+            speech?.start()
+        }
     }
 
     private fun bridgeCall(method: String) {

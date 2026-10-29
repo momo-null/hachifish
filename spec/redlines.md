@@ -8,8 +8,13 @@
 
 | # | 红线 | 检查方式 |
 |---|------|----------|
-| R1 | **完全上机**：运行时零 PC 依赖；adb/u2 仅出现在调试与 harness 通道，产品代码路径不得引用 | 评审 + 依赖扫描（`adb`/`uiautomator2` 仅许出现在 harness/ 与调试标记代码） |
-| R2 | **官方 API only**：操作通道 = AccessibilityService；观察通道 = MediaProjection/takeScreenshot。禁 root、KernelSU、私有 hook、反射绕授权 | 评审（权限声明清单核对：仅 `ACCESSIBILITY_*`/`MEDIA_PROJECTION`/`INTERNET`） |
+| R1 | **完全上机**：运行时零 PC 依赖；adb/u2 仅出现在调试与 harness 通道，产品代码路径不得引用。**修订（2026-10-30，redline-change）**：新增「远程内核表面」豁免——手机伴侣模式（`OmniAgentRemote` 客户端）按用户拍板以 PC 为大脑，属**独立产品表面而非研究仪器**，不改变研究实验（M1'–M5'）的完全上机约束 | 评审 + 依赖扫描（`adb`/`uiautomator2` 仅许出现在 harness/ 与调试标记代码）；远程表面代码隔离在 `OmniAgentRemote.kt` / `RemoteConfigStore.kt` |
+| R2 | **官方 API only**：操作通道 = AccessibilityService；观察通道 = MediaProjection/takeScreenshot。禁 root、KernelSU、私有 hook、反射绕授权 | 评审（权限声明清单核对：仅 `ACCESSIBILITY_*`/`MEDIA_PROJECTION`/`INTERNET`/`RECORD_AUDIO`） |
+
+**R2 权限清单附录（2026-10-30，redline-change）**：新增 `RECORD_AUDIO`（对讲式语音输入，
+`SpeechRecognizer` 系统识别服务）——书面理由：手机伴侣 C1 的语音输入是核心交互，系统
+ASR 为 plan §9 拍板选型；`usesCleartextTraffic=true` 为 C1 简化（局域网 HTTP + BYOK
+token），终态走 nginx https，届时收回。
 | R3 | **原语面同构**：内核只认 `doc/architecture.md` §4.1 的原语名；新增原语必须 u2/Accessibility 双实现同进，单实现 = 评审不通过 | 对拍测试（同一 App 同任务双后端轨迹语义一致率 ≥90%） |
 | R4 | **能力==工具，内核零场景硬编码**：场景知识（某 App 的按钮在哪）只进知识层/工具参数，禁止写入 loop/桥代码 | lint：kernel/ 与 android/ 源码禁出现具体 App 包名/界面名词 |
 | R5 | **能力默认关、需显式开启**：弱注入、Curator 蒸馏、实验模式出厂默认关闭；开关落在设置 UI | 单测：全新安装首次运行断言无注入行为 |

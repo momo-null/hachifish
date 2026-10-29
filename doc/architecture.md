@@ -148,6 +148,7 @@ files/
 | A6 | Android 11+ 基线 | takeScreenshot API 30+ | 8–10（投屏兜底档，不入主实验） |
 | A7 | 双后端同构原语面 | 内核零改动切换；对拍测试可行 | 仅 Accessibility 单实现 |
 | A8 | 实验通道 = 回环 HTTP + adb reverse | 自动化不破坏「完全上机」 | u2 运行时通道（降为调试） |
+| A9 | **远程内核表面（2026-10-30，手机伴侣 C1-C3）**：Kotlin 侧独立遥控客户端（`OmniAgentRemote.kt`，零新依赖 HttpURLConnection）+ 远程配置（Keystore）+ 系统 ASR/TTS 语音回路；每轮 `/health` 探活自动切换 Tier 2（远程）/ Tier 1（本地内核） | 手机伴侣 plan（`doc/omniagent_remote_client_plan.md`）已拍板；上游契约冻结（remote-client-contract）；R1 修订：独立产品表面豁免「完全上机」（redline-change） | 远程 provider 进 Chaquopy 内核（跨语言绕远、污染研究仪器）；第三方 HTTP/SSE 库 |
 
 ## 8. 上游对应关系（语义移植地图）
 
