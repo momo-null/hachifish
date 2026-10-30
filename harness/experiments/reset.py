@@ -652,6 +652,11 @@ def reset_task(task):
     for pkg in spec.get("pm_clear", []):
         adb("shell", "am", "force-stop", pkg)
         time.sleep(0.5)
+    if spec.get("clear_skills"):
+        # A/B 对照专用：每轮重置清空技能池，确保「无技能」基线不受上一轮
+        # auto_distill 产物污染（SkillLibrary 无内存缓存，清磁盘即生效）。
+        adb("shell", "run-as", "com.hachimi.app", "rm", "-rf", "files/skills")
+        print("  clear_skills: files/skills removed (no-skill baseline)")
     for pkg in spec.get("pm_clear", []):
         if cleared.get(pkg):
             continue

@@ -31,6 +31,35 @@
    }
   },
   {
+   "id": "T2_skill",
+   "level": "L1",
+   "app": "org.fossify.math",
+   "title": "计算器表达式(技能参考)",
+   "objective": "Open the app org.fossify.math, calculate the expression 12*34+66 using the calculator UI, confirm the result 474 is displayed on screen, then call task_done.\n\n【已沉淀技能 skill_c8aec317baf8 · 操作参考（来自历史执行轨迹，execution-verified）】\n可直接按此序列操作，与当前界面不一致处再 observe 调整：\n1. launch_app(package=org.fossify.math)\n2. tap_by_id(view_id=org.fossify.math:id/btn_1)\n3. tap_by_id(view_id=org.fossify.math:id/btn_2)\n4. tap_by_id(view_id=org.fossify.math:id/btn_multiply)\n5. tap_by_id(view_id=org.fossify.math:id/btn_3)\n6. tap_by_id(view_id=org.fossify.math:id/btn_4)\n7. tap_by_id(view_id=org.fossify.math:id/btn_plus)\n8. tap_by_id(view_id=org.fossify.math:id/btn_6)\n9. tap_by_id(view_id=org.fossify.math:id/btn_6)\n10. tap_by_id(view_id=org.fossify.math:id/btn_equals)",
+   "done_when": "474",
+   "max_steps": 1000,
+   "reset": {
+    "pm_clear": [
+     "org.fossify.math"
+    ]
+   }
+  },
+  {
+   "id": "T2_noskill",
+   "level": "L1",
+   "app": "org.fossify.math",
+   "title": "计算器表达式(无技能)",
+   "objective": "Open the app org.fossify.math, calculate the expression 12*34+66 using the calculator UI, confirm the result 474 is displayed on screen, then call task_done.",
+   "done_when": "474",
+   "max_steps": 1000,
+   "reset": {
+    "pm_clear": [
+     "org.fossify.math"
+    ],
+    "clear_skills": true
+   }
+  },
+  {
    "id": "T3",
    "level": "L1",
    "app": "org.fossify.clock",
