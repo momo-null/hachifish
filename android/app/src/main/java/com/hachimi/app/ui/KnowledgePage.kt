@@ -219,7 +219,7 @@ class KnowledgePage(private val act: Activity) {
         }.start()
     }
 
-    /** 记忆：导出/清空动作行 + MEMORY.md 摘要卡 + 蒸馏记录列表。 */
+    /** 记忆：动作行 + LTM 单脑概览卡 + 画像卡 + 旧蒸馏线遗留只读视图。 */
     private fun renderMemory(r: JSONObject, extra: String?) {
         bodyHost.removeAllViews()
         // 动作行（P2 DoD3/DoD5）：导出全部知识（zip 分享）/ 一键清空
@@ -241,23 +241,63 @@ class KnowledgePage(private val act: Activity) {
         actionBtn("清空", danger = true) { clearDialog() }
         bodyHost.addView(actions, Ds.vp(bottom = Ds.dp(act, 10)))
 
+        // LTM 单脑概览（memory/brain.db，与 PC 同体系）：条数/状态分布 + 最近条目
+        val brain = r.optJSONObject("brain")
+        val profile = r.optString("profile")
+        val brainTotal = brain?.optInt("total", 0) ?: 0
+        if (brainTotal > 0) {
+            val card = Ds.card(act)
+            val byState = brain?.optJSONObject("by_state")
+            val active = byState?.optInt("active", 0) ?: 0
+            val dormant = byState?.optInt("dormant", 0) ?: 0
+            card.addView(TextView(act).apply {
+                text = "长期记忆 · $brainTotal 条" +
+                        (if (dormant > 0) "（活跃 $active / 休眠 $dormant）" else "")
+                textSize = 14f; setTextColor(Ds.TEXT); typeface = Typeface.DEFAULT_BOLD
+            })
+            val recent = brain?.optJSONArray("recent")
+            if (recent != null && recent.length() > 0) {
+                val sb = StringBuilder()
+                for (i in 0 until minOf(recent.length(), 8)) {
+                    val line = recent.optString(i).replace('\n', ' ')
+                    if (line.isNotBlank()) sb.append("· ").append(line.take(80)).append('\n')
+                }
+                if (sb.isNotEmpty()) {
+                    card.addView(Ds.small(act, sb.toString().trimEnd())
+                        .apply { setPadding(0, Ds.dp(act, 6), 0, 0) })
+                }
+            }
+            bodyHost.addView(card, Ds.vp(bottom = Ds.dp(act, 10)))
+        }
+        if (profile.isNotBlank()) {
+            val card = Ds.card(act)
+            card.addView(TextView(act).apply {
+                text = "用户画像"
+                textSize = 14f; setTextColor(Ds.TEXT); typeface = Typeface.DEFAULT_BOLD
+            })
+            card.addView(Ds.small(act, profile.take(400) + if (profile.length > 400) "\n…" else "")
+                .apply { setPadding(0, Ds.dp(act, 6), 0, 0) })
+            bodyHost.addView(card, Ds.vp(bottom = Ds.dp(act, 10)))
+        }
+
+        // 旧蒸馏线遗留（MEMORY.md / rollouts）：只读视图，不再更新
         val master = r.optString("master")
         val rollouts = r.optInt("rollouts", 0)
-        if (master.isBlank() && rollouts == 0) {
+        if (brainTotal == 0 && profile.isBlank() && master.isBlank() && rollouts == 0) {
             bodyHost.addView(Ds.emptyState(act, "≡", "还没有记忆",
-                "任务跑完后大肥鱼会蒸馏跨任务经验（rollout），\n" +
-                "沉淀进全局记忆，下次任务前弱注入参考。"))
+                "对话和任务结束后，大肥鱼会自动沉淀跨会话记忆；\n" +
+                "下次对话前按相关度检索注入。"))
             return
         }
         if (master.isNotBlank()) {
             val card = Ds.card(act)
             card.addView(TextView(act).apply {
-                text = "全局记忆 · ${r.optInt("master_chars")} 字"
+                text = "全局记忆（旧版） · ${r.optInt("master_chars")} 字"
                 textSize = 14f; setTextColor(Ds.TEXT); typeface = Typeface.DEFAULT_BOLD
             })
             card.addView(Ds.small(act, master.take(600) + if (master.length > 600) "\n…" else "")
                 .apply { setPadding(0, Ds.dp(act, 6), 0, 0) })
-            bodyHost.addView(card)
+            bodyHost.addView(card, Ds.vp(bottom = Ds.dp(act, 10)))
         }
         if (extra != null) {
             val er = JSONObject(extra)
@@ -329,15 +369,17 @@ class KnowledgePage(private val act: Activity) {
         Thread {
             try {
                 val r = JSONObject(bridge.callAttr("knowledge_compact_json").toString())
-                val removed = r.optInt("removed")
-                val pruned = r.optJSONObject("pruned")
-                val facts = pruned?.optInt("facts_pruned") ?: 0
-                val tasks = pruned?.optInt("tasks_pruned") ?: 0
-                val msg = when {
-                    removed > 0 || facts > 0 || tasks > 0 ->
-                        "合并 $removed 条重复，淘汰 $facts 条超容事实，清理 $tasks 个过期 run"
-                    else -> "知识库很整洁，无需整理"
+                if (!r.optBoolean("ok")) {
+                    main.post {
+                        android.widget.Toast.makeText(
+                            act, "整理失败：${r.optString("error")}",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    return@Thread
                 }
+                val brain = r.optJSONObject("brain")
+                val total = brain?.optInt("total", 0) ?: 0
+                val msg = "整理完成 · 共 $total 条长期记忆"
                 main.post {
                     android.widget.Toast.makeText(
                         act, msg, android.widget.Toast.LENGTH_SHORT).show()
@@ -357,7 +399,7 @@ class KnowledgePage(private val act: Activity) {
     private fun clearDialog() {
         android.app.AlertDialog.Builder(act)
             .setTitle("清空知识")
-            .setItems(arrayOf("清空记忆（MEMORY.md + 蒸馏记录）", "清空全部（记忆 + 技能）")) { _, which ->
+            .setItems(arrayOf("清空记忆（长期记忆 + 旧蒸馏记录）", "清空全部（记忆 + 技能）")) { _, which ->
                 val scope = if (which == 0) "memory" else "all"
                 android.app.AlertDialog.Builder(act)
                     .setMessage(if (which == 0)

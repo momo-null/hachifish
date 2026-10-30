@@ -1125,6 +1125,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 val p = Ds.dp(act, 12)
                 setPadding(p, p / 2 + Ds.dp(act, 2), p, p / 2 + Ds.dp(act, 2))
                 maxWidth = Ds.dp(act, 300)
+                setTextIsSelectable(true)   // 长按选择/复制（用户消息同样可复制）
             })
             // 用户头像：气泡右侧，用「用户角色」头像（上传图 > 称呼首字），与大肥鱼（左）对称
             row.addView(ImageView(act).apply {
@@ -1150,6 +1151,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 val p = Ds.dp(act, 12)
                 setPadding(p + Ds.dp(act, 4), p / 2 + Ds.dp(act, 2), p + Ds.dp(act, 4), p / 2 + Ds.dp(act, 2))
                 maxWidth = Ds.dp(act, 300)
+                setTextIsSelectable(true)   // 长按选择/复制（现场与回放气泡同型同权）
             }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 leftMargin = Ds.dp(act, 8); topMargin = Ds.dp(act, 2)
