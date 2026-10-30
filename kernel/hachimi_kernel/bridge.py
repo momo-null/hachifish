@@ -739,8 +739,17 @@ _knowledge_enabled = {"on": True}
 
 
 def set_knowledge_enabled(enabled):
-    """Kotlin 设置页「弱注入」开关落 kernel（true=注入 memory/技能摘要）。"""
+    """Kotlin 设置页「弱注入」开关落 kernel（true=注入 memory/技能摘要）。
+
+    同步拨记忆层总开关：关 = L1 注入与 LTM 沉淀一起停（与桌面
+    runtime.knowledge.memory.enabled 同门语义）。
+    """
     _knowledge_enabled["on"] = bool(enabled)
+    try:
+        from hachimi_kernel import memory_brain
+        memory_brain.set_enabled(bool(enabled))
+    except Exception:
+        pass
     return {"ok": True, "knowledge_enabled": _knowledge_enabled["on"]}
 
 
@@ -767,24 +776,21 @@ def _skill_ops(s) -> str:
 
 
 def _knowledge_parts(objective: str = ""):
-    """弱注入块 + 元数据（K7a / P2 DoD2）：返回 ``(block, meta)``。
+    """弱注入块 + L1 记忆 lead-in + 元数据（K7a，LTM 对齐后形态）。
 
-    P2-R Phase 2：按 objective 做相关度排序取 top-k + 字符预算；条目不再
-    携带整段 objective 原文（旧版注入块 ~60% 字符是这份冗余）。
+    两路注入分工（对齐桌面）：**技能目录**（静态，逐 run 稳定）→ system 弱注入
+    块；**L1 检索记忆**（动态，按本轮 query 检索）→ ``<relevant-memories>``
+    lead-in，mini_loop 作为 user 消息插在历史后、本轮输入前（桌面
+    _memory_lead_in 注入位；不得改为每步尾部重插）。
     meta 供主界面「本次注入了哪些知识」指示：memory 有无、技能名列表、块字符数；
     开关关 / 无任何内容 → 空串（零注入，prompt 逐字节不变）。
     """
     if not _knowledge_enabled["on"]:
-        return "", {"memory": False, "skills": [], "chars": 0}
+        return "", "", {"memory": False, "skills": [], "chars": 0, "hits": 0}
     try:
-        from hachimi_kernel.knowledge_inject import (
-            load_memory_text, load_memory_items, build_knowledge_block)
+        from hachimi_kernel.knowledge_inject import build_knowledge_block
+        from hachimi_kernel import memory_brain
         skills = []
-        mem = ""
-        try:
-            mem = load_memory_text()
-        except Exception:
-            mem = ""
         try:
             from hachimi_kernel.skill_library import SkillLibrary
             # 全局目录直读 + _parse（构造器需合法 task_id，全局列表面板/注入
@@ -806,20 +812,20 @@ def _knowledge_parts(objective: str = ""):
                                    "guide": (s.playbook or "")})
         except Exception:
             skills = []
-        block = build_knowledge_block(mem, skills, objective=objective or "")
-        return block, {"memory": bool(mem.strip()),
-                       "skills": [s["name"] for s in skills],
-                       "facts": load_memory_items(),
-                       "chars": len(block)}
+        block = build_knowledge_block(skills, objective=objective or "")
+        mem, mmeta = "", {"hits": 0}
+        try:
+            mem, mmeta = memory_brain.inject_text_brain(query=objective or "")
+        except Exception:
+            mem, mmeta = "", {"hits": 0}
+        return block, mem, {"memory": bool(mem.strip()),
+                            "skills": [s["name"] for s in skills],
+                            "hits": int(mmeta.get("hits", 0)),
+                            "chars": len(block) + len(mem)}
     except Exception as e:
         print("[task] knowledge block unavailable: %s: %s" % (type(e).__name__, e),
               flush=True)
-        return "", {"memory": False, "skills": [], "chars": 0}
-
-
-def _knowledge_block():
-    """弱注入块（K7a）：memory summary + 全局技能摘要 → build_knowledge_block。"""
-    return _knowledge_parts()[0]
+        return "", "", {"memory": False, "skills": [], "chars": 0, "hits": 0}
 
 
 def _make_curator(task_id):
@@ -829,25 +835,15 @@ def _make_curator(task_id):
 
 
 def _curator_after_finish(task_id, run_record):
-    """任务收尾后的知识维护（K7b）：蒸馏/prune/复核——**绝不拖垮主流程**。
+    """任务收尾后的轨迹域维护（K7b）：prune/world-model 复核/质量标记——**绝不拖垮主流程**。
 
-    实验组冻结（R9）由调用方判定后跳过；Curator 自身启发式、无 brain 依赖。
-    P2-R：注入可选蒸馏大脑（facts LLM 提取用）——构造/注入失败 = 纯启发式，
-    任何异常都不拖垮主流程。
+    实验组冻结（R9）由调用方判定后跳过。记忆蒸馏不在这里：LTM 对齐后沉淀走
+    ``memory_writer`` 异步写链（on_finish 直接入队）。
     """
     if not task_id or run_record is None:
         return
     try:
         curator = _make_curator(task_id)
-        try:
-            cfg = dict(_brain_cfg or {})
-            if cfg.get("base_url"):
-                from hachimi_kernel.brain_client import BrainClient
-                curator.brain = BrainClient(
-                    cfg["base_url"], cfg.get("api_key", ""), cfg.get("model", ""),
-                    timeout=90, thinking={"type": "disabled"})
-        except Exception as e:
-            print("[curator] facts brain unavailable: %s" % e, flush=True)
         report = curator.run_once(run_record=run_record)
         print("[curator] task=%s pruned=%s errors=%d"
               % (task_id, report.pruned_files, len(report.errors)), flush=True)
@@ -857,12 +853,26 @@ def _curator_after_finish(task_id, run_record):
 
 
 def memory_json():
-    """K7c 数据面：记忆聚合只读视图（对齐父 memory_api GET /memory）。"""
+    """K7c 数据面：记忆聚合只读视图。
+
+    ``brain`` = LTM 单脑概览（对齐后的一等数据源：条数/状态/最近条目）；
+    ``profile`` = L3 画像全文；``master``/``rollouts`` 为旧蒸馏线遗留文件的
+    只读视图（不再更新，清空入口仍可清理）。
+    """
     try:
+        from hachimi_kernel import memory_brain
+        brain = memory_brain.overview_brain()
+        profile = ""
+        try:
+            from hachimi_kernel.knowledge_inject import load_profile_text
+            profile = load_profile_text()
+        except Exception:
+            profile = ""
         master = P_memory_master_text()
         rollouts = len(list(P.memory_rollouts().glob("*.md"))) \
             if P.memory_rollouts().exists() else 0
-        return json.dumps({"ok": True, "master": master,
+        return json.dumps({"ok": True, "brain": brain, "profile": profile,
+                           "master": master,
                            "master_chars": len(master), "rollouts": rollouts},
                           ensure_ascii=False)
     except Exception as e:
@@ -993,23 +1003,26 @@ def skill_delete_json(name):
 
 
 def knowledge_clear_json(scope="memory"):
-    """一键清空（DoD3）：scope=memory 清 MEMORY.md+rollouts+summary；
+    """一键清空（DoD3）：scope=memory 清 brain.db 全部原子记忆 + 旧蒸馏线遗留
+    （MEMORY.md / rollouts / summary / fact_meta / merged）；
     scope=all 再加全局技能（画像/角色卡是用户资产，不清）。"""
     try:
-        cleared = {"rollouts": 0, "skills": 0}
+        cleared = {"rollouts": 0, "skills": 0, "atoms": 0}
         if scope in ("memory", "all"):
             d = P.memory_rollouts()
             if d.exists():
                 for f in d.glob("*.md"):
                     f.unlink()
                     cleared["rollouts"] += 1
-            for p in (P.memory_master(), ):
+            for p in (P.memory_master(), P.global_memory() / "memory_summary.md",
+                      P.global_memory() / "fact_meta.json",
+                      P.global_memory() / "merged.json"):
                 if p.exists():
                     p.unlink()
-            # 注入视图同步清空（regenerate_summary 在 MEMORY.md 缺失时清空并返 0）
+            # LTM 单脑：物理清空（唯一物理删除通道 memory_brain.hard_delete_all）
             try:
-                from hachimi_kernel.curator import regenerate_summary
-                regenerate_summary()
+                from hachimi_kernel import memory_brain
+                cleared["atoms"] = memory_brain.hard_delete_all()
             except Exception:
                 pass
         if scope == "all":
@@ -1026,30 +1039,21 @@ def knowledge_clear_json(scope="memory"):
 
 
 def knowledge_compact_json():
-    """整理知识：回溯合并存量重复 + 按容量边界淘汰（P2-R §8.2）。
+    """整理记忆（LTM 对齐后语义）：手动触发一次巩固并等结果。
 
-    - 合并：``_merge_memory_sections`` 的语义去重只作用于**新增**条目（保护人工
-      编辑），调参前沉淀的重复会一直留在库里；
-    - 淘汰：知识是**有槽位的缓存**，超容时按「印证次数 + 新鲜度」淘汰最差的，
-      并把过期 rollout / run 资产一并清理（手机端不是企业服务，必须有上限）。
-
-    返回 ``{ok, removed, pruned}``；removed=0 / pruned=0 表示当前无需整理。
+    巩固 = 备份 brain.db → LLM 有界去重/矛盾检测 → 同主题 episode 抽象提升 →
+    强度重算（+遗忘降级，gated）→ L3 画像重写。用户显式触发走同步路径；
+    常规巩固仍由写链按 flush 计数自动调度。
+    返回 ``{ok, brain}``，brain 为整理后的库概览。
     """
     try:
-        from hachimi_kernel.curator import compact_memory_master, maintain_capacity
-        before = 0
-        p = P.memory_master()
-        if p.exists():
-            before = len(p.read_text(encoding="utf-8").splitlines())
-        removed = compact_memory_master()
-        cap = maintain_capacity()
-        print("[knowledge] compact: removed=%d duplicates, capacity=%s"
-              % (removed, cap), flush=True)
-        return json.dumps({"ok": True, "removed": removed, "lines_before": before,
-                           "pruned": cap}, ensure_ascii=False)
+        from hachimi_kernel import memory_brain
+        memory_brain._consolidation_worker(dict(_brain_cfg or {}), "")
+        return json.dumps({"ok": True, "brain": memory_brain.overview_brain()},
+                          ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e),
-                           "removed": 0}, ensure_ascii=False)
+        return json.dumps({"ok": False, "error": "%s: %s" % (type(e).__name__, e)},
+                          ensure_ascii=False)
 
 
 def knowledge_export_json():
@@ -1238,14 +1242,28 @@ def _run(body, stop_flag=_controls):
             elif task_id and not _knowledge_enabled["on"]:
                 # P2 DoD1：设置里关掉知识 = 注入与沉淀一起停（风险触发即总开关）
                 print("[task] CURATOR OFF (knowledge disabled)", flush=True)
-            elif task_id:
-                # 只对真实任务蒸馏（chat 轮 run_record 同样传入——Curator
-                # 内部按步数阈值短路，短对话零成本跳过）
-                try:
-                    rec_dict = rec.to_dict()
-                except Exception:
-                    rec_dict = None   # store 落盘失败分支：无 run 记录则不蒸馏
-                _curator_after_finish(task_id, rec_dict)
+            else:
+                if task_id:
+                    # 只对真实任务做轨迹域维护（chat 轮 run_record 同样传入——
+                    # Curator 内部按步数阈值短路，短对话零成本跳过）
+                    try:
+                        rec_dict = rec.to_dict()
+                    except Exception:
+                        rec_dict = None   # store 落盘失败分支：无 run 记录则不蒸馏
+                    _curator_after_finish(task_id, rec_dict)
+                    # LTM 写链（2026-10-30 对齐桌面）：收尾只入队，异步提炼
+                    # （提炼 3 次 LLM，绝不进主链路）。capture 缓冲在入队时取走。
+                    try:
+                        from hachimi_kernel import memory_writer
+                        from hachimi_kernel.task_store import TaskStore as _TS
+                        _meta = _TS.get(task_id) or {}
+                        memory_writer.enqueue(_meta.get("project_id", ""),
+                                              dict(_brain_cfg or {}),
+                                              source_task=task_id,
+                                              did_work=(out.get("status") == "done"))
+                    except Exception as e:
+                        print("[task] memory enqueue failed: %s: %s"
+                              % (type(e).__name__, e), flush=True)
             _emit({"event": "finish", "run_id": run_id, "status": out["status"],
                    "steps": out["steps"], "wall_clock_s": out.get("wall_clock_s"),
                    "summary": out.get("summary", ""),
@@ -1267,11 +1285,12 @@ def _run(body, stop_flag=_controls):
         # P2 DoD2：注入指示事件——主界面显示「本次注入了哪些知识」
         #（块算一次，事件与 config 共用；开关关/无内容 = 空块零注入）。
         # P2-R Phase 2：objective 参与相关度排序（结构化字段匹配 + 词元重叠）。
-        kblock, kmeta = _knowledge_parts(objective=objective)
+        kblock, mlead, kmeta = _knowledge_parts(objective=objective)
         _emit({"event": "knowledge", "run_id": run_id,
                "enabled": _knowledge_enabled["on"],
                "memory": kmeta["memory"],
                "skills_names": "、".join(kmeta["skills"]),
+               "hits": kmeta.get("hits", 0),
                "chars": kmeta["chars"]})
 
         loop = MiniLoop(objective=objective,
@@ -1285,9 +1304,11 @@ def _run(body, stop_flag=_controls):
                                 "wall_clock_s": body.get("wall_clock_s", 900),
                                 "verify_tool": "verify_done",
                                 "persona": _persona_block(),
-                                # K7a：弱注入块（memory summary + 技能摘要；
-                                # 开关关/无内容 = 空串零注入）
-                                "knowledge": kblock},                        controls=_controls,
+                                # K7a：弱注入块（技能摘要；开关关/无内容 = 空串零注入）
+                                "knowledge": kblock,
+                                # L1 记忆 lead-in（<relevant-memories>；零命中空串）
+                                "memory": mlead},
+                        controls=_controls,
                         verify_fn=verify,
                         # K1a 统一入口：历史 + 本轮消息（闲聊/任务大脑自决，K1b）
                         history=history,

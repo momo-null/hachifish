@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from hachimi_kernel.runtime_paths import (
-    memory_summary, task_skills, global_skills, user_profile, character_card,
+    task_skills, global_skills, user_profile, character_card,
 )
 from hachimi_kernel.skill_library import (  # noqa: F401  (SkillLibrary 供 catalog 路径)
     SkillLibrary, _cjk_bigrams, search_skills, select_skills,
@@ -30,42 +30,8 @@ from hachimi_kernel.skill_library import (  # noqa: F401  (SkillLibrary 供 cata
 _INJECT_HINT = ("以下为历史知识参考：若操作序列与当前界面相符，可直接沿用、不必重新探索；"
                 "与当前界面不一致处，以实际观测为准。")
 
-_SUMMARY_TRUNCATE = 20000
 _PROFILE_TRUNCATE = 20000
 _CHARACTER_TRUNCATE = 20000
-
-
-def load_memory_text() -> str:
-    """读取注入视图 summary 并截断管控；文件不存在/读取异常返回空。"""
-    try:
-        p = memory_summary()
-        if not p.exists():
-            return ""
-        return p.read_text(encoding="utf-8")[:_SUMMARY_TRUNCATE]
-    except Exception:
-        return ""
-
-
-def load_memory_items(limit: int = 20) -> list:
-    """本次注入的**事实条目清单**（测量用：knowledge 事件据此上报注入了什么）。
-
-    此前只上报 ``memory: bool``，事后无法回答"这次 run 到底喂了哪几条"——
-    注入质量类的问题（噪声占比、有用条目排位）长期看不见。
-    """
-    out = []
-    try:
-        p = memory_summary()
-        if not p.exists():
-            return []
-        for ln in p.read_text(encoding="utf-8").splitlines():
-            s = ln.strip()
-            if s.startswith("- ") and s[2:].strip() not in ("(暂无)", ""):
-                out.append(s[2:].strip()[:120])
-            if len(out) >= limit:
-                break
-    except Exception:
-        return []
-    return out
 
 
 def load_profile_text() -> str:
@@ -223,10 +189,10 @@ def _select_skills(skills: List[Dict[str, Any]], objective: str, limit: int):
     return select_skills(skills, objective, limit=limit)
 
 
-def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]],
+def build_knowledge_block(skills: List[Dict[str, Any]],
                           objective: str = "", max_skills: int = 3,
                           max_chars: int = 2000) -> str:
-    """组装知识注入块；无内容返回空字符串（调用方自动跳过）。
+    """组装知识注入块（技能目录）；无内容返回空字符串（调用方自动跳过）。
 
     P2-R Phase 2：
     - 相关度排序取 top-k（objective 为空 = 不排序，保持原序）；
@@ -234,43 +200,40 @@ def build_knowledge_block(memory_text: str, skills: List[Dict[str, Any]],
     - 条目渲染只带**截断后的适用场景**（旧版注入整段 objective 原文，
       曾占注入块 ~60% 字符）；
     - 措辞见 ``_INJECT_HINT``：要求优先复用，而非"以实际观测为准"式免责。
+
+    记忆不在本块：L1 检索记忆由 memory_brain.inject_text_brain 产出
+    ``<relevant-memories>`` lead-in（对齐桌面注入位，见 mini_loop.run）。
     """
-    memory_text = (memory_text or "").strip()
     skills = skills or []
-    if not memory_text and not skills:
+    if not skills:
         return ""
 
     parts = ["# 历史知识参考", "", _INJECT_HINT, ""]
-    if memory_text:
-        parts.append("## 历史记忆")
-        parts.append(memory_text)
-        parts.append("")
-    if skills:
-        picked = _select_skills(skills, objective, max(1, int(max_skills or 3)))
-        parts.append("## 相关技能")
-        used = 0
-        for i, s in enumerate(picked):
-            name = s.get("name", "")
-            pat = (s.get("objective_pattern") or "").strip()
-            ops = (s.get("ops") or "").strip()
-            line = f"- **{name}**"
-            if pat:
-                line += "（适用：%s%s）" % (pat[:60], "…" if len(pat) > 60 else "")
-            entry = line
-            # 目录模式（P2-R）：仅最相关 1 条带完整序列（大概率有用，省一次
-            # 往返），其余只进目录 —— 模型按需 load_skill，池子规模化不挤上下文。
-            # P2-R v3 实测（2026-10-02）：playbook 进常驻注入块反而更差
-            # （P2 45 vs P 33 中位）—— 套路只走 load_skill 按需加载。
-            if i == 0 and ops:
-                entry += f"\n  操作序列：{ops}"
-            if max_chars and used + len(entry) > int(max_chars) and used > 0:
-                break
-            parts.append(entry)
-            used += len(entry)
-        parts.append("")
-        parts.append('以上为技能目录（仅摘要）。与当前任务相符时，先调用 '
-                     'load_skill("<名称>") 获取完整操作序列，再按序列执行。')
-        parts.append("")
+    picked = _select_skills(skills, objective, max(1, int(max_skills or 3)))
+    parts.append("## 相关技能")
+    used = 0
+    for i, s in enumerate(picked):
+        name = s.get("name", "")
+        pat = (s.get("objective_pattern") or "").strip()
+        ops = (s.get("ops") or "").strip()
+        line = f"- **{name}**"
+        if pat:
+            line += "（适用：%s%s）" % (pat[:60], "…" if len(pat) > 60 else "")
+        entry = line
+        # 目录模式（P2-R）：仅最相关 1 条带完整序列（大概率有用，省一次
+        # 往返），其余只进目录 —— 模型按需 load_skill，池子规模化不挤上下文。
+        # P2-R v3 实测（2026-10-02）：playbook 进常驻注入块反而更差
+        # （P2 45 vs P 33 中位）—— 套路只走 load_skill 按需加载。
+        if i == 0 and ops:
+            entry += f"\n  操作序列：{ops}"
+        if max_chars and used + len(entry) > int(max_chars) and used > 0:
+            break
+        parts.append(entry)
+        used += len(entry)
+    parts.append("")
+    parts.append('以上为技能目录（仅摘要）。与当前任务相符时，先调用 '
+                 'load_skill("<名称>") 获取完整操作序列，再按序列执行。')
+    parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 
 

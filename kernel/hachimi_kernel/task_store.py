@@ -373,6 +373,12 @@ class ProjectStore:
                 rec["extra"] = extra
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        # 记忆 L0:会话消息入 buffer(提炼在任务收尾 flush 时批量做;异常静默)
+        try:
+            from hachimi_kernel import memory_brain
+            memory_brain.capture(project_id, role, content)
+        except Exception:
+            pass
 
     @staticmethod
     def read_session(project_id: str, session_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:

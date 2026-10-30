@@ -185,20 +185,19 @@ class _JsonBrain(object):
 
 
 def test_skill_autodistill_removed_from_curator():
-    """自蒸馏产 skill 已下线（2026-10-02 定案），改为人工维护 skill。
+    """自动线不挂 Curator（2026-10-02 人工维护定案 + 2026-10-30 skill 轴降级对齐）。
 
-    保留这条测试是为了**锁住下线状态**：Curator 不再有 review_candidate_skills，
-    且蒸馏 prompt 不再要求模型产出 skill 字段（否则双写又回来了）。
+    保留这条测试是为了**锁住下线状态**：Curator 不再有 review_candidate_skills /
+    distill_task_memory（旧记忆蒸馏线随 LTM 对齐整段移除），run_once 不再调
+    auto_distill；方法本体保留在 SkillLibrary 供人工/测试直调。
     """
     setup_tmp_root()
-    traj = os.path.join(setup_tmp_root(), "t.jsonl")
-    _write_trajectory(traj)
     c = Curator(task_id="t_s")
     assert not hasattr(c, "review_candidate_skills")
-    assert "skill" not in Curator._EXTRACT_PROMPT
-    # facts 蒸馏链仍完好
-    c.brain = _JsonBrain({"facts": ["搜索入口需要两步点按"]})
-    assert c._llm_extract(_record(traj)) == ["搜索入口需要两步点按"]
+    assert not hasattr(c, "distill_task_memory")
+    assert "auto_distill" not in Curator.run_once.__code__.co_names
+    from hachimi_kernel.skill_library import SkillLibrary
+    assert hasattr(SkillLibrary, "auto_distill")
 
 
 # ---------------- 7. playbook（引导型文字套路，P2-R v3） ----------------

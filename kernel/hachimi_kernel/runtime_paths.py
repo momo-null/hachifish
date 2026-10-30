@@ -83,6 +83,16 @@ def user_profile() -> Path:
     return global_memory() / "user_profile.md"
 
 
+def brain_db() -> Path:
+    """LTM 单脑 ``memory/brain.db``（L1 原子记忆，schema v2，见 memory_brain.py）。"""
+    return global_memory() / "brain.db"
+
+
+def brain_archive() -> Path:
+    """brain.db 巩固备份目录 ``memory/archive/``（每次巩固先备份后动手）。"""
+    return global_memory() / "archive"
+
+
 def profile_candidates() -> Path:
     """画像候选暂存 ``memory/profile_candidates.md``（纠偏蒸馏待人工确认）。"""
     return global_memory() / "profile_candidates.md"

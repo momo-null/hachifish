@@ -53,7 +53,7 @@ def test_ops_are_sanitized():
     setup_tmp_root()
     lib = SkillLibrary(task_id="t")
     lib.save(_mk_skill("notes-create", "org.fossify.notes"))
-    block = bridge._knowledge_block()
+    block = bridge._knowledge_parts()[0]
     assert "type_text(<text>)" in block, block
     assert "上次任务的字面内容" not in block, block
 
@@ -74,7 +74,7 @@ def test_selection_follows_llm_pick():
     set_retrieval_brain(_Pick())
     try:
         block = KI.build_knowledge_block(
-            "", _payload(a, b),
+            _payload(a, b),
             objective="Open the app org.fossify.notes, create a note")
     finally:
         set_retrieval_brain(None)
@@ -87,7 +87,7 @@ def test_selection_without_brain_keeps_original_order():
     b = _mk_skill("notes-skill", "org.fossify.notes")
     from hachimi_kernel.skill_library import set_retrieval_brain
     set_retrieval_brain(None)
-    block = KI.build_knowledge_block("", _payload(a, b),
+    block = KI.build_knowledge_block(_payload(a, b),
                                      objective="任意任务描述")
     assert block.index("clock-skill") < block.index("notes-skill"), block
 
@@ -95,7 +95,7 @@ def test_selection_without_brain_keeps_original_order():
 def test_max_skills_truncates():
     setup_tmp_root()
     skills = [_mk_skill("s%d" % i, "org.app%d" % i) for i in range(5)]
-    block = KI.build_knowledge_block("", _payload(*skills),
+    block = KI.build_knowledge_block(_payload(*skills),
                                      objective="unrelated", max_skills=2)
     assert block.count("- **s") == 2, block
 
@@ -106,7 +106,7 @@ def test_budget_caps_block_size():
     setup_tmp_root()
     skills = [_mk_skill("long-%d" % i, "org.app%d" % i,
                         pattern="x" * 300) for i in range(6)]
-    block = KI.build_knowledge_block("", _payload(*skills),
+    block = KI.build_knowledge_block(_payload(*skills),
                                      objective="", max_skills=6, max_chars=800)
     # 至少 1 条 + 预算约束下明显小于全量
     assert "- **long-" in block
@@ -118,12 +118,12 @@ def test_budget_caps_block_size():
 def test_hint_neutral_no_disclaimer():
     setup_tmp_root()
     SkillLibrary(task_id="t").save(_mk_skill("notes-create", "org.fossify.notes"))
-    block = bridge._knowledge_block()
+    block = bridge._knowledge_parts()[0]
     assert "可直接沿用" in block
     assert "可能过时，以实际观测为准" not in block
 
 
 def test_memory_section_absent_when_empty():
     setup_tmp_root()
-    block = bridge._knowledge_block()
+    block = bridge._knowledge_parts()[0]
     assert "## 历史记忆" not in block, block

@@ -113,9 +113,9 @@
 
 ## 5. 数据流
 
-**执行**：任务一句话 →（弱注入：技能+记忆摘要，默认关）→ mini_loop 循环 [observe(UI 树/截图) → VLM/规划决策 → 工具执行 → verify] → task_done（强制 verify，防幻觉式完成）。
+**执行**：任务一句话 →（弱注入：技能目录块 + L1 记忆检索 lead-in，设置页可关）→ mini_loop 循环 [observe(UI 树/截图) → VLM/规划决策 → 工具执行 → verify] → task_done（强制 verify，防幻觉式完成）。
 
-**学习**（K 闭环四步，挂在 loop 收尾）：轨迹落盘 `trajectory.jsonl` → Curator 触发式蒸馏（任务完成后一次，无定时器）→ 候选 skill（N=3 连续成功晋升）/ world_model merge / 全局记忆 → 下次任务弱注入。
+**学习**（挂在 loop 收尾，LTM 对齐桌面 2026-10-30）：轨迹落盘 `trajectory.jsonl` → Curator 轨迹域维护（prune / world_model 复核 / 质量标记，任务完成后一次）→ 会话消息入 L0 缓冲 → `memory_writer` 异步写链提炼进 `memory/brain.db`（价值判/一致性四态，语义判定全 LLM）→ 下次对话前按 query 检索注入 `<relevant-memories>`。执行可验证的操作序列（操作缓存）由 `SkillLibrary.auto_distill` 承载，不再挂 run_once（人工/测试直调）。
 
 **存储布局**（App 私有目录，替代桌面 `~/.omniagent/`；2026-09-27 实测更正：
 runtime_paths 把 `HACHIMI_DATA_DIR`（= filesDir）直接映射为桌面 `~/.omniagent` 根，
@@ -126,7 +126,7 @@ files/
 ├── config.json            # 三通道配置（key 仅 Keystore 别名引用）
 ├── tasks/<task_id>/       # task.json · <date>_<run_id>.jsonl · <run_id>.run.json · failures/
 ├── skills/                # 全局通用 skill（SKILL.md + frontmatter）
-├── memory/                # MEMORY.md · memory_summary.md · rollouts/ · merged.json
+├── memory/                # brain.db（LTM 单脑）· user_profile.md · archive/ · 旧蒸馏文件只读遗留
 └── snapshots/<id>/        # M4' 注入快照（manifest.json SHA256 + 只读装载，R9）
 ```
 

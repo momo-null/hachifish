@@ -43,42 +43,51 @@ class NullBrain(object):
         return {"content": "ok", "tool_calls": []}
 
 
-# ---------------- 1. 弱注入 ----------------
+# ---------------- 1. 弱注入（LTM 对齐后：技能块 + 记忆 lead-in 双路） ----------------
 
 def test_knowledge_block_into_system_prompt():
-    P.memory_summary().write_text("MIUI 桌面路径实际指向 Download", encoding="utf-8")
-    block = bridge._knowledge_block()
-    assert "历史记忆" in block and "MIUI" in block, block
-    brain = NullBrain()
-    MiniLoop(objective="x", done_when="", tools={}, brain=brain,
-             config={"max_steps": 1, "knowledge": block},
-             message="hi").run()
-    system = brain.views[0][0][1]
-    assert "历史记忆" in system and "MIUI" in system
-
-
-def test_knowledge_includes_global_skills():
     d = P.global_skills()
     d.mkdir(parents=True, exist_ok=True)
     (d / "desktop-cleanup.md").write_text(
         "---\nname: desktop-cleanup\nobjective_pattern: 整理桌面\n---\n操作序列…",
         encoding="utf-8")
-    block = bridge._knowledge_block()
+    block, _mlead, _meta = bridge._knowledge_parts(objective="整理桌面")
     assert "desktop-cleanup" in block, block
+    brain = NullBrain()
+    MiniLoop(objective="x", done_when="", tools={}, brain=brain,
+             config={"max_steps": 1, "knowledge": block},
+             message="hi").run()
+    system = brain.views[0][0][1]
+    assert "desktop-cleanup" in system
+
+
+def test_memory_lead_in_as_user_message():
+    """L1 检索记忆走 lead-in user 消息（历史后、本轮输入前），不进 system。"""
+    lead = "<relevant-memories>\n- 用户便签保存在 Download 目录\n</relevant-memories>"
+    brain = NullBrain()
+    MiniLoop(objective="x", done_when="", tools={}, brain=brain,
+             config={"max_steps": 1, "memory": lead},
+             history=[{"role": "user", "content": "早"},
+                      {"role": "assistant", "content": "早"}],
+             message="记一下").run()
+    roles = [r for r, _c in brain.views[0]]
+    contents = [c for _r, c in brain.views[0]]
+    assert roles == ["system", "user", "assistant", "user", "user"], roles
+    assert "<relevant-memories>" in contents[-2]   # 历史之后、本轮消息之前
+    assert contents[-1] == "记一下"
 
 
 def test_knowledge_disabled_zero_inject():
     bridge.set_knowledge_enabled(False)
-    assert bridge._knowledge_block() == ""
+    assert bridge._knowledge_parts() == ("", "", {"memory": False, "skills": [], "chars": 0, "hits": 0})
     bridge.set_knowledge_enabled(True)   # 复位
 
 
 def test_knowledge_block_empty_when_no_data():
-    P.memory_summary().unlink(missing_ok=True)
-    # 清掉上例写的技能
     for f in P.global_skills().glob("*.md"):
         f.unlink()
-    assert bridge._knowledge_block() == ""
+    block, mlead, meta = bridge._knowledge_parts()
+    assert block == "" and mlead == "" and meta["memory"] is False
 
 
 # ---------------- 2. Curator 挂钩 ----------------

@@ -88,8 +88,13 @@ def build_group_constraints(body):
         memory_text, skills = load_snapshot_texts(snapshot_id)
     else:
         memory_text, skills = "", []
-    # 延迟导入：仅注入路径触达知识层
+    # 延迟导入：仅注入路径触达知识层。快照记忆是冻结的实验材料（R9 只读装载），
+    # 原文注入；技能块走 knowledge_inject（LTM 对齐后该函数只收技能）。
     from hachimi_kernel.knowledge_inject import build_knowledge_block
-    block = build_knowledge_block(memory_text, skills)
+    block = build_knowledge_block(skills)
+    if (memory_text or "").strip():
+        block = ("## 历史记忆（实验快照）\n%s\n\n%s"
+                 % (memory_text.strip(), block)).strip() if block else \
+                "## 历史记忆（实验快照）\n%s" % memory_text.strip()
     header = "[实验组 %s] " % (group or "B") if group else ""
     return (header + block).strip()
