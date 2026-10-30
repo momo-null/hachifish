@@ -112,6 +112,34 @@ object OmniAgentRemote {
     }
 
     /**
+     * PC 侧语音合成（CosyVoice2 音色，音色与桌面/QQ 侧一致）：text → WAV 字节。
+     * 失败抛 RuntimeException（调用方回退本地 TTS，回复永不失声）。
+     * 整段合成（上游 RTF≈2），播报延迟 = 合成时长，属已接受的形态取舍。
+     */
+    fun tts(baseUrl: String, token: String, text: String, timeoutMs: Int = 60000): ByteArray {
+        val c = conn("$baseUrl/api/audio/tts", token, timeoutMs)
+        c.requestMethod = "POST"
+        c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.setRequestProperty("Accept", "audio/wav")
+        c.outputStream.use {
+            it.write(JSONObject().put("text", text).toString().toByteArray(Charsets.UTF_8))
+        }
+        val code = c.responseCode
+        if (code !in 200..299) {
+            val err = try {
+                JSONObject(c.errorStream.bufferedReader().readText()).optString("error")
+            } catch (_: Exception) { "HTTP $code" }
+            c.disconnect()
+            throw RuntimeException("PC 语音合成失败：$err")
+        }
+        val bytes = c.inputStream.use { it.readBytes() }
+        c.disconnect()
+        if (bytes.size < 100) throw RuntimeException("PC 语音合成返回空音频")
+        return bytes
+    }
+
+    /**
      * 订阅 SSE 流（阻塞，调用方放后台线程）。[onEvent] 返回 false = 调用方要求
      * 停止读取（轮结束/页面销毁）。
      */

@@ -121,7 +121,7 @@ manifest（RECORD_AUDIO + 识别服务可见性 + cleartext C1 简化）·
 ## 9. 待拍板决策（不阻塞 C1，C2 前定）
 
 1. ASR：系统 `SpeechRecognizer`（免费/快/联网）vs 端上 whisper（离线/准/耗电）——建议 C1 先用系统 ASR；
-2. TTS：系统 TTS 引擎 vs 端上 piper（音色可控）；
+2. TTS：~~系统 TTS 引擎 vs 端上 piper~~ **已拍板（2026-10-30）**：Tier 2 播报 = **PC CosyVoice2 合成**（`GET /api/audio/tts` 拉 WAV 播放，音色与桌面/QQ 侧同一副嗓子——“PC 在线时手机连声音都是大脑的”）；PC 合成失败回退本地系统 TTS（仅该轮音色降级）；Tier 1 离线如需语音，后续评估端上 piper；
 3. PC 发现：mDNS vs 静态 IP 配置 vs Tailscale（出门场景，二期）——C1 用静态 IP 配置；
 4. 同步触发：上线即同步 vs 空闲批量——建议上线后台空闲批量；
 5. persona：手机端与 PC 端是否同一 persona（建议同一份，来源=PC 导出数据）。

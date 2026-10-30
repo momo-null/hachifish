@@ -11,10 +11,48 @@ import android.util.Log
 import java.util.Locale
 
 /**
- * 语音 I/O（手机伴侣 C1-C2）：系统 ASR（SpeechRecognizer）+ 系统 TTS（TextToSpeech）。
+ * 音频播放器（远程播报 = PC CosyVoice2 合成的 WAV；Tier 2 音色与桌面侧一致）。
+ * 单实例 MediaPlayer；打断 = stop()（C2：按住 🎤 第一动作）。
+ */
+object AudioPlayer {
+
+    private var player: android.media.MediaPlayer? = null
+
+    fun play(context: Context, wav: ByteArray) {
+        stop()
+        try {
+            val tmp = java.io.File(context.cacheDir, "remote_reply.wav")
+            tmp.writeBytes(wav)
+            player = android.media.MediaPlayer().apply {
+                setDataSource(tmp.absolutePath)
+                setOnCompletionListener { stop() }
+                prepare()
+                start()
+            }
+        } catch (e: Exception) {
+            Log.w("HachimiRemote", "play failed: ${e.message}")
+            stop()
+        }
+    }
+
+    fun stop() {
+        try {
+            player?.takeIf { it.isPlaying }?.stop()
+            player?.release()
+        } catch (_: Exception) {
+        }
+        player = null
+    }
+
+    fun isPlaying(): Boolean = player?.isPlaying == true
+}
+
+/**
+ * 语音 I/O（手机伴侣 C1-C2）：系统 ASR（SpeechRecognizer）+ 系统 TTS（TextToSpeech，
+ * 仅 Tier 1/回退用——Tier 2 播报走 [AudioPlayer] 的 PC CosyVoice2 音色）。
  *
  * - ASR：对讲式（按住说话）——start() 收音，stopListening() 松手取最终结果；
- * - TTS：回复播报——speak() QUEUE_FLUSH（新播报挤掉旧的），stop() 即打断（C2）；
+ * - TTS：speak() QUEUE_FLUSH（新播报挤掉旧的），stop() 即打断（C2）；
  * - 生命周期：TTS 引擎进程级单例懒加载；SpeechRecognizer 每轮创建/销毁
  *   （官方要求主线程创建，调用方用 main Handler 包）。
  */

@@ -17,6 +17,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.hachimi.app.AudioPlayer
 import com.hachimi.app.BrainConfigStore
 import com.hachimi.app.KernelHostService
 import com.hachimi.app.MainActivity
@@ -64,6 +65,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private var remoteHadTools = false
     /** 🎤 按住说话（C2：按下第一动作 = 打断播报）。 */
     private var speech: SpeechInput? = null
+    /** 播报代际（PC 合成慢，打断了也要让旧合成结果作废：gen 不匹配即不播）。 */
+    @Volatile private var speakGen = 0
     // V13 会话列表：面板视图 + 冷启动恢复标记
     private var sessionsPanel: LinearLayout? = null
     private var sessionsList: LinearLayout? = null
@@ -189,7 +192,9 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
                     android.view.MotionEvent.ACTION_DOWN -> {
-                        TtsSpeaker.stop()   // C2：按住第一动作 = 打断播报
+                        speakGen++            // 在途的 PC 合成结果作废
+                        TtsSpeaker.stop()     // C2：按住第一动作 = 打断播报（本地回退音）
+                        AudioPlayer.stop()    // 打断 PC CosyVoice2 播报
                         startSpeech()
                         v.isPressed = true; true
                     }
@@ -597,7 +602,19 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                         pushItem(ChatItem.AssistantMsg(content.trim()))
                         remoteBubbleIdx = items.size - 1
                     }
-                    if (rc.speak) TtsSpeaker.speak(content)
+                    if (rc.speak) {
+                        // Tier 2 播报 = PC CosyVoice2 音色（与桌面/QQ 侧同一副嗓子，"壳"贯彻到底）；
+                        // PC 合成失败回退本地系统 TTS（回复永不失声，音色降级仅此一轮）
+                        val gen = ++speakGen
+                        Thread {
+                            val wav = runCatching {
+                                OmniAgentRemote.tts(rc.baseUrl, rc.token, content)
+                            }.getOrElse { ByteArray(0) }
+                            if (gen != speakGen) return@Thread   // 已被按住 🎤 打断
+                            if (wav.isNotEmpty()) AudioPlayer.play(act, wav)
+                            else TtsSpeaker.speak(content)
+                        }.start()
+                    }
                     refresh()
                 }
             }
