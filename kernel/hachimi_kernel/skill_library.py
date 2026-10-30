@@ -308,6 +308,30 @@ class Skill:
         if reason and reason not in self.metadata.known_failures:
             self.metadata.known_failures.append(reason[:200])
 
+    @classmethod
+    def from_trace(cls, record: dict, task_id: str = "") -> "Skill":
+        """执行验证型生产者（结构性提炼，非 LLM 蒸馏）：RunRecord → Skill。
+
+        步骤直接来自 :func:`SkillLibrary.executed_actions`（真实执行轨迹，
+        已剔除观察/元动作），并过 ``canonical_args``（字面文本 → ``<text>``）。
+        身份 = ``compute_entry_id``（脱敏动作序列），与 LLM 蒸馏/playbook 完全解耦。
+        """
+        actions = SkillLibrary.executed_actions(record)
+        substeps = [SkillSubstep(tool=a["tool"], args=a.get("args") or {})
+                    for a in actions]
+        eid = compute_entry_id(substeps)
+        return cls(
+            name="skill_%s" % eid,
+            objective_pattern=str(record.get("objective", "")),
+            entry_id=eid,
+            task_id=task_id,
+            description="auto-distilled from execution trace (execution-verified)",
+            substeps=substeps,
+            metadata=SkillMetadata(success_count=1, total_uses=1, confidence=1.0,
+                                   status="candidate", scope="global",
+                                   created=datetime.now(timezone.utc).isoformat()),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Skill 库持久化
@@ -422,11 +446,13 @@ class SkillLibrary:
 
     @staticmethod
     def _meta_tool(tool: str) -> bool:
-        """元/观察动作不进技能操作序列（P2 DoD4 教训）：技能=执行路径，
+        """元/观察/控制动作不进技能操作序列（P2 DoD4 教训）：技能=执行路径，
         observe/look/screenshot 是模型的验证行为而非套路；task_done/verify
-        是完成声明与校验门，wait 无信息。"""
+        是完成声明与校验门，wait 无信息；load_skill/search_skill 是技能检索/
+        加载控制动作（加载自身会污染操作缓存造成自引用），同样剔除。"""
         return tool in ("task_done", "verify_done", "wait",
-                        "observe", "look", "screenshot")
+                        "observe", "look", "screenshot",
+                        "load_skill", "search_skill")
 
     @staticmethod
     def executed_actions(record: dict) -> List[Dict[str, Any]]:
@@ -570,6 +596,66 @@ class SkillLibrary:
                 s.record_failure(reason)
                 self.save(s)
 
+    # --- 执行验证型沉淀（trace→substeps，entry_id 晋升；非 LLM 蒸馏） ----------
+    def find_by_entry_id(self, entry_id: str) -> Optional["Skill"]:
+        """按脱敏动作序列主键查已存在 skill（结构性身份，跨 task/global 合并）。"""
+        if not entry_id:
+            return None
+        for s in self.list_all():
+            if s.entry_id == entry_id:
+                return s
+        return None
+
+    def auto_distill(self, record: dict, min_steps: int = 2) -> Optional[Dict[str, Any]]:
+        """执行验证型 skill 沉淀（新方案主入口）：成功轨迹 → 结构性 substeps → 按
+        entry_id 累计成功次数，N=3 晋升 active。
+
+        - 仅成功轨迹沉淀；steps < min_steps 跳过（避免短噪声）。
+        - 身份靠 ``entry_id``（脱敏动作序列），**不调 LLM**、不写 playbook，
+          与「人工维护 skill」红线正交：此处只沉淀执行可验证的操作序列
+          （= 操作缓存，P2-R 判死结论里唯一该归 skill 的用途）。
+        - 跨 App（package 不同）→ entry_id 不同 → 不合并（App 私有边界由
+          canonical_args 天然保证）。
+        """
+        if not record.get("success"):
+            return None
+        actions = SkillLibrary.executed_actions(record)
+        if len(actions) < min_steps:
+            return None
+        substeps = [SkillSubstep(tool=a["tool"], args=a.get("args") or {})
+                    for a in actions]
+        eid = compute_entry_id(substeps)
+        existing = self.find_by_entry_id(eid)
+        if existing is not None:
+            promoted = existing.record_success()
+            self.save(existing)
+            return {"action": "promoted" if promoted else "updated",
+                    "skill_name": existing.name, "promoted": promoted,
+                    "success_count": existing.metadata.success_count, "entry_id": eid}
+        skill = Skill.from_trace(record, self.task_id)
+        skill.entry_id = eid
+        self.save(skill)
+        return {"action": "created", "skill_name": skill.name,
+                "promoted": False, "success_count": 1, "entry_id": eid}
+
+    def replay_savings(self, skill: "Skill", record: dict) -> int:
+        """离线回放省步度量：新轨迹脱敏动作序列与 skill substeps 的**前缀匹配长度**。
+
+        返回可经回放跳过的步数上界——执行验证型 skill 的价值代理指标（无需实时执行器）。
+        前缀一旦失配即停（操作序列顺序敏感；后续步骤即便相同也不计，保守估计）。
+        """
+        new_ops = canonical_ops([
+            SkillSubstep(tool=a["tool"], args=a.get("args") or {})
+            for a in SkillLibrary.executed_actions(record)])
+        skill_ops = canonical_ops(skill.substeps)
+        n = 0
+        for a, b in zip(new_ops, skill_ops):
+            if a == b:
+                n += 1
+            else:
+                break
+        return n
+
     # --- 内部 ----------------------------------------------------------------
     @staticmethod
     def _parse(path: Path) -> Optional[Skill]:
@@ -585,6 +671,7 @@ class SkillLibrary:
                 name=name,
                 objective_pattern=data.get("objective_pattern", ""),
                 task_id=data.get("task_id", ""),
+                entry_id=data.get("entry_id", ""),
                 description=data.get("description", ""),
                 routine=data.get("routine", ""),
                 playbook=data.get("playbook", ""),
