@@ -15,6 +15,16 @@ class BrainError(Exception):
     pass
 
 
+def _unwrap_gateway(data):
+    """gitclaw 类网关的非流式响应会把 OpenAI 载荷整个包在 {"data": {...}} 里
+    （流式则是标准 SSE data: {choices...}，无包裹——内核 agent 循环走流式，
+    因此只有设置页「测试连通」这类非流式请求会撞上）。剥壳后按标准形状解析。"""
+    if isinstance(data, dict) and isinstance(data.get("data"), dict) \
+            and "choices" in data["data"]:
+        return data["data"]
+    return data
+
+
 # 网关抗抖动（2026-10-01 实测 discovery-api）：短请求 0.5-0.8s，但任务中段的长
 # 上下文（23-33 msgs + 11 tools）请求出现 58s 长尾，一次超过 120s 未返回 —— 此时
 # 整轮任务以 BrainError(TimeoutError) 报废，跑一次便签任务 15 步 / 247s 白烧。
@@ -103,7 +113,7 @@ class BrainClient:
                     raw = resp.read()
                 print("[brain] response %s, %d bytes"
                       % (getattr(resp, "status", "?"), len(raw)), flush=True)
-                return json.loads(raw.decode("utf-8"))
+                return _unwrap_gateway(json.loads(raw.decode("utf-8")))
             except urllib.error.HTTPError as e:
                 last_err = "HTTP %d: %s" % (
                     e.code, e.read().decode("utf-8", "ignore")[:200])

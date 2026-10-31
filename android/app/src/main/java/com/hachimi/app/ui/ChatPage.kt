@@ -22,6 +22,7 @@ import com.hachimi.app.BrainConfigStore
 import com.hachimi.app.KernelHostService
 import com.hachimi.app.MainActivity
 import com.hachimi.app.NarrativePanel
+import com.hachimi.app.Rlog
 import com.hachimi.app.OmniAgentRemote
 import com.hachimi.app.RemoteConfigStore
 import com.hachimi.app.RoleStore
@@ -53,6 +54,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     /** 本轮是否已让位到桌面（首个 tool 步才让位——闲聊不跳桌面，K4）。 */
     private var yieldedHome = false
     // ---- 远程内核（手机伴侣 C1-C3：Tier 2 遥控模式，doc/plans/omniagent_remote_client_plan.md）----
+    /** 本轮实际生效的 Tier 配置（⏹ 停止按它寻址；remoteSend 进入时记）。 */
+    @Volatile private var remoteActiveRc: RemoteConfigStore.RemoteConfig? = null
     /** 远程会话 task_id（与本地内核 currentTaskId 独立——两套 Tier 的会话不混流）。 */
     private var remoteTaskId: String? = null
     /** 远程轮运行中（SSE status.running=true）；false = 轮次边界。 */
@@ -63,6 +66,19 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private var remoteBubbleIdx = -1
     /** 本远程轮是否出现过 tool 卡（轮末相位 DONE vs IDLE）。 */
     private var remoteHadTools = false
+    /** 最终回复文本（最终 chat 事件；轮末完成/失败面板与结果气泡同源去重）。 */
+    private var remoteFinalText = ""
+    /** 内核最终 chat 事件 extra.meta 的 steps/success（轮末面板依据）。 */
+    private var remoteMetaSteps = 0
+    private var remoteMetaSuccess: Boolean? = null
+    /** 本远程轮起始时钟（完成面板用时）。 */
+    private var remoteT0 = 0L
+    /** 本远程轮技能目录（debug skill_catalog → 知识注入卡展示）。 */
+    private val remoteSkills = mutableListOf<String>()
+    /** 已渲染的内核 toolcall 事件 id（断线重连会重放窗口事件，按 id 去重防双卡）。 */
+    private val remoteToolIds = HashSet<String>()
+    /** 本远程轮工具步计数（内核 toolcall 事件不带序号——悬浮球步数靠本地计数）。 */
+    private var remoteStepN = 0
     /** 🎤 按住说话（C2：按下第一动作 = 打断播报）。 */
     private var speech: SpeechInput? = null
     /** 播报代际（PC 合成慢，打断了也要让旧合成结果作废：gen 不匹配即不播）。 */
@@ -75,6 +91,11 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private var restoreRetries = 0
 
     private val prefs get() = act.getSharedPreferences(PREFS_NAME, 0)
+
+    init {
+        // ROM 会丢 app 的 logcat（Oplus 实测全档丢弃）——排障日志落文件（Rlog）
+        Rlog.init(act.filesDir)
+    }
 
     /** 角色配置：onResume 重读——角色设置页改完返回即生效（称呼/头像），不再要求重启。 */
     private var role = RoleStore.read(act)
@@ -125,8 +146,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         }
         info.addView(headerName); info.addView(headerStatus)
         header.addView(info)
-        btnPause = controlBtn("⏸") { bridgeCall("request_pause") }
-        btnStop = controlBtn("⏹") { if (remoteRunning) remoteStop() else bridgeCall("request_stop") }
+        btnPause = controlBtn("⏸") { /* 本地暂停随 mini_loop 退役；远程无暂停语义 */ }
+        btnStop = controlBtn("⏹") { remoteStop() }
         btnPause.visibility = View.GONE; btnStop.visibility = View.GONE
         header.addView(btnPause); header.addView(btnStop)
         header.addView(controlBtn("🗂") { openSessions() })
@@ -412,19 +433,35 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         // C2 barge-in：远程轮运行中允许说话打断（chat force=true）；本地内核轮维持独占
         if (sending && !remoteRunning) { toast("大肥鱼正在干活，稍等或先停止"); return }
         val remoteCfg = RemoteConfigStore.load(act)?.takeIf { it.ready && it.auto }
-        if (remoteCfg != null) {
-            // C3：轮次边界探活（1s 超时）——可达走远程（Tier 2），不可达回本地内核（Tier 1），
-            // 过程不丢话（同一条消息只进一条路径）。
-            Thread {
-                val up = OmniAgentRemote.health(remoteCfg.baseUrl, remoteCfg.token)
-                main.post {
-                    if (up) remoteSend(remoteCfg, objective, force = remoteRunning)
-                    else kernelSend(objective, typed = text == null)
-                }
-            }.start()
-            return
-        }
-        kernelSend(objective, typed = text == null)
+        // Tier 决策（Phase 2 收敛）：PC 可达走 Tier 2；否则**只走环回完整内核**。
+        // mini_loop 兜底已退役——第二大脑意味着发送路径按探活运气分裂成两种行为
+        // （2026-10-31 实录：内核重启窗口期静默掉进兜底，任务建了不跑，UI 永卡
+        // 干活中）。内核没就绪就等它（进程重启后 Chaquopy 导入需 ~15s），不就绪
+        // 超时才明确报错。
+        Thread {
+            if (remoteCfg != null && OmniAgentRemote.health(remoteCfg.baseUrl, remoteCfg.token)) {
+                main.post { remoteSend(remoteCfg, objective, force = remoteRunning) }
+                return@Thread
+            }
+            // 等本机内核就绪（最多 ~30s；就绪瞬间立即进入）
+            main.post {
+                phase = ChatPhase.THINKING
+                headerStatus.text = "本机内核 · 启动中…"
+                refresh()
+            }
+            var waited = 0
+            while (!OmniAgentRemote.health(OMNI_HOST_BASE, "") && waited < 30) {
+                Thread.sleep(1000); waited++
+            }
+            if (!OmniAgentRemote.health(OMNI_HOST_BASE, "")) {
+                main.post { remoteFail("本机内核未就绪（等待 ${waited}s 超时）。请稍后重试；若持续失败到 设置 里重启 App。") }
+                return@Thread
+            }
+            val rc = RemoteConfigStore.RemoteConfig(
+                baseUrl = OMNI_HOST_BASE, token = "", auto = true,
+                speak = remoteCfg?.speak ?: true)
+            main.post { remoteSend(rc, objective, force = remoteRunning) }
+        }.start()
     }
 
     /** 路径公共前置：用户气泡 + 思考占位 + 输入禁用（两条 Tier 共用；收键盘仅打字路径）。 */
@@ -445,94 +482,69 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         refresh()
     }
 
-    /** Tier 1（本地内核）：BYOK + Chaquopy start_task_json（原 send 主体的 kernel 部分）。 */
-    private fun kernelSend(objective: String, typed: Boolean) {
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) { toast("内核启动中（首次约需 10 秒），稍后再试"); return }
-        val cfg = BrainConfigStore.load(act)
-        if (cfg == null) {
-            toast("未配置模型端点（BYOK）：请到 设置 → 通道（BYOK） 填写")
-            (act as? MainActivity)?.let { a -> a.startActivity(Intent(a, com.hachimi.app.SettingsActivity::class.java)) }
-            return
-        }
-        prelude(objective, typed)
-        yieldedHome = false
-        Thread {
-            try {
-                bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
-                if (cfg.visionEnabled) {
-                    bridge.callAttr("set_vision", cfg.visionBaseUrl, cfg.visionApiKey, cfg.visionModel)
-                } else {
-                    bridge.callAttr("set_vision", "", "", "")
-                }
-                // K1a 统一入口：message + 当前会话 task_id（首条不带，kernel 自动建；
-                // start 事件回传 task_id 续存）。闲聊/任务由大脑自决（K1b），
-                // HOME 让位与浮窗 show 挪到首个 step 事件（onNarrative，K4）。
-                val body = JSONObject()
-                    .put("message", objective)
-                    .put("done_when", "")
-                    .put("max_steps", SettingsPage.maxSteps(act))
-                    .put("wall_clock_s", SettingsPage.wallClockS(SettingsPage.maxSteps(act)))
-                currentTaskId?.let { body.put("task_id", it) }
-                val r = JSONObject(bridge.callAttr("start_task_json", body.toString()).toString())
-                if (!r.optBoolean("ok")) {
-                    main.post {
-                        sending = false
-                        input.isEnabled = true
-                        val reason = MainActivity.readableErrorStatic(r.optString("error"))
-                        if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
-                        items.add(ChatItem.FailPanel(reason))
-                        phase = ChatPhase.FAILED
-                        headerStatus.text = phase.label
-                        refresh()
-                        act.startActivity(Intent(act, MainActivity::class.java)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
-                }
-            } catch (e: Exception) {
-                main.post {
-                    sending = false
-                    input.isEnabled = true
-                    if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
-                    items.add(ChatItem.FailPanel("启动失败：${e.javaClass.simpleName}"))
-                    phase = ChatPhase.FAILED
-                    headerStatus.text = phase.label
-                    refresh()
-                }
-            }
-        }.start()
-    }
+    // ---------------- 远程轮（Tier 1 环回 / Tier 2 遥控，同一 wire contract） ----------------
 
-    // ---------------- 远程轮（Tier 2，手机伴侣 C1-C3） ----------------
+    /** 头部文案按 Tier 区分：环回=本机内核（"远程内核"字样曾误导用户以为连了 PC）。 */
+    private fun tierLabel(rc: RemoteConfigStore.RemoteConfig) =
+        if (rc.baseUrl == OMNI_HOST_BASE) "本机内核" else "PC 内核"
 
-    /** Tier 2（远程内核）：chat 下发 → SSE 订阅 → 气泡/播报/轮次收尾。 */
+    /** Tier 2/1 共用：chat 下发 → SSE 订阅（断线重连）→ 气泡/播报/轮次收尾。 */
     private fun remoteSend(rc: RemoteConfigStore.RemoteConfig, objective: String, force: Boolean) {
+        remoteActiveRc = rc
         prelude(objective, typed = false)
         remoteStreamBlock = ""
         remoteStreamText = ""
         remoteBubbleIdx = -1
         remoteHadTools = false
+        remoteFinalText = ""
+        remoteMetaSteps = 0
+        remoteMetaSuccess = null
+        remoteSkills.clear()
+        remoteToolIds.clear()
+        remoteStepN = 0
+        remoteT0 = System.currentTimeMillis()
         Thread {
             try {
                 val tid = OmniAgentRemote.chat(rc.baseUrl, rc.token, objective, remoteTaskId, force)
                 remoteTaskId = tid
                 remoteRunning = true
+                // 执行链浮窗接入（远程轮 K4 管线）：start 复位浮窗 + 门控会话随任务重置
+                NarrativePanel.pushRemote(JSONObject()
+                    .put("event", "start").put("run_id", tid)
+                    .put("objective", objective).toString())
                 main.post {
                     phase = ChatPhase.WORKING
-                    headerStatus.text = "远程内核 · 干活中"
+                    headerStatus.text = tierLabel(rc) + " · 干活中"
                     btnPause.visibility = View.GONE
                     btnStop.visibility = View.VISIBLE
                     refresh()
                 }
                 val done = java.util.concurrent.atomic.AtomicBoolean(false)
-                OmniAgentRemote.stream(rc.baseUrl, rc.token, tid, "hachimi-phone") { ev ->
-                    if (done.get()) return@stream false
-                    var end = false
-                    main.post {
-                        end = handleRemoteEvent(ev, rc)
-                        if (end) done.set(true)
+                // 断线重连（C3「下轮探活自愈」的真实现）：旁路订阅断开时服务端清游标，
+                // 重连即从当前窗口重放（outbox 有界 300，丢最旧的，终态必然还在）——
+                // 静默 EOF 不再让 UI 永卡干活中（2026-10-31 真机实录：TCP 连接消失、
+                // stream 无异常返回、remoteSend 无收尾）。
+                var attempts = 0
+                while (remoteRunning) {
+                    attempts++
+                    try {
+                        OmniAgentRemote.stream(rc.baseUrl, rc.token, tid, "hachimi-phone") { ev ->
+                            // 返回 true = 继续读（false = 停止）。**此返回值自 C1 起写反**
+                            // （曾返回 done.get()：运行中=false 被流当停止指令 → 每条
+                            // 连接只送 1 个事件即断，2026-10-31 文件日志实锤）。
+                            if (done.get()) return@stream false
+                            var end = false
+                            main.post {
+                                end = handleRemoteEvent(ev, rc)
+                                if (end) done.set(true)
+                            }
+                            !done.get()
+                        }
+                    } catch (e: Exception) {
+                        Rlog.log("stream attempt $attempts failed: ${e.message}")
+                        if (attempts >= 5 || !remoteRunning) throw e
+                        Thread.sleep(600L * attempts)
                     }
-                    done.get()
                 }
             } catch (e: Exception) {
                 main.post { remoteFail(e.message ?: e.javaClass.simpleName) }
@@ -546,22 +558,48 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
      */
     private fun handleRemoteEvent(ev: OmniAgentRemote.SseEvent, rc: RemoteConfigStore.RemoteConfig): Boolean {
         if (act.isDestroyed) return true
+        // 诊断位（ROM 丢 logcat，落文件）：事件到达流水（debug 事件只计名不落正文）
+        Rlog.log("ev=${ev.event}" + if (ev.event == "debug") "" else " keys=${ev.data.keys().asSequence().toList()}")
         when (ev.event) {
             "status" -> if (!ev.data.optBoolean("running", true) && remoteRunning) {
-                // 轮次收尾：恢复输入；相位按有无 tool 步（DONE/IDLE）
+                // 轮次收尾：与本地 finish 同款终态——内核回报失败（extra.meta.success
+                // =false）出失败面板；任务轮出完成面板（digest 与结果气泡去重）；
+                // 纯闲聊只回待命。
                 remoteRunning = false
                 sending = false
                 input.isEnabled = true
+                btnStop.visibility = View.GONE
+                if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+                Rlog.log("terminal: hadTools=$remoteHadTools metaSuccess=$remoteMetaSuccess metaSteps=$remoteMetaSteps")
+                if (remoteMetaSuccess == false) {
+                    // 失败收尾：浮窗错误行由 remoteFail 统一发（唯一失败出口）
+                    remoteFail(remoteFinalText.ifBlank { "远程轮未完成（内核未回报原因）" })
+                    return true
+                }
+                // 执行链浮窗终态（done=任务轮收尾隐藏；chat=闲聊轮）
+                NarrativePanel.pushRemote(JSONObject()
+                    .put("event", "finish")
+                    .put("status", if (remoteHadTools) "done" else "chat")
+                    .put("steps", remoteMetaSteps)
+                    .put("summary", remoteFinalText).toString())
+                if (remoteHadTools) {
+                    ChatMapper.item("finish", mapOf<String, Any?>(
+                        "status" to "done", "summary" to remoteFinalText,
+                        "steps" to remoteMetaSteps,
+                        "wall_clock_s" to (System.currentTimeMillis() - remoteT0) / 1000.0
+                    ))?.let { pushItem(it) }
+                }
                 phase = if (remoteHadTools) ChatPhase.DONE else ChatPhase.IDLE
                 headerStatus.text = phase.label
-                btnStop.visibility = View.GONE
                 refresh()
                 return true
             }
             "message" -> {
                 val text = ev.data.optString("content").ifEmpty { ev.data.optString("text") }
                 if (text.isNotEmpty() && remoteRunning) {
-                    val block = ev.data.optString("block_id")
+                    // 流式块键：内核 push_message_stream 的字段是 id（block_id 是旧名）——
+                    // 读错键会让跨工具的两段口播续写进同一气泡
+                    val block = ev.data.optString("id").ifEmpty { ev.data.optString("block_id") }
                     if (block != remoteStreamBlock || remoteBubbleIdx < 0 ||
                         remoteBubbleIdx >= items.size ||
                         items[remoteBubbleIdx] !is ChatItem.AssistantMsg) {
@@ -574,26 +612,88 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                         remoteStreamText += text
                         items[remoteBubbleIdx] = ChatItem.AssistantMsg(remoteStreamText)
                     }
+                    // 浮窗口播行（K3：当前动作行优先显示口播）
+                    NarrativePanel.pushRemote(JSONObject()
+                        .put("event", "message").put("content", text).toString())
                     refresh()
                 }
             }
             "toolcall" -> {
                 val tool = ev.data.optString("name").ifEmpty { ev.data.optString("tool") }
                 if (tool.isNotEmpty() && remoteRunning) {
+                    // 断线重连会重放窗口事件：按内核事件 id 去重，防止双卡
+                    val tcId = ev.data.optString("id")
+                    if (tcId.isNotEmpty() && !remoteToolIds.add(tcId)) return false
                     if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
                     remoteHadTools = true
+                    remoteStepN++
+                    // K4 同款：首个 tool 步让位桌面 + 弹执行链浮窗（远程轮同享；
+                    // 闲聊全程留在对话页）
+                    if (!yieldedHome) {
+                        yieldedHome = true
+                        NarrativePanel.show(act)
+                        act.startActivity(Intent(Intent.ACTION_MAIN).apply {
+                            addCategory(Intent.CATEGORY_HOME)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                    }
+                    // 内核 toolcall 是完成后整卡（name+arguments+result）：result 按工具
+                    // 框架统一包裹 {"ok":bool,"error"?,"output"?} 推导三态——与本地
+                    // step 事件的 ok/error 语义一致（绿勾/红叉+错误文案），不再永远
+                    // 渲染成「进行中」。
+                    val (ok, err) = parseToolResult(ev.data.optString("result"))
+                    Rlog.log("toolcall #$remoteStepN tool=$tool ok=$ok err=${err?.take(60)}")
                     ChatMapper.item("step", mapOf<String, Any?>(
-                        "tool" to tool, "ok" to null, "error" to null, "step" to null))
+                        "tool" to tool, "ok" to ok, "error" to err, "step" to remoteStepN))
                         ?.let { pushItem(it) }
+                    // 执行链浮窗步进行（步数=本地计数，喂悬浮球进度；tap_xy/gesture 带红框）
+                    NarrativePanel.pushRemote(JSONObject()
+                        .put("event", "step").put("tool", tool)
+                        .put("step", remoteStepN)
+                        .putOpt("ok", ok).putOpt("error", err)
+                        .putOpt("args", toolArgs(ev.data.optString("arguments")))
+                        .toString())
                     phase = ChatPhase.WORKING
-                    headerStatus.text = "远程内核 · 干活中"
+                    headerStatus.text = tierLabel(rc) + " · 干活中"
                     refresh()
+                }
+            }
+            "debug" -> {
+                // 内核调试流里与用户可见面相关的两类 → 知识注入提示卡（本地
+                // knowledge 事件同款；其余 debug 事件属 Debug 面板，不进对话区）
+                val extra = ev.data.optJSONObject("extra") ?: return false
+                when (extra.optString("kind")) {
+                    "skill_catalog" -> extra.optJSONObject("payload")?.optJSONArray("names")
+                        ?.let { arr ->
+                            for (i in 0 until arr.length())
+                                arr.optString(i).takeIf { it.isNotBlank() }
+                                    ?.let { remoteSkills.add(it) }
+                        }
+                    "memory_inject" -> if (remoteRunning) {
+                        val p = extra.optJSONObject("payload")
+                        if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+                        ChatMapper.item("knowledge", mapOf<String, Any?>(
+                            "memory" to ((p?.optInt("hits", 0) ?: 0) > 0),
+                            "skills_names" to remoteSkills.joinToString("、"),
+                            "chars" to (p?.optInt("chars", 0) ?: 0)
+                        ))?.let { pushItem(it) }
+                        refresh()
+                    }
                 }
             }
             "chat" -> {
                 val role = ev.data.optString("role")
-                val content = ev.data.optString("content")
+                // 内核 chat 事件载荷字段是 text（content 是旧约定）——只读 content
+                // 会把最终回复整体丢掉（2026-10-31 真机实录：任务成功但 UI 无回复）。
+                val content = ev.data.optString("content").ifEmpty { ev.data.optString("text") }
+                // meta 供轮末面板（steps/success）与失败判定；失败轮 content 可能
+                // 为空，取 meta 不能放在 content 判空之后
+                ev.data.optJSONObject("extra")?.optJSONObject("meta")?.let { meta ->
+                    remoteMetaSteps = meta.optInt("steps", 0)
+                    if (meta.has("success")) remoteMetaSuccess = meta.optBoolean("success")
+                }
                 if ((role == "agent" || role == "assistant") && content.isNotBlank()) {
+                    remoteFinalText = content.trim()
                     // 最终结论：替换流式气泡为定稿 + 播报（C1 对讲式；按住 🎤 即打断 = C2）
                     if (remoteBubbleIdx in items.indices && items[remoteBubbleIdx] is ChatItem.AssistantMsg) {
                         items[remoteBubbleIdx] = ChatItem.AssistantMsg(content.trim())
@@ -623,11 +723,48 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         return false
     }
 
+    /**
+     * 内核 toolcall.result → 卡片三态 (ok, error)。上游工具框架把所有工具结果统一
+     * 包成 {"ok": bool, "error"?, "output"?}（omni_core/tools/base.py 执行包装），
+     * JSON 解析优先；非 JSON 文本只认框架的失败字面量——宽松的"含 error 字样"启发
+     * 会把「屏幕上写着 error」这类观测内容误判成失败，宁可不判也不给红卡。
+     */
+    private fun parseToolResult(res: String): Pair<Boolean?, String?> {
+        val s = res.trim()
+        if (s.isEmpty()) return null to null
+        try {
+            val o = JSONObject(s)
+            if (o.has("ok")) {
+                // optString 对 JSON null 返回字面量 "null"，需一并排除
+                val err = o.optString("error").takeIf { it.isNotBlank() && it != "null" }
+                return o.optBoolean("ok") to err
+            }
+            return true to null
+        } catch (_: Exception) { /* 非 JSON */ }
+        // 内核 toolcall.result 实为 str(dict)（Python repr：单引号 / True 首字母大写，
+        // org.json 解析不了）——正则同时吃 JSON 与 repr 两种形态，展示级足够
+        val okRe = Regex("[\"']ok[\"']\\s*:\\s*(True|False|true|false)")
+        if (okRe.find(s)?.groupValues?.get(1)?.lowercase() == "false") {
+            val errRe = Regex("[\"']error[\"']\\s*:\\s*[\"'](.*?)[\"']", RegexOption.DOT_MATCHES_ALL)
+            return false to (errRe.find(s)?.groupValues?.get(1)?.take(120) ?: s.take(120))
+        }
+        return true to null
+    }
+
+    /** 内核 toolcall.arguments（JSON 字符串）→ 浮窗红框定位用 args 对象（tap_xy 的
+     *  x/y、gesture 的 points）；解析失败返回 null（浮窗自动无定位）。 */
+    private fun toolArgs(raw: String): JSONObject? = try {
+        JSONObject(raw.trim())
+    } catch (_: Exception) { null }
+
     /** 远程轮失败收尾（FailPanel + 恢复输入；不回退 Tier——下一轮探活再决定）。 */
     private fun remoteFail(reason: String) {
         sending = false
         remoteRunning = false
         input.isEnabled = true
+        // 执行链浮窗错误行（唯一失败出口：stream 断裂/内核回报失败都汇到这里）
+        NarrativePanel.pushRemote(JSONObject()
+            .put("event", "error").put("error", reason).toString())
         if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
         items.add(ChatItem.FailPanel(reason))
         phase = ChatPhase.FAILED
@@ -635,9 +772,11 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         refresh()
     }
 
-    /** 远程轮硬停止（⏹ / C2 后备通道）。 */
+    /** 远程轮硬停止（⏹）：停的是**当前生效 Tier** 的内核（存档的 PC 配置 ≠ 本轮
+     *  实际使用的 Tier 1 环回——2026-10-31 修正：环回轮点 ⏹ 曾打到 PC 上）。 */
     private fun remoteStop() {
-        val rc = RemoteConfigStore.load(act) ?: return
+        val rc = remoteActiveRc ?: RemoteConfigStore.load(act) ?: return
+        Rlog.log("stop: tier=${tierLabel(rc)} task=$remoteTaskId")
         Thread {
             try { OmniAgentRemote.stop(rc.baseUrl, rc.token, remoteTaskId) } catch (_: Exception) {}
         }.start()
@@ -699,12 +838,6 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             })
             speech?.start()
         }
-    }
-
-    private fun bridgeCall(method: String) {
-        Thread {
-            try { KernelHostService.pyBridgeModule?.callAttr(method) } catch (_: Exception) {}
-        }.start()
     }
 
     private fun toast(msg: String) =
@@ -1062,6 +1195,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
 
     companion object {
         private const val PREFS_NAME = "hachimi_ui"
+        /** Phase 1 环回 omni 内核（omni_host.py 固定端口；仅 127.0.0.1，无鉴权面）。 */
+        private const val OMNI_HOST_BASE = "http://127.0.0.1:18471"
     }
 
     // ---------------- Adapter（消息流多类型渲染） ----------------

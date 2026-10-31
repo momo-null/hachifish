@@ -115,7 +115,7 @@ def _llm_pick(skills, query: str, limit: int):
         reply = _retrieval_brain.chat([{"role": "user", "content": _SELECT_PROMPT.format(
             limit=max(1, int(limit or 5)), query=(query or "")[:1500],
             items="\n".join("- %s" % _skill_brief(s) for s in skills))}], [])
-        from hachimi_kernel.curator import _parse_llm_json
+        
         data = _parse_llm_json((reply or {}).get("content"))
     except Exception as e:
         print("[skill] llm select failed: %s: %s" % (type(e).__name__, e), flush=True)
@@ -568,7 +568,7 @@ class SkillLibrary:
                 existing="\n".join("- %s | steps=%d"
                                    % (_skill_brief(s), len(s.substeps or []))
                                    for s in pool))}], [])
-            from hachimi_kernel.curator import _parse_llm_json
+            
             data = _parse_llm_json((reply or {}).get("content"))
         except Exception as e:
             print("[skill] llm identity failed: %s: %s" % (type(e).__name__, e), flush=True)
@@ -855,3 +855,26 @@ def validate_skill_summary(raw, record):
             "precondition": str(raw.get("precondition") or "")[:60],
             "verify": str(raw.get("verify") or "")[:60],
             "playbook": playbook, "keywords": kws, "steps": out}
+
+
+def _parse_llm_json(text: str) -> Optional[Dict[str, Any]]:
+    """从 LLM 回复里抠 JSON 对象（容忍 ```json 围栏与前后废话）。
+
+    （原 curator 工具函数；curator 随 mini_loop 退役后迁此保持单出处。）
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", t, re.S)
+    if m:
+        t = m.group(1)
+    else:
+        i, j = t.find("{"), t.rfind("}")
+        if i < 0 or j <= i:
+            return None
+        t = t[i:j + 1]
+    try:
+        data = json.loads(t)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None

@@ -50,6 +50,11 @@ dependencies {
 
 // Chaquopy：Python 内核源集（hachimi_kernel 包）+ 构建解释器（便携版 3.12）
 // 内核仅标准库（红线 R7），无 pip requirements。
+// [spike/full-kernel-hosting] Phase 0：完整内核上机三道闸 —— 目标 Python 显式钉 3.12
+// （与 pydantic-core android wheel cp312 / buildPython 3.12 三方配对）；pip 装纯
+// Python 依赖面 + psutil（官方仓有 Android 构建）+ 社区 pydantic-core wheel。
+// openai-agents 暂不装：其依赖 jiter 暂无 Android wheel（Phase 1 项），GATE_B2 会
+// 以「预期阻塞」落 logcat。
 chaquopy {
     defaultConfig {
         // Python 解释器：优先用 -PhachimiPython 覆盖；默认仓库内 .tools/python312（junction 到本机 Python 3.12）。
@@ -57,10 +62,45 @@ chaquopy {
             providers.gradleProperty("hachimiPython").get() else
             rootDir.resolve(".tools/python312/python.exe").toString()
         buildPython(hachimiPython)
+        version = "3.12"   // 环境标签 android_2x_arm64_v8a；minSdk 30 ≥ wheel 的 API 24 要求
+        pip {
+            options("--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple")   // 本机直连 pypi 慢（2026-10-31 实测）；extra 保住 Chaquopy 原生仓
+            install("pydantic==2.13.3")   // 与本地 pydantic-core wheel 严格配对（==2.46.3）
+            install("fastapi")
+            install("uvicorn")
+            install("httpx")
+            install("PyYAML")
+            install("psutil")             // chat_runtime 兼容 shim 链（diagnostics）需要
+            install("numpy==1.26.2")      // utils/json_utils 模块级依赖（官方仓 cp312 android 构建）
+            // 社区 Android 构建（Eutalix，maturin/NDK r25b；WHEEL 内部标签
+            // android_24_arm64_v8a，DT_NEEDED libpython3.12.so 与 3.12 目标配对）
+            install("spike-wheels/pydantic_core-2.46.3-cp312-cp312-android_24_arm64_v8a.whl")
+            install("spike-wheels/jiter-0.18.0-cp312-cp312-android_24_arm64_v8a.whl")
+            // SDK 闭包与 PC venv 逐版对齐（R6：漂移 = bug）
+            install("openai-agents==0.22.2")
+            install("openai==3.13.0")
+            install("mcp==2.2.0")
+            install("httpx2==2.12.0")
+            install("websockets==15.0.1")
+            install("spike-wheels/rpds_py-0.30.0-cp312-cp312-android_24_arm64_v8a.whl")  // mcp→jsonschema 链（自编）
+            install("spike-wheels/ormsgpack-1.12.2-cp312-cp312-android_24_arm64_v8a.whl")  // checkpoint 依赖（自编，PC 同版 1.12.2）
+            install("spike-wheels/orjson-3.11.7-cp312-cp312-android_24_arm64_v8a.whl")      // langgraph-sdk 依赖（自编，PC 同版 3.11.7）
+            install("langgraph-sdk==0.3.11")
+            install("langgraph-checkpoint==4.0.1")
+            install("langgraph-prebuilt==1.0.8")   // PC 同版
+            install("langchain-core==1.2.19")      // PC 同版
+            install("spike-wheels/uuid_utils-0.14.1-cp39-abi3-android_24_arm64_v8a.whl")  // langchain-core 依赖（自编，PC 同版）
+            install("jsonschema==4.26.0")
+            install("spike-wheels/xxhash-3.6.0-py3-none-any.whl")  // langgraph 依赖的 xxh3_128 指纹：blake2b-128 语义替身（见方案文档）
+            install("spike-wheels/zstandard-0.25.0-py3-none-any.whl")  // langsmith 依赖：stub（压缩守卫关闭，见方案文档）
+            install("langgraph==1.1.2")   // run_task 必经（graph_runner→orchestration）；PC 同版
+        }
     }
     sourceSets {
         getByName("main") {
             srcDir("../../kernel")
+            // src/main/python 为 Chaquopy 隐式源集：spike 自检模块 +
+            // 构建期从上游仓拷入的 omni_core/backend/utils/config 源码（见 spike 说明）
         }
     }
 }

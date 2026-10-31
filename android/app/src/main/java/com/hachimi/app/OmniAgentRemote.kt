@@ -1,11 +1,39 @@
 package com.hachimi.app
 
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
+
+/**
+ * 文件日志（ROM 日志过滤兜底）：Oplus 等 ROM 会整档丢弃第三方 app 的 logcat 输出
+ * （实测：app 内 Log.i 连内核启动行都不落 logcat），线上排障改为落 App 私有文件，
+ * adb `run-as com.hachimi.app cat files/chat_remote.log` 可读。有界：超过 256KB 整档重来。
+ */
+object Rlog {
+    @Volatile private var file: File? = null
+    private val fmt = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+
+    @JvmStatic fun init(dir: File) {
+        try {
+            val f = File(dir, "chat_remote.log")
+            if (f.exists() && f.length() > 262_144) f.delete()
+            file = f
+        } catch (_: Exception) {}
+    }
+
+    @JvmStatic fun log(msg: String) {
+        try {
+            file?.appendText(fmt.format(Date()) + " " + msg + "\n")
+        } catch (_: Exception) {}
+    }
+}
 
 /**
  * OmniAgent 远程客户端（doc/plans/omniagent_remote_client_plan.md C1-C3，Tier 2 遥控模式）。
@@ -146,6 +174,7 @@ object OmniAgentRemote {
     fun stream(baseUrl: String, token: String, taskId: String, sub: String,
                onEvent: (SseEvent) -> Boolean) {
         val c = conn("$baseUrl/api/runtime/stream?task_id=$taskId&sub=$sub", token, 0)
+        Rlog.log("stream open task=$taskId sub=$sub")
         try {
             val parser = SseParser()
             c.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
@@ -155,9 +184,18 @@ object OmniAgentRemote {
                     if (!onEvent(SseEvent(raw.event, json))) return
                 }
             }
-        } catch (_: Exception) {
-            // 断流（网络抖动/服务重启）：调用方经 status 状态机与下轮探活自愈（C3）
+            // 走到这里 = 服务端/链路静默关流（EOF，无异常）——调用方必须知道「本轮
+            // 并没有正常收尾」（2026-10-31 真机实录：TCP 层连接消失、UI 永卡干活中）。
+            Rlog.log("stream EOF task=$taskId")
+            throw java.io.IOException("SSE 连接被静默关闭（EOF）")
+        } catch (e: Exception) {
+            android.util.Log.w("ChatRemote",
+                "stream broke: ${e.javaClass.simpleName}: ${e.message}")
+            Rlog.log("stream broke: ${e.javaClass.simpleName}: ${e.message}")
+            throw e
         } finally {
+            android.util.Log.i("ChatRemote", "stream closed for task=$taskId")
+            Rlog.log("stream closed task=$taskId")
             c.disconnect()
         }
     }

@@ -25,6 +25,15 @@ _SPLIT_MODE = {}
 _NO_THINKING = {}
 
 
+def _unwrap_gateway(data):
+    """gitclaw 类网关的非流式响应把 OpenAI 载荷包在 {"data": {...}} 里（流式是
+    标准 SSE 无包裹）；剥壳后按标准形状解析（与 brain_client 同款）。"""
+    if isinstance(data, dict) and isinstance(data.get("data"), dict) \
+            and "choices" in data["data"]:
+        return data["data"]
+    return data
+
+
 def _post_json(url, body, api_key, timeout):
     req = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"),
@@ -32,7 +41,7 @@ def _post_json(url, body, api_key, timeout):
                  "Authorization": "Bearer " + api_key},
         method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "ignore"))
+        return _unwrap_gateway(json.loads(resp.read().decode("utf-8", "ignore")))
 
 
 class VisionClient(object):

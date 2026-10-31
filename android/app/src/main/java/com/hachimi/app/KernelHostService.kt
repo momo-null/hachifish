@@ -93,6 +93,7 @@ class KernelHostService : Service() {
 
     private fun attachKernel() {
         try {
+            com.hachimi.app.Rlog.init(filesDir)   // ROM 丢 logcat——排障日志落文件
             // 持久化根注入（runtime_paths 在 import 时读取）：App 私有目录 = files/
             android.system.Os.setenv("HACHIMI_DATA_DIR", filesDir.absolutePath, true)
             if (!com.chaquo.python.Python.isStarted()) {
@@ -102,12 +103,14 @@ class KernelHostService : Service() {
             val info = py.getModule("hachimi_kernel").callAttr("kernel_info")
             android.util.Log.i("HachimiKernel", "kernel_info: ${info.toString()}")
 
-            // 原语派发器注入 Python（工具面定义在 hachimi_kernel.bridge.TOOL_SPECS）
-            val dispatcher = PrimitiveDispatcher()
+            // [spike/full-kernel-hosting] Phase 0 五道闸自检已收官（2026-10-31 真机全绿）。
+            // spike 挂钩已摘除：它占用 18471 会与 omni_host 冲突（实测地址占用竞态）；
+            // spike_check.py 保留供后续诊断复用。
+
+            // Phase 2（mini_loop 退役）：bridge 只剩数据面（BYOK 测试 / 会话回放 /
+            // 任务与知识页读取），执行脑在完整内核（omni_host）——原语注入与叙事
+            // sink 随工具面/本地运行一起摘除；工具面 = hachimi_kernel.phone_tools。
             val bridgeMod = py.getModule("hachimi_kernel.bridge")
-            bridgeMod.callAttr("register_bridge", dispatcher)
-            // 叙事面板：Python 步进事件 → 悬浮层（前台引导模式 UI 组成，架构 §6）
-            bridgeMod.callAttr("register_narrative", NarrativePanel)
             // P2：知识开关持久化值随 attach 同步 kernel（进程重启后 kernel 默认开，
             // 用户此前关过的选择会丢——设置页只在切换时推送，冷启动必须这里回放）
             bridgeMod.callAttr("set_knowledge_enabled",
@@ -119,8 +122,11 @@ class KernelHostService : Service() {
             // P1.5：attach 不再 show——面板只在 run 开始时出现（直调/回环 /task 各自
             // show），否则开机即挂浮条遮挡引导页/主界面
             startLoopback(py)
+            startOmniHost(py)
         } catch (e: Exception) {
             android.util.Log.e("HachimiKernel", "kernel attach failed: ${e.javaClass.simpleName}: ${e.message}")
+            com.hachimi.app.Rlog.init(filesDir)   // ROM 丢 logcat——失败落文件排障
+            com.hachimi.app.Rlog.log("attachKernel failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
@@ -131,6 +137,44 @@ class KernelHostService : Service() {
         } else {
             bridge.callAttr("set_vision", "", "", "")
         }
+    }
+
+    /**
+     * Phase 1 kernel host v2：启动环回 omni 内核（完整上游真身，方案文档
+     * full_kernel_hosting_plan_2026-10-31.md）。BYOK 配置（Keystore 解密）以
+     * JSON 注入，内核侧写 models.json（模型路由真源）。幂等；失败不影响旧链路。
+     */
+    private var omniHostStarted = false
+
+    private fun startOmniHost(py: com.chaquo.python.Python) {
+        if (omniHostStarted) return
+        omniHostStarted = true
+        Thread({
+            try {
+                // 序列：prepare（HOME/CWD，零依赖）→ phone_tools bind（import 即注册，
+                // 依赖 prepare 先行）→ omni_host.start（config/导入序/uvicorn）
+                py.getModule("hachimi_kernel.omni_host").callAttr("prepare")
+                py.getModule("hachimi_kernel.phone_tools").callAttr("bind", PrimitiveDispatcher())
+                val cfg = BrainConfigStore.load(this)
+                val payload = org.json.JSONObject().apply {
+                    put("base_url", cfg?.baseUrl ?: "")
+                    put("api_key", cfg?.apiKey ?: "")
+                    put("model", cfg?.model ?: "")
+                    put("vision_base_url", cfg?.visionBaseUrl ?: "")
+                    put("vision_api_key", cfg?.visionApiKey ?: "")
+                    put("vision_model", cfg?.visionModel ?: "")
+                }
+                val r = py.getModule("hachimi_kernel.omni_host")
+                    .callAttr("start", payload.toString())
+                android.util.Log.i("OmniHost", "start: ${r}")
+                com.hachimi.app.Rlog.log("omni_host start: ${r}")
+            } catch (e: Exception) {
+                android.util.Log.e("OmniHost",
+                    "start failed: ${e.javaClass.simpleName}: ${e.message}")
+                com.hachimi.app.Rlog.log(
+                    "omni_host start failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }, "omni-host-boot").start()
     }
 
     private fun startLoopback(py: com.chaquo.python.Python) {

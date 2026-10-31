@@ -147,7 +147,32 @@ object NarrativePanel {
                         }
                     }
                 }
-                when (e.optString("event")) {
+                applyOverlay(e)
+            } catch (ex: Exception) {
+                Log.w(TAG, "push parse: ${ex.message}")
+            }
+        }
+    }
+
+    /**
+     * 远程（Tier 1/2 环回/遥控 SSE）事件入口：**只驱动悬浮执行链层**，不分发消息流
+     * 订阅者——远程轮的聊天渲染在 ChatPage.handleRemoteEvent 自己那份（R10 单实现，
+     * 不双卡），这里补齐 mini_loop 时代本地轮才有的执行链浮窗（2026-10-31 实录：
+     * 完整内核上机后远程轮没有链路显示，因为本转发器只吃 bridge 事件）。
+     */
+    @JvmStatic
+    fun pushRemote(json: String) {
+        main.post {
+            try {
+                applyOverlay(JSONObject(json))
+            } catch (ex: Exception) {
+                Log.w(TAG, "pushRemote parse: ${ex.message}")
+            }
+        }
+    }
+
+    private fun applyOverlay(e: JSONObject) {
+        when (e.optString("event")) {
                     "start" -> {
                         // R11：新一轮起手=收起态（只留球，点按展开）；已挂载的面板同步
                         // 变球，避免上一轮的展开态泄漏到新一轮。
@@ -232,10 +257,6 @@ object NarrativePanel {
                         scheduleHide(4000)
                     }
                 }
-            } catch (ex: Exception) {
-                Log.w(TAG, "push parse: ${ex.message}")
-            }
-        }
     }
 
     /**
