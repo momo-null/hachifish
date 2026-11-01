@@ -57,10 +57,13 @@ dependencies {
 // 以「预期阻塞」落 logcat。
 chaquopy {
     defaultConfig {
-        // Python 解释器：优先用 -PhachimiPython 覆盖；默认仓库内 .tools/python312（junction 到本机 Python 3.12）。
+        // Python 解释器：-PhachimiPython=<python3.12> 优先；其次仓内 .tools/python312
+        // （本机便捷位）；否则回退 PATH 上的 python——**必须 3.12**（与目标
+        // version="3.12" 及二进制 wheel 三方配对，3.11/3.13 会构建失败）。
         val hachimiPython = if (providers.gradleProperty("hachimiPython").isPresent)
             providers.gradleProperty("hachimiPython").get() else
-            rootDir.resolve(".tools/python312/python.exe").toString()
+            rootDir.resolve(".tools/python312/python.exe").takeIf { it.exists() }?.toString()
+                ?: "python"
         buildPython(hachimiPython)
         version = "3.12"   // 环境标签 android_2x_arm64_v8a；minSdk 30 ≥ wheel 的 API 24 要求
         pip {

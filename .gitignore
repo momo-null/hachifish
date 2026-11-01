@@ -41,3 +41,6 @@ docs/progress.md
 
 # 设备知识快照（实验期的本地冻结档，不入库）
 harness/experiments/kb_snapshots/
+
+# 构建期产物：上游同步戳记（含本机路径，sync_upstream.py 生成）
+android/app/src/main/python/.upstream_synced
