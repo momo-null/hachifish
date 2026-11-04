@@ -37,7 +37,6 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        RoleStore.ensure(this)   // A2：角色配置 → filesDir/character.md 幂等同步（K0 注入生效前提）
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ds.PAGE)
@@ -64,7 +63,6 @@ class MainActivity : Activity() {
             startActivity(Intent(this, OnboardingActivity::class.java))
         }
         switchTab(0)
-        SettingsPage.onRunModeChanged = { tasksPage?.onResume() }
         // 多窗口（真分屏）下提供一键切控制台页：S4 语义——分屏里 Hachimi 这一半是 agent 面板
         if (isInMultiWindowMode) {
             val tip = TextView(this).apply {
@@ -95,6 +93,12 @@ class MainActivity : Activity() {
         chatPage?.onPause()
     }
 
+    override fun onDestroy() {
+        // 免提的全双工收音（麦克风 + 通话模式）必须随页面收，不能留到后台
+        chatPage?.onDestroy()
+        super.onDestroy()
+    }
+
     // ---------------- 底部导航（对齐设计稿 V8：💬 聊天 / 🧠 知识 / ⚙ 设置） ----------------
 
     private fun buildNavBar(): LinearLayout {
@@ -102,16 +106,22 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.WHITE)
         }
+        // 图标 = vector drawable（emoji 在 MuMu/部分 ROM 系统字体缺字形，🧠 渲染成
+        // 豆腐框——2026-11-04 用户实测「知识图标没了」）；染色随选中态。
         val spec = listOf(
-            Triple("💬", "聊天", 0), Triple("🧠", "知识", 1), Triple("⚙", "设置", 2))
-        spec.forEach { (glyph, label, tab) ->
+            Triple(R.drawable.nav_chat, "聊天", 0),
+            Triple(R.drawable.nav_knowledge, "知识", 1),
+            Triple(R.drawable.nav_settings, "设置", 2))
+        spec.forEach { (icon, label, tab) ->
             val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setOnClickListener { switchTab(tab) }
             }
-            cell.addView(TextView(this).apply {
-                text = glyph; textSize = 17f; gravity = Gravity.CENTER
+            cell.addView(android.widget.ImageView(this).apply {
+                setImageResource(icon)
+                setColorFilter(Ds.TEXT_3)
+                layoutParams = LinearLayout.LayoutParams(Ds.dp(this@MainActivity, 22), Ds.dp(this@MainActivity, 22))
             })
             cell.addView(TextView(this).apply {
                 text = label; textSize = 11f; gravity = Gravity.CENTER
@@ -135,9 +145,9 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         navBar.cells().forEachIndexed { i, v ->
             val on = i == tab
-            val glyph = v.getChildAt(0) as TextView
+            (v.getChildAt(0) as android.widget.ImageView).setColorFilter(
+                if (on) Ds.PRIMARY else Ds.TEXT_3)
             val label = v.getChildAt(1) as TextView
-            glyph.setTextColor(if (on) Ds.PRIMARY else Ds.TEXT_3)
             label.setTextColor(if (on) Ds.PRIMARY else Ds.TEXT_3)
             label.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }

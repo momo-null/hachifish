@@ -57,6 +57,38 @@ object GateManager {
         Log.i(TAG, "gate debug + session cleared")
     }
 
+    /**
+     * 内核审批弹窗（远程轮）：完整内核经 SSE `approval` 事件请求人工决议——
+     * 复用本地 GateActivity 弹窗与倒计时机制（同一 pending 表），决议映射：
+     * 允许一次=approve(不记忆)、本次任务都放行=approve(remember=true，内核做
+     * 任务级记忆)、拒绝/超时=deny。决议经回调上抛（调用方 POST 决议 API）。
+     */
+    fun enforceRemote(context: Context, pkg: String, op: String, preview: String,
+                      onDecision: (approve: Boolean, remember: Boolean) -> Unit) {
+        val id = seq.incrementAndGet()
+        pending[id] = { code, timedOut ->
+            when {
+                timedOut -> onDecision(false, false)
+                code == GateActivity.RESULT_ALLOW_ONCE -> onDecision(true, false)
+                code == GateActivity.RESULT_ALLOW_ALWAYS -> onDecision(true, true)
+                else -> onDecision(false, false)
+            }
+        }
+        try {
+            val i = Intent(context, GateActivity::class.java)
+                .putExtra(GateActivity.EXTRA_PACKAGE, pkg)
+                .putExtra(GateActivity.EXTRA_OP, op)
+                .putExtra(GateActivity.EXTRA_PREVIEW, preview)
+                .putExtra(GateActivity.EXTRA_REQUEST, id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(i)
+        } catch (e: Exception) {
+            Log.e(TAG, "remote gate activity failed: ${e.message}")
+            pending.remove(id)
+            onDecision(true, false)   // 与本地 fallback 同语义：弹层失败放行
+        }
+    }
+
     /** 敏感操作判定：调试放行/当前任务已总放行则直接通过；否则弹 GateUI 阻塞等待用户选择。
      *  级别：relaxed 时 launch_app 不询问（仅 type_text 问）。 */
     fun enforce(context: Context, pkg: String, op: String, preview: String = ""): Verdict {

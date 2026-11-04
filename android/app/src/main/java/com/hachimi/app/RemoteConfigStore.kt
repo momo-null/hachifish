@@ -14,6 +14,10 @@ import org.json.JSONObject
 /**
  * 远程内核（OmniAgent）配置存储：base_url + token + 自动切换开关。
  *
+ * 这里只管「话发给哪个大脑」，不管「怎么听怎么说」：识别与播报的端点一律来自
+ * 设置 · 语音供应商（[VoiceProviderStore]）——远程 base_url 不再兼作 TTS 端点，
+ * 播报开关也不在这里（2026-11-04 改：播不播由输入形态决定，对讲播、免提自由对话）。
+ *
  * 存储模式与 [BrainConfigStore] 同款（红线 R8）：Android Keystore AES/GCM 加密后落
  * App 私有文件（remote_config.enc），token 明文不落库。
  * 未配置（null）= 远程表面关闭，ChatPage 全走本地内核（Tier 1）。
@@ -27,10 +31,10 @@ object RemoteConfigStore {
     data class RemoteConfig(
         val baseUrl: String,
         val token: String,
-        /** 自动切换（C3）：每轮 /health 探活（1s），可达走远程，不可达回本地内核。 */
-        val auto: Boolean = true,
-        /** 回复语音播报（C1 对讲式）：结论气泡 TTS 朗读；按住 🎤 即打断。 */
-        val speak: Boolean = true
+        /** 自动切换（C3）：每轮 /health 探活（1s），可达走远程，不可达回本地内核。
+         *  默认关（2026-11-04 改）：配了远程不等于要用远程，勾选才生效——
+         *  默认留在本机内核，避免「填了地址就悄悄把话发给 PC」。 */
+        val auto: Boolean = false
     ) {
         val ready: Boolean get() = baseUrl.startsWith("http") && token.isNotBlank()
     }
@@ -40,7 +44,6 @@ object RemoteConfigStore {
             .put("base_url", cfg.baseUrl.trimEnd('/'))
             .put("token", cfg.token)
             .put("auto", cfg.auto)
-            .put("speak", cfg.speak)
             .toString()
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key(context))
@@ -72,8 +75,7 @@ object RemoteConfigStore {
             RemoteConfig(
                 baseUrl = o.optString("base_url"),
                 token = o.optString("token"),
-                auto = o.optBoolean("auto", true),
-                speak = o.optBoolean("speak", true)
+                auto = o.optBoolean("auto", false)
             )
         }
     } catch (e: Exception) {

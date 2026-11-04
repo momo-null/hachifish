@@ -40,7 +40,8 @@ object Rlog {
  *
  * 契约 = 上游 `doc/plans/remote-client-contract-2026-10-30.md` 的线上实现（已对齐
  * `backend/api/routers/chat_runtime.py`，非文档臆测）：
- * - POST /api/runtime/chat   body `{messages:[{role,content}], task_id?, force?}`
+ * - POST /api/runtime/chat   body `{messages:[{role,content}], task_id?, force?,
+ *   max_steps?, model?, mode?}`；mode = chat/task/auto（与 PC 同一取向开关）
  *   → `{ok, task_id, mode, persona}`；force=true = 同 task barge-in（打断运行轮并
  *   立即派发新消息，上游半句标 [被打断]）；409 = 已有任务运行且不可 force。
  * - GET  /api/runtime/stream?task_id=&sub=  SSE（`event: <name>\ndata: <json>`）。
@@ -109,11 +110,19 @@ object OmniAgentRemote {
      * [被打断]、立即派发新消息）；409（他任务运行/打断超时）抛 RuntimeException。
      */
     fun chat(baseUrl: String, token: String, text: String,
-             taskId: String?, force: Boolean = false): String {
+             taskId: String?, force: Boolean = false, maxSteps: Int = 0,
+             model: String? = null, mode: String? = null): String {
         val body = JSONObject()
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", text)))
         taskId?.takeIf { it.isNotBlank() }?.let { body.put("task_id", it) }
         if (force) body.put("force", true)
+        // 步数预算：内核按它跑 agent 循环；壳同时用它做悬浮球进度环的分母（total）
+        if (maxSteps > 0) body.put("max_steps", maxSteps)
+        // 会话级模型选择（模型路由 "<provider_id>/<model_id>"；空 = 跟随目录默认）
+        model?.takeIf { it.isNotBlank() }?.let { body.put("model", it) }
+        // 对话取向（与 PC 同一开关）：chat=对话纪律（不干活、无深度思考）/
+        // task=工作 lane（工具循环 + 深度思考卡）。缺省不传 = 内核 auto。
+        mode?.takeIf { it == "chat" || it == "task" || it == "auto" }?.let { body.put("mode", it) }
         val c = conn("$baseUrl/api/runtime/chat", token, 15000)
         c.requestMethod = "POST"
         c.doOutput = true
@@ -139,33 +148,214 @@ object OmniAgentRemote {
         c.disconnect()
     }
 
-    /**
-     * PC 侧语音合成（CosyVoice2 音色，音色与桌面/QQ 侧一致）：text → WAV 字节。
-     * 失败抛 RuntimeException（调用方回退本地 TTS，回复永不失声）。
-     * 整段合成（上游 RTF≈2），播报延迟 = 合成时长，属已接受的形态取舍。
-     */
-    fun tts(baseUrl: String, token: String, text: String, timeoutMs: Int = 60000): ByteArray {
-        val c = conn("$baseUrl/api/audio/tts", token, timeoutMs)
+    /** 内核审批决议（SSE approval 卡的人工应答；remember=true = 内核做任务级记忆）。 */
+    fun decideApproval(baseUrl: String, token: String, approvalId: String,
+                       approve: Boolean, remember: Boolean) {
+        val body = JSONObject()
+            .put("action", if (approve) "approve" else "deny")
+            .put("remember", remember)
+        val c = conn("$baseUrl/api/runtime/approvals/" +
+                java.net.URLEncoder.encode(approvalId, "UTF-8") + "/decision", token, 10000)
         c.requestMethod = "POST"
         c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json")
-        c.setRequestProperty("Accept", "audio/wav")
-        c.outputStream.use {
-            it.write(JSONObject().put("text", text).toString().toByteArray(Charsets.UTF_8))
-        }
-        val code = c.responseCode
-        if (code !in 200..299) {
-            val err = try {
-                JSONObject(c.errorStream.bufferedReader().readText()).optString("error")
-            } catch (_: Exception) { "HTTP $code" }
-            c.disconnect()
-            throw RuntimeException("PC 语音合成失败：$err")
-        }
-        val bytes = c.inputStream.use { it.readBytes() }
+        c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        c.inputStream.bufferedReader().use { it.readText() }
         c.disconnect()
-        if (bytes.size < 100) throw RuntimeException("PC 语音合成返回空音频")
-        return bytes
     }
+
+    /** 读写内核 settings（deep-merge 语义：patch 只带要改的子树）。 */
+    fun settingsPut(baseUrl: String, token: String, patch: JSONObject): JSONObject {
+        val c = conn("$baseUrl/api/settings", token, 10000)
+        c.requestMethod = "PUT"
+        c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(patch.toString().toByteArray(Charsets.UTF_8)) }
+        val resp = c.inputStream.bufferedReader().use { it.readText() }
+        c.disconnect()
+        return runCatching { JSONObject(resp) }.getOrElse { JSONObject() }
+    }
+
+    fun settingsGet(baseUrl: String, token: String): JSONObject {
+        val c = conn("$baseUrl/api/settings", token, 10000)
+        val resp = c.inputStream.bufferedReader().use { it.readText() }
+        c.disconnect()
+        return runCatching { JSONObject(resp) }.getOrElse { JSONObject() }
+    }
+
+    /** 通用 GET（环回内核数据面：任务列表/详情/记忆/项目等，Web 同源端点）。 */
+    fun getJson(baseUrl: String, token: String, path: String, timeoutMs: Int = 12000): JSONObject {
+        val c = conn("$baseUrl$path", token, timeoutMs)
+        val resp = c.inputStream.bufferedReader().use { it.readText() }
+        c.disconnect()
+        return runCatching { JSONObject(resp) }.getOrElse { JSONObject() }
+    }
+
+    /** 通用 POST JSON。 */
+    fun postJson(baseUrl: String, token: String, path: String,
+                 body: JSONObject, timeoutMs: Int = 10000): JSONObject {
+        val c = conn("$baseUrl$path", token, timeoutMs)
+        c.requestMethod = "POST"
+        c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val resp = c.inputStream.bufferedReader().use { it.readText() }
+        c.disconnect()
+        return runCatching { JSONObject(resp) }.getOrElse { JSONObject() }
+    }
+
+    /** 通用 PUT JSON（character/instructions 等写入口）。 */
+    fun putJson(baseUrl: String, token: String, path: String,
+                body: JSONObject, timeoutMs: Int = 12000): JSONObject {
+        val c = conn("$baseUrl$path", token, timeoutMs)
+        c.requestMethod = "PUT"
+        c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val resp = c.inputStream.bufferedReader().use { it.readText() }
+        c.disconnect()
+        return runCatching { JSONObject(resp) }.getOrElse { JSONObject() }
+    }
+
+    /** 通用 PATCH JSON（模型目录槽位默认等局部写入口）。 */
+    fun patchJson(baseUrl: String, token: String, path: String,
+                  body: JSONObject, timeoutMs: Int = 12000): JSONObject {
+        val c = conn("$baseUrl$path", token, timeoutMs)
+        c.requestMethod = "PATCH"
+        c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val resp = c.inputStream.bufferedReader().use { it.readText() }
+        c.disconnect()
+        return runCatching { JSONObject(resp) }.getOrElse { JSONObject() }
+    }
+
+    /**
+     * 通用一次请求（技能/工具/MCP 子页共用）：**非 2xx 也读回响应体**。
+     *
+     * 为什么另开一个而不复用 [getJson]/[postJson]：那两个只读 `inputStream`，而
+     * FastAPI 的错误原因（409「已有任务在运行」/400「未知插件」/422 校验失败）都在
+     * `errorStream` 里—— HttpURLConnection 在这种时候直接抛 IOException，调用方只能
+     * 拿到空 JSON，用户看到「失败」却不知道为什么。这里把状态码与 error 字段一起回，
+     * 页面得以诚实呈现（GET/POST/PUT/PATCH/DELETE 同一入口）。
+     *
+     * @return 响应 JSON（解析失败 = 空对象）；额外注入 ``_status``（HTTP 码，传输层
+     *         异常 = 0）与 ``_ok``（2xx）。
+     */
+    fun requestJson(method: String, baseUrl: String, path: String,
+                    body: JSONObject?, timeoutMs: Int = 12000): JSONObject {
+        var c: HttpURLConnection? = null
+        val out = JSONObject()
+        try {
+            c = conn("$baseUrl$path", "", timeoutMs)
+            if (body != null || method == "POST" || method == "PUT" || method == "PATCH") {
+                c.requestMethod = method
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", "application/json")
+                c.outputStream.use {
+                    it.write((body ?: JSONObject()).toString().toByteArray(Charsets.UTF_8))
+                }
+            } else {
+                c.requestMethod = method
+            }
+            val code = c.responseCode
+            val stream = if (code in 200..299) c.inputStream else c.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            val parsed = runCatching { JSONObject(text) }.getOrElse { JSONObject() }
+            for (k in parsed.keys()) out.put(k, parsed.get(k))
+            if (!out.has("error") && code !in 200..299) {
+                val brief = text.take(160).replace("\n", " ")
+                out.put("error", if (brief.isBlank()) "HTTP $code" else brief)
+            }
+            out.put("_status", code)
+            out.put("_ok", code in 200..299)
+        } catch (e: Exception) {
+            out.put("error", "${e.javaClass.simpleName}: ${e.message ?: ""}")
+            out.put("_status", 0)
+            out.put("_ok", false)
+        } finally {
+            c?.disconnect()
+        }
+        Rlog.log("req $method $path -> ${out.optInt("_status")} " +
+                (if (out.optBoolean("_ok")) "ok" else out.optString("error").take(80)))
+        return out
+    }
+
+    /**
+     * 任务执行历史（Web 同源 /api/runtime/tasks/{id}/history，Phase 2：mini_loop
+     * 旧库 task_trace_json 的替代——完整内核任务在旧库无数据，详情/回放全走这里）。
+     * 返回 {task_id, project_id, session_id, messages:[...]}；assistant 消息带
+     * extra.steps[]（thinking/tool_call/message 全量）+ extra.meta{success,steps}。
+     */
+    fun kernelTaskHistory(baseUrl: String, taskId: String): JSONObject =
+        getJson(baseUrl, "", "/api/runtime/tasks/" +
+                java.net.URLEncoder.encode(taskId, "UTF-8") + "/history", 15000)
+
+    /** 删除任务及其资产（Web 同源 DELETE /api/runtime/tasks/{id}）。 */
+    fun deleteTask(baseUrl: String, taskId: String): JSONObject {
+        val c = conn("$baseUrl/api/runtime/tasks/" +
+                java.net.URLEncoder.encode(taskId, "UTF-8"), "", 10000)
+        c.requestMethod = "DELETE"
+        val resp = runCatching { c.inputStream.bufferedReader().use { it.readText() } }
+            .getOrElse { "{\"ok\":false,\"error\":\"${it.message}\"}" }
+        c.disconnect()
+        return runCatching { JSONObject(resp) }.getOrElse { JSONObject() }
+    }
+
+    /**
+     * 环回内核任务列表（Web 同源 /api/runtime/tasks）+ 项目名映射归一化——
+     * 会话面板/任务页共用（Phase 2：mini_loop 旧库 list_tasks_json 的替代）。
+     * 归一化字段：task_id/objective/state/success/created_at/project/steps/wall_s。
+     */
+    fun kernelTasks(baseUrl: String, limit: Int = 12): org.json.JSONArray {
+        val tasks = getJson(baseUrl, "", "/api/runtime/tasks", 12000)
+            .optJSONArray("tasks") ?: return org.json.JSONArray()
+        val names = HashMap<String, String>()
+        runCatching {
+            val pm = getJson(baseUrl, "", "/api/runtime/projects/meta", 8000)
+            pm.optJSONArray("projects")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val p = arr.optJSONObject(i) ?: continue
+                    names[p.optString("project_id")] =
+                        p.optString("display_name").ifEmpty { p.optString("project_id") }
+                }
+            }
+        }
+        val out = org.json.JSONArray()
+        for (i in 0 until minOf(tasks.length(), limit)) {
+            val t = tasks.optJSONObject(i) ?: continue
+            val st = t.optString("state")
+            val success = t.optBoolean("success")
+            val norm = JSONObject()
+                .put("task_id", t.optString("task_id"))
+                .put("objective", t.optString("objective"))
+                .put("done_when", t.optString("done_when"))
+                .put("state", when {
+                    success -> "done"
+                    success == false && st != "pending" -> "failed"
+                    else -> st
+                })
+                .put("success", success)
+                .put("created_at", t.optString("created_at"))
+                .put("project", names[t.optString("project_id")] ?: t.optString("project_id"))
+                .put("steps", -1)
+                .put("wall_s", -1.0)
+            runCatching {
+                val f = java.time.OffsetDateTime.parse(t.optString("finished_at"))
+                val c0 = java.time.OffsetDateTime.parse(t.optString("created_at"))
+                norm.put("wall_s", java.time.Duration.between(c0, f).seconds.toDouble())
+            }
+            out.put(norm)
+        }
+        return out
+    }
+
+    /**
+     * PC 侧语音合成（/api/audio/tts）已删除（2026-11-04 语音严格化）：播报端点唯一
+     * 来源是 设置 · 语音供应商（OpenAI 音频兼容 /v1/audio/speech，指向 PC 自建
+     * engine_service 也是这一种接法）。留着它等于让远程 base_url 兼作 TTS 端点，
+     * 用户在同一屏幕里配了两套语音——已按「一条路径」原则整段移除。
+     */
 
     /**
      * 订阅 SSE 流（阻塞，调用方放后台线程）。[onEvent] 返回 false = 调用方要求

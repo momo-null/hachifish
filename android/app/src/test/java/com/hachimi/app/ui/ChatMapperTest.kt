@@ -184,4 +184,46 @@ class ChatMapperTest {
         val running = ChatMapper.item("step", stepEvent(ok = null)) as ChatItem.ToolCard
         assertEquals(1, running.count)
     }
+
+    // ---------------- 深度思考（2026-11-04 task 取向） ----------------
+
+    @Test
+    fun `thinking event maps to collapsible card`() {
+        val card = ChatMapper.item("thinking",
+            mapOf("content" to "先看清屏幕再决定点什么", "model" to "deepseek/v4"))
+            as ChatItem.ThinkingCard
+        assertEquals("先看清屏幕再决定点什么", card.text)
+        assertEquals("deepseek/v4", card.model)
+        // 自动态由流式驱动：open=null = 跟随 streaming（PC ThinkBlock 同规则）
+        assertNull(card.open)
+        assertFalse(card.streaming)
+        assertTrue(ChatMapper.replacesThinking(card))
+    }
+
+    @Test
+    fun `think tag segments split out of streamed message block`() {
+        // 上游流式投的是原文（含成对思考段），终态才剥——客户端必须同口径拆
+        assertEquals("先打开微信再搜联系人" to "帮你搜好了",
+            ChatMapper.splitThinkTag("<think>先打开微信再搜联系人</think>帮你搜好了"))
+        // 未闭合：整段还在思考，此刻还没有正文（不能把思考当答案显示）
+        assertEquals("我先看看" to "", ChatMapper.splitThinkTag("<think>我先看看"))
+        // 开标签只拼了一半：尾巴既不进正文也不进思考（等下一段全文补全）
+        assertEquals("" to "", ChatMapper.splitThinkTag("<thi"))
+        // 无标签（native 取向的口播块）：原样返回，零影响
+        assertEquals("" to "好的，收到", ChatMapper.splitThinkTag("好的，收到"))
+        // 半截尾巴跟在正文后：正文留着、尾巴不显示（下一段补成完整开标签才归思考）
+        assertEquals("" to "收到", ChatMapper.splitThinkTag("收到" + "<thi"))
+        assertEquals("正在想" to "收到",
+            ChatMapper.splitThinkTag("收到" + "<thi" + "nk>正在想"))
+        // 多段思考穿插：两段都收进思考（段间换行），正文按顺序拼接
+        assertEquals("甲\n乙" to "前 后",
+            ChatMapper.splitThinkTag("<think>甲</think>前 <think>乙</think>后"))
+    }
+
+    @Test
+    fun `strip think tag keeps only visible answer`() {
+        assertEquals("结果在这里", ChatMapper.stripThinkTag("<think>想想</think>结果在这里"))
+        // 整段都是思考（任务轮 content 只有推理自言自语）：剥完为空，调用方按原样兜底
+        assertEquals("", ChatMapper.stripThinkTag("<think>只想不动"))
+    }
 }

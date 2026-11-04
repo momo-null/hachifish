@@ -448,6 +448,7 @@ object NarrativePanel {
             pillParams = params
             wm = c.getSystemService(WindowManager::class.java)
             wm!!.addView(ball, params)
+            synchronized(attached) { attached.add(ball) }
         } catch (e: Exception) {
             Log.w(TAG, "pill add: ${e.message}")
             pillView = null
@@ -676,12 +677,20 @@ object NarrativePanel {
         try {
             wm = context?.getSystemService(WindowManager::class.java)
             wm!!.addView(v, params)
+            synchronized(attached) { attached.add(v) }
         } catch (e: Exception) {
             Log.e(TAG, "addWindow failed: ${e.message}")
         }
     }
 
     private fun detachAll() {
+        // 附件清单制：凡 addView 过的一律按清单摘除——命名引用可能被置空/覆盖，
+        // 清单不漏（三球叠加的根因：remove 走命名引用，覆盖后旧窗成孤儿）
+        val stale = synchronized(attached) { attached.toList() }
+        for (v in stale) {
+            try { wm?.removeView(v) } catch (_: Exception) {}
+        }
+        synchronized(attached) { attached.clear() }
         for (v in listOf(contentView, barView, panelBtns, menuView)) {
             try {
                 wm?.removeView(v)
@@ -695,6 +704,9 @@ object NarrativePanel {
         actionLine = null; stepLine = null; progressFill = null; ring = null; ballBadge = null
         consoleStatus = null; perception = null; decision = null; timeline = null
     }
+
+    /** 当前挂在 WindowManager 上的全部窗（addWindow/attachPill 登记）。 */
+    private val attached = mutableListOf<android.view.View>()
 
     private fun buttonsRow(c: Context): LinearLayout {
         val row = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }

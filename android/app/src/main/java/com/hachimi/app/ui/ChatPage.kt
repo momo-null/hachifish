@@ -18,7 +18,8 @@ import android.widget.Toast
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.hachimi.app.AudioPlayer
-import com.hachimi.app.BrainConfigStore
+import com.hachimi.app.DuplexListener
+import com.hachimi.app.EchoGuard
 import com.hachimi.app.KernelHostService
 import com.hachimi.app.MainActivity
 import com.hachimi.app.NarrativePanel
@@ -26,8 +27,9 @@ import com.hachimi.app.Rlog
 import com.hachimi.app.OmniAgentRemote
 import com.hachimi.app.RemoteConfigStore
 import com.hachimi.app.RoleStore
-import com.hachimi.app.SpeechInput
-import com.hachimi.app.TtsSpeaker
+import com.hachimi.app.VoiceProviderStore
+import com.hachimi.app.TtsResult
+import com.hachimi.app.voiceProviderTts
 import org.json.JSONObject
 
 /**
@@ -60,10 +62,16 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private var remoteTaskId: String? = null
     /** 远程轮运行中（SSE status.running=true）；false = 轮次边界。 */
     @Volatile private var remoteRunning = false
-    /** 远程口播流累积：message 事件按 block_id 增量，同块续写同一气泡。 */
-    private var remoteStreamBlock = ""
-    private var remoteStreamText = ""
-    private var remoteBubbleIdx = -1
+    /** 本轮是**用户按停止**停掉的（收尾按"已停止"说话，不当失败；每轮下发时清零）。 */
+    @Volatile private var stopRequested = false
+    /** 流式块 → 消息流下标（thinking/message 各一份）。
+     *  内核 upsert 的是「截至当前的全文」，同块再来必须**覆盖**那张卡；旧实现
+     *  对 message 做 `+= text` 叠加全文（越流越长且翻倍），2026-11-04 修正。 */
+    private val remoteMsgBlocks = LinkedHashMap<String, Int>()
+    private val remoteThinkBlocks = LinkedHashMap<String, Int>()
+    /** 最后一个口播块（id + 下标）：chat 终态是同一句话的定稿时就原地覆盖，不另开气泡。 */
+    private var remoteLastBlock = ""
+    private var remoteLastIdx = -1
     /** 本远程轮是否出现过 tool 卡（轮末相位 DONE vs IDLE）。 */
     private var remoteHadTools = false
     /** 最终回复文本（最终 chat 事件；轮末完成/失败面板与结果气泡同源去重）。 */
@@ -79,10 +87,28 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private val remoteToolIds = HashSet<String>()
     /** 本远程轮工具步计数（内核 toolcall 事件不带序号——悬浮球步数靠本地计数）。 */
     private var remoteStepN = 0
-    /** 🎤 按住说话（C2：按下第一动作 = 打断播报）。 */
-    private var speech: SpeechInput? = null
-    /** 播报代际（PC 合成慢，打断了也要让旧合成结果作废：gen 不匹配即不播）。 */
+    /** 本远程轮步数预算（chat 下发的 max_steps；悬浮球进度环分母）。 */
+    private var remoteMaxSteps = 0
+    /** 播报代际（TTS 合成要几秒，打断了也要让旧合成结果作废：gen 不匹配即不播）。 */
     @Volatile private var speakGen = 0
+    /** 本轮是否由语音发起（+ 菜单 · 通话）——**只有语音轮才播报**（2026-11-04）：
+     *  打字轮是"我在看屏幕"，念出来是打扰；语音轮是"我在听你说话"，不念才是故障。 */
+    @Volatile private var voiceTurn = false
+    // ---- 通话（= 免提形态的入口）：连续收音自动发送、回复播报、可随时插话 ----
+    private var handsFree = false
+    /** 通话全双工引擎（连续收音 + VAD 分段 + 插话判定；[DuplexListener.fullDuplex] = 能不能边听边说）。 */
+    private var duplex: DuplexListener? = null
+    /** 通话连续失败计数（≥3 自动关，防坏配置无限循环 toast）。 */
+    private var handsErrs = 0
+    /** 收音代际（watchdog 与重启只作用于自己那一代）。 */
+    @Volatile private var speechGen = 0
+    // ---- 会话级模型选择（模型路由 "<provider_id>/<model_id>"；空 = 跟随目录默认）----
+    private var chatModel: String
+    /** 对话取向（与 PC 同一个开关，2026-11-04 手机端补齐）：
+     *  task = 工作 lane（工具循环 + 深度思考卡，缺省）；chat = 对话纪律（只出结果）。 */
+    private var chatMode: String
+    /** 会话级取向记忆（同 PC `modeByTask`；进程内，切会话时跟随）。 */
+    private val modeByTask = HashMap<String, String>()
     // V13 会话列表：面板视图 + 冷启动恢复标记
     private var sessionsPanel: LinearLayout? = null
     private var sessionsList: LinearLayout? = null
@@ -95,6 +121,9 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     init {
         // ROM 会丢 app 的 logcat（Oplus 实测全档丢弃）——排障日志落文件（Rlog）
         Rlog.init(act.filesDir)
+        chatModel = prefs.getString("chat_model", "") ?: ""
+        // 取向缺省 task（与 PC 同口径：modeByTask[tid] ?? "task"）；用户选过就记住
+        chatMode = prefs.getString("chat_mode", "task") ?: "task"
     }
 
     /** 角色配置：onResume 重读——角色设置页改完返回即生效（称呼/头像），不再要求重启。 */
@@ -108,14 +137,13 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     }
     private val headerStatus: TextView
     private val headerName: TextView
-    private val btnPause: TextView
+    private val btnPlus: TextView
+    private val btnSend: TextView
+    /** 运行中的停止钮（2026-11-04：从头部 ⏹ 搬进输入行，与 发送 同位互换）。 */
     private val btnStop: TextView
-    private val btnRemote: TextView
-    private val btnMic: TextView
     private val recycler: RecyclerView
     private val emptyBox: LinearLayout
     private val input: EditText
-    private val btnSend: TextView
     private val adapter = ChatAdapter()
 
     init {
@@ -146,15 +174,11 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         }
         info.addView(headerName); info.addView(headerStatus)
         header.addView(info)
-        btnPause = controlBtn("⏸") { /* 本地暂停随 mini_loop 退役；远程无暂停语义 */ }
-        btnStop = controlBtn("⏹") { remoteStop() }
-        btnPause.visibility = View.GONE; btnStop.visibility = View.GONE
-        header.addView(btnPause); header.addView(btnStop)
-        header.addView(controlBtn("🗂") { openSessions() })
-        btnRemote = controlBtn("☁") { showRemoteDialog() }.also {
-            it.alpha = if (RemoteConfigStore.load(act)?.ready == true) 1f else 0.4f
-        }
-        header.addView(btnRemote)
+        // ---- 头部只留一个入口：会话列表（2026-11-04 控件归位）----
+        // 停止 → 输入行（运行中唯一有意义的动作就该跟发送同一个位置）；
+        // 模型选择 / 远程内核 → 发送旁 + 菜单；⏸ 随 mini_loop 退役一并删除，
+        // 远程轮没有"暂停"语义（只有停与不停）。
+        header.addView(sessionListBtn { openSessions() })
         view.addView(header)
 
         // ---- 消息流 / 空状态 ----
@@ -203,48 +227,72 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             }
             setOnClickListener { send() }
         }
-        // 🎤 对讲式（C1/C2）：按下打断播报并收音，松手出字走同一发送路径
-        btnMic = TextView(act).apply {
-            text = "🎤"; textSize = 15f; gravity = Gravity.CENTER
+        // ---- 语音供应商配置入口已收进 + 菜单（2026-11-04：对讲下线，通话是 + 里的一行，
+        // 入口不再挂两个话筒按钮；配没配好由点通话时的前置检查如实回报）。
+        btnPlus = TextView(act).apply {
+            text = "+"; textSize = 20f; gravity = Gravity.CENTER
+            setTextColor(Ds.TEXT_2)
             background = Ds.round(act, 18, Ds.GRAY_BG)
             layoutParams = LinearLayout.LayoutParams(Ds.dp(act, 36), Ds.dp(act, 36)).apply {
-                leftMargin = Ds.dp(act, 6)
+                leftMargin = Ds.dp(act, 8)
             }
-            setOnTouchListener { v, ev ->
-                when (ev.actionMasked) {
-                    android.view.MotionEvent.ACTION_DOWN -> {
-                        speakGen++            // 在途的 PC 合成结果作废
-                        TtsSpeaker.stop()     // C2：按住第一动作 = 打断播报（本地回退音）
-                        AudioPlayer.stop()    // 打断 PC CosyVoice2 播报
-                        startSpeech()
-                        v.isPressed = true; true
-                    }
-                    android.view.MotionEvent.ACTION_UP,
-                    android.view.MotionEvent.ACTION_CANCEL -> {
-                        v.isPressed = false
-                        speech?.stopListening()   // 松手出字（onFinal → send）
-                        true
-                    }
-                    else -> false
-                }
-            }
+            setOnClickListener { showPlusMenu(it) }
         }
-        inputArea.addView(input); inputArea.addView(btnMic); inputArea.addView(btnSend)
+        btnStop = TextView(act).apply {
+            // ■（U+25A0，Unicode 1.1）而不是 ⏹（U+23F9，11.0 才有）：旧 ROM 字库没有后者
+            text = "■"; textSize = 15f; setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            background = Ds.round(act, 18, Ds.RED_TXT)
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(Ds.dp(act, 36), Ds.dp(act, 36)).apply {
+                leftMargin = Ds.dp(act, 8)
+            }
+            setOnClickListener { stopRunningTurn() }
+        }
+        inputArea.addView(input); inputArea.addView(btnSend); inputArea.addView(btnStop)
+        inputArea.addView(btnPlus)
         view.addView(inputArea)
-        TtsSpeaker.ensure(act)   // TTS 引擎提前热好（语音播报；失败静默关闭）
         refresh()   // 首帧：空态（V2）或欢迎卡（V3，冷启动恢复后被 refresh 替换）
     }
 
-    private fun controlBtn(glyph: String, onClick: () -> Unit): TextView =
-        TextView(act).apply {
-            text = glyph; textSize = 16f
-            gravity = Gravity.CENTER
+    /**
+     * 左上「两横」会话入口（替代 🗂 文件夹 emoji）：自绘两条圆头横杠——
+     * 一是头部不再堆控件后只剩这一个动作，不必用图形隐喻解释它；二是 emoji
+     * 字形按 ROM 字库碰运气（🧠 实测豆腐块），自绘不受字库摆布。
+     */
+    private fun sessionListBtn(onClick: () -> Unit): View = object : View(act) {
+        private val bar = android.graphics.Paint().apply {
+            isAntiAlias = true; color = Ds.TEXT_2
+        }
+        private val rect = android.graphics.RectF()
+
+        init {
             background = Ds.round(act, 16, Ds.GRAY_BG)
             layoutParams = LinearLayout.LayoutParams(Ds.dp(act, 32), Ds.dp(act, 32)).apply {
                 leftMargin = Ds.dp(act, 6)
             }
+            contentDescription = "会话列表"
             setOnClickListener { onClick() }
         }
+
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            val t = Ds.dp(act, 2).toFloat()          // 横杠粗细（圆头 = 半径 t/2）
+            val cx = width / 2f
+            // 上长下短两条：清单的最小 UI 语言
+            listOf(height * 0.42f to Ds.dp(act, 14).toFloat(),
+                   height * 0.58f to Ds.dp(act, 9).toFloat()).forEach { (y, len) ->
+                rect.set(cx - len / 2, y - t / 2, cx + len / 2, y + t / 2)
+                canvas.drawRoundRect(rect, t / 2, t / 2, bar)
+            }
+        }
+    }
+
+    /** 发送 ↔ 停止同位互换：轮次运行中输入框本身是禁用的，此时"发送"无意义，停到台面上。 */
+    private fun setRunningControls(running: Boolean) {
+        btnSend.visibility = if (running) View.GONE else View.VISIBLE
+        btnStop.visibility = if (running) View.VISIBLE else View.GONE
+    }
 
     /** 空闲态（V2）：吃白饭大肥鱼 + 主人称呼 + 建议 chips。 */
     private fun buildEmpty(): LinearLayout = LinearLayout(act).apply {
@@ -321,14 +369,11 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         val bubble = ChatMapper.finishBubble(type, fields)
         val item = ChatMapper.item(type, fields)
         val newPhase = ChatMapper.phase(type, fields)
-        // 终态恢复输入；控制钮只在干活态出现
+        // 终态恢复输入（停止钮不按相位翻转——它跟的是"这一轮跑没跑"，唯一真源
+        // remoteRunning：下发时置、内核轮次边界/失败收尾/停止看门狗清）
         if (newPhase != null) {
             phase = newPhase
             headerStatus.text = phase.label
-            // 控制钮仅任务执行态显示（闲聊 brain 单次调用不可中断，按钮无意义）
-            val working = phase == ChatPhase.WORKING
-            btnPause.visibility = if (working) View.VISIBLE else View.GONE
-            btnStop.visibility = if (working) View.VISIBLE else View.GONE
             if (phase == ChatPhase.IDLE || phase == ChatPhase.DONE || phase == ChatPhase.FAILED) {
                 sending = false
                 input.isEnabled = true
@@ -430,8 +475,17 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private fun send(text: String? = null) {
         val objective = (text ?: input.text.toString()).trim()
         if (objective.isEmpty()) return
+        // 播报归属只认"这一轮是谁发起的"：通话发起才念回复，打字不念。
+        voiceTurn = text != null
         // C2 barge-in：远程轮运行中允许说话打断（chat force=true）；本地内核轮维持独占
         if (sending && !remoteRunning) { toast("大肥鱼正在干活，稍等或先停止"); return }
+        if (text == null) {
+            // 打字路径：立即清输入 + 收键盘（prelude 的 typed 恒 false，输入框此前从不清空）
+            input.setText("")
+            input.clearFocus()
+            (act.getSystemService(Activity.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(input.windowToken, 0)
+        }
         val remoteCfg = RemoteConfigStore.load(act)?.takeIf { it.ready && it.auto }
         // Tier 决策（Phase 2 收敛）：PC 可达走 Tier 2；否则**只走环回完整内核**。
         // mini_loop 兜底已退役——第二大脑意味着发送路径按探活运气分裂成两种行为
@@ -458,14 +512,14 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 return@Thread
             }
             val rc = RemoteConfigStore.RemoteConfig(
-                baseUrl = OMNI_HOST_BASE, token = "", auto = true,
-                speak = remoteCfg?.speak ?: true)
+                baseUrl = OMNI_HOST_BASE, token = "", auto = true)
             main.post { remoteSend(rc, objective, force = remoteRunning) }
         }.start()
     }
 
     /** 路径公共前置：用户气泡 + 思考占位 + 输入禁用（两条 Tier 共用；收键盘仅打字路径）。 */
     private fun prelude(objective: String, typed: Boolean) {
+        com.hachimi.app.FinishPopup.dismiss()   // 新轮开始：上一单的完成弹窗不再挡道
         sending = true
         input.isEnabled = false
         if (typed) {
@@ -492,9 +546,10 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     private fun remoteSend(rc: RemoteConfigStore.RemoteConfig, objective: String, force: Boolean) {
         remoteActiveRc = rc
         prelude(objective, typed = false)
-        remoteStreamBlock = ""
-        remoteStreamText = ""
-        remoteBubbleIdx = -1
+        remoteMsgBlocks.clear()
+        remoteThinkBlocks.clear()
+        remoteLastBlock = ""
+        remoteLastIdx = -1
         remoteHadTools = false
         remoteFinalText = ""
         remoteMetaSteps = 0
@@ -502,11 +557,21 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         remoteSkills.clear()
         remoteToolIds.clear()
         remoteStepN = 0
+        stopRequested = false
+        // 取向 = 会话记忆优先（同 PC `modeByTask[currentTaskId] ?? "task"`）
+        val mode = modeFor(remoteTaskId)
+        // chat 取向是"只回话"：40 步预算轮被内核按 chat lane 处理，本地不再
+        // 拿任务预算当分母（悬浮球进度环在对话轮没有意义）。
+        remoteMaxSteps = if (mode == "chat") 0
+            else runCatching { SettingsPage.maxSteps(act) }.getOrDefault(0)
         remoteT0 = System.currentTimeMillis()
+        Rlog.log("send tier=${tierLabel(rc)} mode=$mode steps=$remoteMaxSteps model=${chatModel.ifBlank { "默认" }}")
         Thread {
             try {
-                val tid = OmniAgentRemote.chat(rc.baseUrl, rc.token, objective, remoteTaskId, force)
+                val tid = OmniAgentRemote.chat(rc.baseUrl, rc.token, objective, remoteTaskId,
+                    force, remoteMaxSteps, chatModel.ifBlank { null }, mode)
                 remoteTaskId = tid
+                modeByTask[tid] = mode
                 remoteRunning = true
                 // 执行链浮窗接入（远程轮 K4 管线）：start 复位浮窗 + 门控会话随任务重置
                 NarrativePanel.pushRemote(JSONObject()
@@ -515,8 +580,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 main.post {
                     phase = ChatPhase.WORKING
                     headerStatus.text = tierLabel(rc) + " · 干活中"
-                    btnPause.visibility = View.GONE
-                    btnStop.visibility = View.VISIBLE
+                    setRunningControls(true)
                     refresh()
                 }
                 val done = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -532,7 +596,10 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                             // 返回 true = 继续读（false = 停止）。**此返回值自 C1 起写反**
                             // （曾返回 done.get()：运行中=false 被流当停止指令 → 每条
                             // 连接只送 1 个事件即断，2026-10-31 文件日志实锤）。
-                            if (done.get()) return@stream false
+                            // !remoteRunning 也算停止指令：/api/runtime/stream 是内核侧
+                            // `while True` 的常驻流（不会自己关），用户停止后本地收口了
+                            // 却不退读，就会留一条永远在收 status 的死连接。
+                            if (done.get() || !remoteRunning) return@stream false
                             var end = false
                             main.post {
                                 end = handleRemoteEvent(ev, rc)
@@ -568,12 +635,29 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 remoteRunning = false
                 sending = false
                 input.isEnabled = true
-                btnStop.visibility = View.GONE
+                setRunningControls(false)
+                collapseThinking()   // 轮次结束：还在"思考中"的卡一律收起
                 if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
                 Rlog.log("terminal: hadTools=$remoteHadTools metaSuccess=$remoteMetaSuccess metaSteps=$remoteMetaSteps")
+                if (stopRequested) {
+                    // 用户按了停止：内核回报 success=false 的语义是"被我停的"，不是"它坏了"。
+                    // 走失败出口会出 重试/手动接管 面板 + 「遇到点麻烦…」+ 失败弹窗——
+                    // 把用户自己的动作说成故障。
+                    stopRequested = false
+                    NarrativePanel.pushRemote(JSONObject()
+                        .put("event", "finish").put("status", "chat")
+                        .put("steps", remoteStepN).put("summary", remoteFinalText).toString())
+                    phase = ChatPhase.IDLE
+                    headerStatus.text = "已停止"
+                    refresh()
+                    return true
+                }
                 if (remoteMetaSuccess == false) {
                     // 失败收尾：浮窗错误行由 remoteFail 统一发（唯一失败出口）
                     remoteFail(remoteFinalText.ifBlank { "远程轮未完成（内核未回报原因）" })
+                    // 完成弹窗（失败态）：内核判定的失败才弹——网络断流不算（任务可能仍在跑）
+                    com.hachimi.app.FinishPopup.show(act, false,
+                        remoteFinalText.ifBlank { "远程轮未完成（内核未回报原因）" }, remoteMetaSteps)
                     return true
                 }
                 // 执行链浮窗终态（done=任务轮收尾隐藏；chat=闲聊轮）
@@ -588,33 +672,40 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                         "steps" to remoteMetaSteps,
                         "wall_clock_s" to (System.currentTimeMillis() - remoteT0) / 1000.0
                     ))?.let { pushItem(it) }
+                    // 完成弹窗（成功态）：后台执行时立刻可见结果 + 一键返回
+                    com.hachimi.app.FinishPopup.show(act, true, remoteFinalText,
+                        remoteMetaSteps, (System.currentTimeMillis() - remoteT0) / 1000.0)
                 }
                 phase = if (remoteHadTools) ChatPhase.DONE else ChatPhase.IDLE
                 headerStatus.text = phase.label
                 refresh()
                 return true
             }
+            "thinking" -> {
+                // 深度思考（native 取向的推理链通道）：task 取向出卡，chat 取向丢弃
+                val text = ev.data.optString("content")
+                if (text.isNotBlank() && remoteRunning) upsertThinking(
+                    ev.data.optString("id").ifEmpty { ev.data.optString("block_id") }.ifEmpty { "th-global" },
+                    text, ev.data.optString("model"), true)
+            }
             "message" -> {
-                val text = ev.data.optString("content").ifEmpty { ev.data.optString("text") }
-                if (text.isNotEmpty() && remoteRunning) {
+                val raw = ev.data.optString("content").ifEmpty { ev.data.optString("text") }
+                if (raw.isNotEmpty() && remoteRunning) {
                     // 流式块键：内核 push_message_stream 的字段是 id（block_id 是旧名）——
                     // 读错键会让跨工具的两段口播续写进同一气泡
                     val block = ev.data.optString("id").ifEmpty { ev.data.optString("block_id") }
-                    if (block != remoteStreamBlock || remoteBubbleIdx < 0 ||
-                        remoteBubbleIdx >= items.size ||
-                        items[remoteBubbleIdx] !is ChatItem.AssistantMsg) {
-                        if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
-                        remoteStreamBlock = block
-                        remoteStreamText = text
-                        pushItem(ChatItem.AssistantMsg(text))
-                        remoteBubbleIdx = items.size - 1
-                    } else {
-                        remoteStreamText += text
-                        items[remoteBubbleIdx] = ChatItem.AssistantMsg(remoteStreamText)
-                    }
+                        .ifEmpty { "m-global" }
+                    // think-tag 取向的口播块**原文里带着思考段**（上游只在回合终态剥）：
+                    // 客户端同口径拆——正文进气泡，思考段进深度思考卡（task 取向）。
+                    // 不拆就是 2026-11-04 用户看到的「思考在对话框里，收尾整块换成结果」。
+                    val (think, visible) = ChatMapper.splitThinkTag(raw)
+                    if (think.isNotEmpty()) upsertThinking("tag-$block", think,
+                        ev.data.optString("model"), true)
+                    if (visible.isNotBlank()) upsertMessage(block, visible,
+                        ev.data.optString("role"))
                     // 浮窗口播行（K3：当前动作行优先显示口播）
                     NarrativePanel.pushRemote(JSONObject()
-                        .put("event", "message").put("content", text).toString())
+                        .put("event", "message").put("content", visible.ifEmpty { raw }).toString())
                     refresh()
                 }
             }
@@ -625,6 +716,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                     val tcId = ev.data.optString("id")
                     if (tcId.isNotEmpty() && !remoteToolIds.add(tcId)) return false
                     if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+                    // 阶段边界：这一步要开工了，上一段思考不再是"正在流式"→ 卡自动收起
+                    collapseThinking()
                     remoteHadTools = true
                     remoteStepN++
                     // K4 同款：首个 tool 步让位桌面 + 弹执行链浮窗（远程轮同享；
@@ -650,6 +743,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                     NarrativePanel.pushRemote(JSONObject()
                         .put("event", "step").put("tool", tool)
                         .put("step", remoteStepN)
+                        .putOpt("total", if (remoteMaxSteps > 0) remoteMaxSteps else null)
                         .putOpt("ok", ok).putOpt("error", err)
                         .putOpt("args", toolArgs(ev.data.optString("arguments")))
                         .toString())
@@ -657,6 +751,31 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                     headerStatus.text = tierLabel(rc) + " · 干活中"
                     refresh()
                 }
+            }
+            "approval" -> {
+                // 内核审批卡 → 复用 GateActivity 弹窗（允许一次/本次任务都放行/拒绝，
+                // 与 mini_loop 时代门控同语义）；决议 POST 回内核（remember=任务级记忆）
+                val approvalId = ev.data.optString("approval_id")
+                if (approvalId.isNotEmpty() && remoteRunning) {
+                    val tool = ev.data.optString("tool").ifEmpty { "?" }
+                    val pkg = ev.data.optString("unit").ifEmpty { "kernel" }
+                    val args = ev.data.optJSONObject("arguments")?.toString() ?: ""
+                    val risk = ev.data.optString("risk")
+                    com.hachimi.app.gate.GateManager.enforceRemote(
+                        act, pkg, tool, "风险:$risk $args".take(220)) { approve, remember ->
+                        Rlog.log("approval decide: id=$approvalId approve=$approve remember=$remember")
+                        Thread {
+                            runCatching {
+                                OmniAgentRemote.decideApproval(rc.baseUrl, rc.token,
+                                    approvalId, approve, remember)
+                            }.onFailure { Rlog.log("approval decide failed: ${it.message}") }
+                        }.start()
+                    }
+                }
+            }
+            "approval_resolved" -> {
+                // 异端决议（Web 端先答了）：弹窗若还在会自行超时收口，这里只留痕
+                Rlog.log("approval_resolved: ${ev.data.optString("approval_id")}")
             }
             "debug" -> {
                 // 内核调试流里与用户可见面相关的两类 → 知识注入提示卡（本地
@@ -685,42 +804,95 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 val role = ev.data.optString("role")
                 // 内核 chat 事件载荷字段是 text（content 是旧约定）——只读 content
                 // 会把最终回复整体丢掉（2026-10-31 真机实录：任务成功但 UI 无回复）。
-                val content = ev.data.optString("content").ifEmpty { ev.data.optString("text") }
+                val raw = ev.data.optString("content").ifEmpty { ev.data.optString("text") }
                 // meta 供轮末面板（steps/success）与失败判定；失败轮 content 可能
                 // 为空，取 meta 不能放在 content 判空之后
                 ev.data.optJSONObject("extra")?.optJSONObject("meta")?.let { meta ->
                     remoteMetaSteps = meta.optInt("steps", 0)
                     if (meta.has("success")) remoteMetaSuccess = meta.optBoolean("success")
                 }
-                if ((role == "agent" || role == "assistant") && content.isNotBlank()) {
-                    remoteFinalText = content.trim()
-                    // 最终结论：替换流式气泡为定稿 + 播报（C1 对讲式；按住 🎤 即打断 = C2）
-                    if (remoteBubbleIdx in items.indices && items[remoteBubbleIdx] is ChatItem.AssistantMsg) {
-                        items[remoteBubbleIdx] = ChatItem.AssistantMsg(content.trim())
+                if ((role == "agent" || role == "assistant") && raw.isNotBlank()) {
+                    collapseThinking()
+                    // 终态结论按上游口径 = **收尾大脑口播块的原文**（B10「结论直取」），
+                    // 所以同一次拆标签：正文进气泡，思考段补回该块的深度思考卡。
+                    val (think, visible) = ChatMapper.splitThinkTag(raw)
+                    val content = visible.ifBlank { raw.trim() }
+                    remoteFinalText = content
+                    if (think.isNotEmpty() && remoteLastBlock.isNotEmpty())
+                        upsertThinking("tag-$remoteLastBlock", think, "", false)
+                    val streamed = (items.getOrNull(remoteLastIdx) as? ChatItem.AssistantMsg)?.text
+                    // 本轮已流式过这句（同文 / 互为前缀）→ **就地定稿**，不再另开一条：
+                    // 旧实现无条件替换最后一个气泡，会把执行单元的穿插口播顶成结论。
+                    val sameSentence = streamed != null &&
+                        (content == streamed || content.startsWith(streamed) ||
+                            streamed.startsWith(content))
+                    if (sameSentence) {
+                        items[remoteLastIdx] = ChatItem.AssistantMsg(content)
                     } else {
                         if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
-                        pushItem(ChatItem.AssistantMsg(content.trim()))
-                        remoteBubbleIdx = items.size - 1
+                        pushItem(ChatItem.AssistantMsg(content))
+                        remoteLastIdx = items.size - 1
                     }
-                    if (rc.speak) {
-                        // Tier 2 播报 = PC CosyVoice2 音色（与桌面/QQ 侧同一副嗓子，"壳"贯彻到底）；
-                        // PC 合成失败回退本地系统 TTS（回复永不失声，音色降级仅此一轮）
-                        val gen = ++speakGen
-                        Thread {
-                            val wav = runCatching {
-                                OmniAgentRemote.tts(rc.baseUrl, rc.token, content)
-                            }.getOrElse { ByteArray(0) }
-                            if (gen != speakGen) return@Thread   // 已被按住 🎤 打断
-                            if (wav.isNotEmpty()) AudioPlayer.play(act, wav)
-                            else TtsSpeaker.speak(content)
-                        }.start()
-                    }
+                    // 播报规则（2026-11-04）：**只有通话发起的轮才念**——打字轮（含建议
+                    // chips）只上屏。开关式配置已删。
+                    if (voiceTurn) speakReply(content)
                     refresh()
                 }
             }
             "error" -> remoteFail(ev.data.optString("error").ifEmpty { "远程轮出错" })
         }
         return false
+    }
+
+    // ---------------- 流式块落位（thinking / message 各一张卡，同块覆盖） ----------------
+
+    /** 本轮取向：会话记忆优先（同 PC `modeByTask[currentTaskId] ?? "task"`）。 */
+    private fun modeFor(tid: String?): String = tid?.let { modeByTask[it] } ?: chatMode
+
+    /** 当前会话的有效取向（+ 菜单显示它，选完立即反映在勾上）。 */
+    private fun activeMode(): String = modeFor(remoteTaskId ?: currentTaskId)
+
+    /** 口播块 → 气泡（内核投的是「截至当前全文」，同块再来必须覆盖，不能叠加）。 */
+    private fun upsertMessage(block: String, text: String, role: String) {
+        val idx = remoteMsgBlocks[block]
+        if (idx != null && idx in items.indices && items[idx] is ChatItem.AssistantMsg) {
+            items[idx] = ChatItem.AssistantMsg(text)
+        } else {
+            if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+            pushItem(ChatItem.AssistantMsg(text))
+            remoteMsgBlocks[block] = items.size - 1
+        }
+        // 结论定稿只认**大脑**的口播块（执行单元的穿插口播不能被结论顶掉）
+        if (role.isBlank() || role == "brain" || role == "assistant" || role == "agent") {
+            remoteLastBlock = block
+            remoteLastIdx = remoteMsgBlocks[block] ?: -1
+        }
+    }
+
+    /** 深度思考卡 upsert：只在 task 取向建卡（chat 取向 = 只出结果，思考不进对话流）。 */
+    private fun upsertThinking(key: String, text: String, model: String, streaming: Boolean) {
+        if (modeFor(remoteTaskId) != "task") return
+        val idx = remoteThinkBlocks[key]
+        if (idx != null && idx in items.indices && items[idx] is ChatItem.ThinkingCard) {
+            val old = items[idx] as ChatItem.ThinkingCard
+            items[idx] = old.copy(text = text,
+                model = model.ifBlank { old.model }, streaming = streaming)
+        } else {
+            if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+            pushItem(ChatItem.ThinkingCard(text, model, streaming))
+            remoteThinkBlocks[key] = items.size - 1
+        }
+        refresh()
+    }
+
+    /** 阶段/轮次边界：流式中的思考卡收起（PC 同规则：结果或下一阶段出现即折叠）。 */
+    private fun collapseThinking() {
+        var changed = false
+        for (i in items.indices) {
+            val c = items[i] as? ChatItem.ThinkingCard ?: continue
+            if (c.streaming) { items[i] = c.copy(streaming = false); changed = true }
+        }
+        if (changed) refresh()
     }
 
     /**
@@ -762,6 +934,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         sending = false
         remoteRunning = false
         input.isEnabled = true
+        setRunningControls(false)
         // 执行链浮窗错误行（唯一失败出口：stream 断裂/内核回报失败都汇到这里）
         NarrativePanel.pushRemote(JSONObject()
             .put("event", "error").put("error", reason).toString())
@@ -772,17 +945,60 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         refresh()
     }
 
-    /** 远程轮硬停止（⏹）：停的是**当前生效 Tier** 的内核（存档的 PC 配置 ≠ 本轮
-     *  实际使用的 Tier 1 环回——2026-10-31 修正：环回轮点 ⏹ 曾打到 PC 上）。 */
-    private fun remoteStop() {
-        val rc = remoteActiveRc ?: RemoteConfigStore.load(act) ?: return
-        Rlog.log("stop: tier=${tierLabel(rc)} task=$remoteTaskId")
+    /**
+     * 停止当前轮（输入行 ■，2026-11-04 从头部 ⏹ 搬来并把线接实）。四步都做：
+     * ① 先闭嘴：口播在按下之后还在念，是"这按钮没接线"最直接的观感来源——
+     *    speakGen++ 让在途 TTS 合成结果作废，AudioPlayer.stop() 停已排队的播放；
+     * ② 对**本轮实际生效 Tier** 下发 /api/runtime/stop。内核侧是硬取消不是置标志：
+     *    AgentCore.request_stop() 同时 cancel 编排图 Task 与当前 chunk 的 SDK Task
+     *    （句柄逐 chunk 更新），tool loop 每步再协作式检查，收尾通常 1s 内；
+     * ③ 本轮 Tier 没记上时按**本机内核**（OMNI_HOST_BASE）寻址——环回是常驻执行体，
+     *    存档的 PC 地址不是本轮的停对象（2026-10-31 踩过：环回轮点 ⏹ 打到 PC 上），
+     *    而"没有 PC 配置就 return"等于按钮白按，所以这里不再静默退出；
+     * ④ 收尾以内核 `status.running=false` 为准；5s 没等到就本地收口（静默降级，
+     *    不把输入框永久卡死），并把"没等到"这件事落日志。
+     */
+    private fun stopRunningTurn() {
+        val rc = remoteActiveRc ?: RemoteConfigStore.RemoteConfig(
+            baseUrl = OMNI_HOST_BASE, token = "", auto = true)
+        val tid = remoteTaskId
+        stopRequested = true
+        Rlog.log("stop: tier=${tierLabel(rc)} task=$tid")
+        speakGen++
+        AudioPlayer.stop()
+        setRunningControls(false)
+        headerStatus.text = "停止中…"
         Thread {
-            try { OmniAgentRemote.stop(rc.baseUrl, rc.token, remoteTaskId) } catch (_: Exception) {}
+            try { OmniAgentRemote.stop(rc.baseUrl, rc.token, tid) }
+            catch (e: Exception) { Rlog.log("stop request failed: ${e.message}") }
         }.start()
+        main.postDelayed({
+            if (!remoteRunning) return@postDelayed   // 内核已回报轮次边界（正常路径）
+            Rlog.log("stop watchdog: 5s 内没等到内核 status.running=false，本地收口")
+            settleStopped()
+        }, 5000)
     }
 
-    /** 远程配置对话框（C1 最小形态：base_url + token + 自动切换/播报开关）。 */
+    /** 停止后的本地收口（内核迟迟不回报边界时的降级；正常收尾仍走 status 事件）。 */
+    private fun settleStopped() {
+        remoteRunning = false
+        stopRequested = false
+        sending = false
+        input.isEnabled = true
+        collapseThinking()
+        if (items.lastOrNull() == ChatItem.Thinking) items.removeAt(items.size - 1)
+        NarrativePanel.pushRemote(JSONObject()
+            .put("event", "finish").put("status", "chat")
+            .put("steps", remoteStepN).put("summary", remoteFinalText).toString())
+        phase = ChatPhase.IDLE
+        headerStatus.text = "已停止"
+        setRunningControls(false)
+        refresh()
+    }
+
+    /** 远程配置对话框（C1 最小形态：base_url + token + 自动切换）。入口在 + 菜单 ·
+     *  内核与模型（2026-11-04：头部 ☁ 下线）。这里没有语音开关：播不播由本轮是打字还是
+     *  通话决定，语音端点只在 设置 里配。 */
     private fun showRemoteDialog() {
         val cur = RemoteConfigStore.load(act)
         val base = EditText(act).apply {
@@ -794,10 +1010,8 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             setText(cur?.token ?: ""); setSingleLine(true)
         }
         val auto = android.widget.CheckBox(act).apply {
-            text = "自动切换（探活可达走远程，不可途回本地）"; isChecked = cur?.auto ?: true; textSize = 13f
-        }
-        val speak = android.widget.CheckBox(act).apply {
-            text = "语音播报回复（按住 🎤 打断）"; isChecked = cur?.speak ?: true; textSize = 13f
+            // 默认不勾（2026-11-04）：填了地址≠要用地址，勾上才允许每轮探活把话发给 PC。
+            text = "自动切换（探活可达走远程，不可达回本地）"; isChecked = cur?.auto ?: false; textSize = 13f
         }
         val box = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
@@ -805,7 +1019,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             setPadding(p, p / 2, p, 0)
             addView(Ds.small(act, "远程内核 base_url")); addView(base)
             addView(Ds.small(act, "访问 token")); addView(token)
-            addView(auto); addView(speak)
+            addView(auto)
         }
         android.app.AlertDialog.Builder(act)
             .setTitle("远程内核（OmniAgent）")
@@ -814,30 +1028,250 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 val cfg = RemoteConfigStore.RemoteConfig(
                     baseUrl = base.text.toString().trim(),
                     token = token.text.toString().trim(),
-                    auto = auto.isChecked, speak = speak.isChecked)
+                    auto = auto.isChecked)
                 RemoteConfigStore.save(act, cfg)
-                btnRemote.alpha = if (cfg.ready) 1f else 0.4f
-                toast(if (cfg.ready) "远程内核已保存（自动切换开=${cfg.auto}）" else "远程内核未配置（本地模式）")
+                toast(if (cfg.ready)
+                    "远程内核已保存 · 自动切换${if (cfg.auto) "开" else "关（话仍走本机内核）"}"
+                else "远程内核未配置（本地模式）")
             }
             .setNegativeButton("取消", null)
             .show()
     }
 
-    /** 🎤 收音控制器（每轮创建/销毁；SpeechRecognizer 须主线程创建）。 */
-    private fun startSpeech() {
-        main.post {
-            speech?.destroy()
-            speech = SpeechInput(act, onFinal = { t ->
-                main.post {
-                    speech?.destroy()
-                    speech = null
-                    send(text = t)   // 对讲式：松手出字并直接发送（同输入框路径）
+    /**
+     * 语音入口前置检查（2026-11-04 严格化）：识别与播报的端点**只**来自
+     * 设置 · 语音供应商，没配就在入口拦下并指向设置——不录音、不发送、不留半截轮，
+     * 也不再悄悄改用端侧系统 ASR/TTS（那会让人以为"语音坏了"而不是"没配"）。
+     */
+    private fun voiceReadyOrToast(needStt: Boolean, needTts: Boolean): Boolean {
+        val msg = VoiceProviderStore.missing(act, needStt, needTts) ?: return true
+        toast(msg)
+        return false
+    }
+
+    /**
+     * 回复播报：供应商 TTS 是唯一通路（拿不到音频就如实提示，不再回退端侧朗读）。
+     *
+     * 免提期间额外做两件对讲不需要的事——
+     * ① 合成前就把这段话交给 [EchoGuard]：消不干净的余音万一被转写回来，靠文本重合判掉；
+     * ② 播放走 [AudioPlayer] 的通话声道（USAGE_VOICE_COMMUNICATION）：平台 AEC
+     *    只有在这条链路上才拿得到参考信号，才有 echo 可对消。
+     */
+    private fun speakReply(text: String) {
+        if (text.isBlank()) return
+        val gen = ++speakGen
+        EchoGuard.note(text)
+        Thread {
+            val r = voiceProviderTts(act, text)
+            if (gen != speakGen) return@Thread   // 已被插话/点气泡打断：旧合成结果作废
+            when (r) {
+                is TtsResult.Audio -> {
+                    if (!AudioPlayer.play(act, r.wav)) {
+                        main.post { toast("这段音频播不了（非 PCM16 或本机不支持该采样率）") }
+                    }
                 }
-            }, onError = { e ->
-                main.post { toast(e) }
-            })
-            speech?.start()
+                is TtsResult.NoProvider ->
+                    main.post { toast("未配置语音供应商 → 设置 · 语音供应商") }
+                is TtsResult.Failed ->
+                    main.post { toast("语音播报失败：${r.message}") }
+            }
+        }.start()
+    }
+
+    /**
+     * 通话 = 语音自由对话（形态即原「免提」，2026-11-04 收进 + 菜单；对讲已整段下线）：
+     * 说完自动发送、回复念出来、念的过程中随时能插话。识别与播报都要配好（它会念回复）。
+     *
+     * "边听边说"的前提是**平台回声消除真的在跑**（[DuplexListener.start] 的返回口径）：
+     * 没有 AEC 的机器上引擎自己退成半双工（播报期间不收音），这里如实说明形态——
+     * 不假装能插话，否则用户体验是"我喊了它不理，还把我自己念的话发出去了"。
+     * 那种机器上的打断替代 = 点正在播报的那条气泡（见 assistantRow）。
+     */
+    private fun startHandsFree() {
+        if (!voiceReadyOrToast(needStt = true, needTts = true)) return
+        val vp = VoiceProviderStore.active(act) ?: return
+        handsFree = true
+        handsErrs = 0
+        speakGen++            // 新一轮通话开始：在途播报作废
+        AudioPlayer.stop()
+        val gen = ++speechGen
+        val e = DuplexListener(act, vp,
+            onUtterance = { t -> main.post { if (gen == speechGen) onHeard(t) } },
+            onBargeIn = { main.post { if (gen == speechGen) onBargeIn() } },
+            onError = { m -> main.post { if (gen == speechGen) onHandsError(m) } })
+        duplex = e
+        val refused = e.start()
+        if (refused != null) {
+            duplex = null
+            stopHandsFree("通话开不起来：$refused")
+            return
         }
+        headerStatus.text = "通话中 · 说话即发送"
+        Rlog.log("call: fullDuplex=${e.fullDuplex}")
+        toast(if (e.fullDuplex)
+            "通话开启：说完自动发送、回复念给你听；念的时候直接插话就能打断"
+        else
+            "通话开启：说完自动发送、回复念给你听。" +
+                "这台机器没有可用的回声消除，念的时候不收音（要打断就点它的气泡）")
+    }
+
+    /** 通话听到的一句（余 echo 已在引擎里按文本判掉）：发出去。 */
+    private fun onHeard(text: String) {
+        if (!handsFree) return
+        handsErrs = 0
+        send(text = text)
+    }
+
+    /**
+     * 插话：大肥鱼正在念 → 立刻闭嘴让位。收音不停，这句话照常收完、转写、发出去
+     * （远程轮运行中 force=true 打断在途那一轮——见 [send] 的派发）。
+     */
+    private fun onBargeIn() {
+        if (!handsFree) return
+        if (AudioPlayer.isPlaying()) {
+            speakGen++
+            AudioPlayer.stop()
+        }
+    }
+
+    /** 通话运行时错误（转写挂了/设备异常）：连续 3 次自动关，防坏配置无限循环 toast。 */
+    private fun onHandsError(msg: String) {
+        if (!handsFree || duplex == null) return
+        if (++handsErrs >= 3) { stopHandsFree("通话已停止：$msg"); return }
+        toast(msg)
+    }
+
+    private fun stopHandsFree(why: String? = null) {
+        handsFree = false
+        speechGen++
+        duplex?.stop(); duplex = null
+        EchoGuard.clear()
+        headerStatus.text = phase.label
+        toast(why ?: "通话结束")
+    }
+
+    // ---------------- + 菜单（取向 / 通话：同类收进一个入口，不再挂三个按钮） ----------------
+
+    /** 当前展开的 + 菜单（行内点击后据此关窗）。 */
+    private var plusMenu: android.widget.PopupWindow? = null
+
+    /**
+     * + 菜单：这轮"怎么说、说什么模型、话发给哪个内核"都收在这儿（2026-11-04 头部
+     * 控件全部搬进来，同类收一处）。
+     * 对讲（按住说话）已整段删除——它本质是"语音转文字再打字"，通话是它的超集。
+     */
+    private fun showPlusMenu(anchor: View) {
+        val w = Ds.dp(act, 260)
+        val box = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ds.round(act, 14, Color.WHITE, 1, Ds.CARD_BORDER)
+            val p = Ds.dp(act, 6)
+            setPadding(p, p, p, p)
+        }
+        box.addView(menuCaption("对话取向"))
+        val m = activeMode()
+        box.addView(menuRow("工作 lane（干活 + 深度思考）", m == "task") { setChatMode("task") })
+        box.addView(menuRow("对话纪律（只回话，不出思考）", m == "chat") { setChatMode("chat") })
+        box.addView(menuDivider())
+        box.addView(menuCaption("内核与模型"))
+        val rc = RemoteConfigStore.load(act)
+        val remoteOn = rc != null && rc.ready && rc.auto
+        box.addView(menuRow("远程内核 · " + if (remoteOn) "走 PC" else "未启用（话走本机内核）",
+            remoteOn) { showRemoteDialog() })
+        box.addView(menuRow("本会话模型 · " + modelLabel(), false) { showModelPicker() })
+        box.addView(menuDivider())
+        box.addView(menuRow(if (handsFree) "结束通话" else "语音通话",
+            handsFree) { if (handsFree) stopHandsFree() else startHandsFree() })
+        val win = android.widget.PopupWindow(box, w, ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        win.elevation = Ds.dp(act, 8).toFloat()
+        plusMenu = win
+        box.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        // 右对齐锚点、向上展开（输入行贴屏幕底，向下会被裁掉）
+        win.showAsDropDown(anchor, anchor.width - w, -(box.measuredHeight + anchor.height))
+        win.setOnDismissListener { plusMenu = null }
+    }
+
+    private fun menuCaption(text: String): TextView = TextView(act).apply {
+        this.text = text; textSize = 11f; setTextColor(Ds.TEXT_3)
+        val p = Ds.dp(act, 10)
+        setPadding(p, Ds.dp(act, 6), p, Ds.dp(act, 2))
+    }
+
+    private fun menuDivider(): View = View(act).apply {
+        setBackgroundColor(Ds.CARD_BORDER)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, Ds.dp(act, 1))).apply {
+            topMargin = Ds.dp(act, 4); bottomMargin = Ds.dp(act, 4)
+        }
+    }
+
+    /** 菜单行：选中项打勾并染主色（无边框、同底色）。 */
+    private fun menuRow(label: String, checked: Boolean, onClick: () -> Unit): TextView =
+        TextView(act).apply {
+            text = (if (checked) "✓ " else "　 ") + label
+            textSize = 13f
+            setTextColor(if (checked) Ds.PRIMARY else Ds.TEXT)
+            val p = Ds.dp(act, 10)
+            setPadding(p, Ds.dp(act, 9), p, Ds.dp(act, 9))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setOnClickListener { onClick(); plusMenu?.dismiss() }
+        }
+
+    /** 会话模型的可读名（+ 菜单那一行用）："<provider>/<model>" 只留模型名，空 = 默认槽位。 */
+    private fun modelLabel(): String =
+        (chatModel.ifBlank { "默认" }).split("/").lastOrNull()?.take(10) ?: "默认"
+
+    /** 选取向：全局记住（跨会话缺省）+ 写进当前会话的记忆（下条消息即生效）。 */
+    private fun setChatMode(m: String) {
+        if (m == chatMode && modeByTask[remoteTaskId ?: currentTaskId] == m) return
+        chatMode = m
+        prefs.edit().putString("chat_mode", m).apply()
+        remoteTaskId?.let { modeByTask[it] = m }
+        currentTaskId?.let { modeByTask[it] = m }
+        toast(if (m == "chat") "对话纪律：只出结果，不显示深度思考"
+              else "工作 lane：可干活，思考过程出深度思考卡")
+    }
+
+    /** 会话级模型选择：读内核目录（每次打开拉最新）→ 单选（"默认" + 全部模型）。 */
+    private fun showModelPicker() {
+        toast("读取模型目录…")
+        Thread {
+            val arr = runCatching {
+                OmniAgentRemote.getJson(OMNI_HOST_BASE, "", "/api/runtime/models", 12000)
+                    .optJSONArray("providers")
+            }.getOrNull()
+            main.post { renderModelPicker(arr) }
+        }.start()
+    }
+
+    private fun renderModelPicker(providers: org.json.JSONArray?) {
+        val entries = mutableListOf("" to "默认（跟随设置的主模型）")
+        providers?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val p = arr.optJSONObject(i) ?: continue
+                val pid = p.optString("id")
+                val ms = p.optJSONArray("models") ?: continue
+                for (j in 0 until ms.length()) {
+                    val m = ms.optJSONObject(j) ?: continue
+                    entries.add("$pid/${m.optString("id")}" to
+                            "${p.optString("label")} · ${m.optString("id")}")
+                }
+            }
+        }
+        if (entries.size == 1) { toast("目录为空：先到 设置→模型 添加端点"); return }
+        val sels = entries.map { it.second }.toTypedArray()
+        val checked = entries.indexOfFirst { it.first == chatModel }
+        android.app.AlertDialog.Builder(act)
+            .setTitle("本会话模型")
+            .setSingleChoiceItems(sels, checked) { d, which ->
+                chatModel = entries[which].first
+                prefs.edit().putString("chat_model", chatModel).apply()
+                d.dismiss()
+                toast(if (chatModel.isBlank()) "已恢复默认模型" else "本会话模型 = $chatModel")
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun toast(msg: String) =
@@ -858,6 +1292,15 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
      * 页面随 MainActivity 单实例常驻；销毁防护见 onNarrative isDestroyed。
      */
     fun onPause() { /* listener 常驻，不移除 */ }
+
+    /**
+     * 页面销毁：免提的全双工引擎必须收麦。它握着麦克风 + 把设备带进通话模式
+     * （MODE_IN_COMMUNICATION），页面没了还继续听 = 后台偷录音 + 别人打电话异常，
+     * 两者都是不可接受的残留态。
+     */
+    fun onDestroy() {
+        if (handsFree) stopHandsFree("通话已随页面退出结束")   // 内含 duplex?.stop()
+    }
 
     // ---------------- V13 会话列表 ----------------
 
@@ -908,16 +1351,12 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         sessionsPanel?.visibility = View.VISIBLE
         sessionsList?.removeAllViews()
         sessionsList?.addView(Ds.small(act, "读取中…"))
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) {
-            sessionsList?.removeAllViews()
-            sessionsList?.addView(Ds.small(act, "内核启动中（首次约需 10 秒），稍后再试"))
-            return
-        }
+        // Phase 2（mini_loop 退役）：会话面板改读环回内核 /api/runtime/tasks（Web 同源，
+        // 含项目名映射）——旧 bridge.list_tasks_json 读的是 mini_loop 库，完整内核
+        // 任务从未出现在列表里（2026-11-03 用户实测问题）
         Thread {
             try {
-                val r = JSONObject(bridge.callAttr("list_tasks_json", 30).toString())
-                val arr = r.optJSONArray("tasks") ?: org.json.JSONArray()
+                val arr = OmniAgentRemote.kernelTasks(OMNI_HOST_BASE, 30)
                 main.post {
                     if (sessionsPanel?.visibility != View.VISIBLE) return@post
                     sessionsList?.removeAllViews()
@@ -1003,31 +1442,26 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
         }
     }
 
-    /** 删除会话：bridge 删除 task 资产 → 刷新列表；若是当前会话则清 currentTaskId/last_task_id/items。 */
+    /** 删除会话：内核 DELETE /tasks/{id}（Phase 2 内核化）→ 刷新列表；若是当前会话则清 currentTaskId/last_task_id/items。 */
     private fun deleteSession(tid: String) {
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) { toast("内核未就绪，稍后再试"); return }
         Thread {
-            try {
-                val r = JSONObject(bridge.callAttr("delete_task_json", tid).toString())
-                main.post {
-                    if (r.optBoolean("ok")) {
-                        if (tid == currentTaskId) {
-                            currentTaskId = null
-                            prefs.edit().remove("last_task_id").apply()
-                            items.clear()
-                            phase = ChatPhase.IDLE
-                            headerStatus.text = phase.label
-                            refresh()
-                        }
-                        toast("已删除")
-                        openSessions()
-                    } else {
-                        toast("删除失败：${r.optString("error")}")
+            val r = runCatching { OmniAgentRemote.deleteTask(OMNI_HOST_BASE, tid) }
+                .getOrElse { JSONObject().put("ok", false).put("error", "${it.message}") }
+            main.post {
+                if (r.optBoolean("ok", true)) {
+                    if (tid == currentTaskId) {
+                        currentTaskId = null
+                        prefs.edit().remove("last_task_id").apply()
+                        items.clear()
+                        phase = ChatPhase.IDLE
+                        headerStatus.text = phase.label
+                        refresh()
                     }
+                    toast("已删除")
+                    openSessions()
+                } else {
+                    toast("删除失败：${r.optString("error")}")
                 }
-            } catch (e: Exception) {
-                main.post { toast("删除失败：${e.javaClass.simpleName}") }
             }
         }.start()
     }
@@ -1082,121 +1516,75 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
     // ---------------- 会话回放（对话消息 + 执行轨迹） ----------------
 
     /**
-     * 回放一条会话：session_messages_json（对话）+ task_trace_json（执行轨迹）。
-     * 语义（用户需求）：闲聊轮（run 无任何工具步骤）只出对话气泡，保持对话感；
-     * 跑过任务的 run 还原成 tool 卡 + 结果气泡 + 终态面板，与执行现场视觉一致。
-     * 交错顺序：按 ts 把消息排在对应 run 之前（用户先说，后跟这轮的轨迹）。
+     * 回放一条会话（Phase 2 内核化）：数据面 = 环回内核 /tasks/{id}/history（Web 同源）。
+     * mini_loop 旧库（session_messages_json/task_trace_json）随执行脑退役——完整内核
+     * 任务在旧库无数据，此前切历史会话「没反应」的根因。语义不变：闲聊轮只出对话
+     * 气泡；跑过任务的轮还原成 tool 卡 + 结果气泡 + 终态面板，与执行现场视觉一致。
      */
     private fun replaySession(tid: String, keepIfUserTyped: Boolean = false, after: () -> Unit) {
-        val bridge = KernelHostService.pyBridgeModule ?: return
         Thread {
             val msgs = try {
-                JSONObject(bridge.callAttr("session_messages_json", tid).toString())
+                OmniAgentRemote.kernelTaskHistory(OMNI_HOST_BASE, tid)
                     .optJSONArray("messages") ?: org.json.JSONArray()
             } catch (_: Exception) { org.json.JSONArray() }
-            val trace = try {
-                JSONObject(bridge.callAttr("task_trace_json", tid).toString())
-            } catch (_: Exception) { null }
             main.post {
                 if (keepIfUserTyped && items.isNotEmpty()) return@post   // 用户已抢先发消息
                 items.clear()
-                appendReplay(msgs, trace)
+                appendReplay(msgs)
                 after()
             }
         }.start()
     }
 
-    private fun appendReplay(msgs: org.json.JSONArray, trace: JSONObject?) {
-        var mi = 0
-        /**
-         * 消费 ts <= [ts] 的消息。[skipExact] 同文的 assistant 跳过：它已由本轮
-         * finish 事件的结果气泡承担，再出一遍就是重复（R10 去重）。
-         */
-        fun flushBefore(ts: String, skipExact: String? = null) {
-            while (mi < msgs.length() &&
-                (ts.isBlank() || msgs.getJSONObject(mi).optString("ts") <= ts)) {
-                val m = msgs.getJSONObject(mi++)
-                when (m.optString("role")) {
-                    "user" -> pushItem(ChatItem.UserMsg(m.optString("content")))
-                    "assistant" -> {
-                        val c = m.optString("content")
-                        if (skipExact == null || c.trim() != skipExact.trim()) {
-                            pushItem(ChatItem.AssistantMsg(c))
+    /** history.messages → 对话流（user 气泡 / 工具步骤卡 / 回复气泡 / 终态面板）。 */
+    private fun appendReplay(msgs: org.json.JSONArray) {
+        for (i in 0 until msgs.length()) {
+            val m = msgs.optJSONObject(i) ?: continue
+            when (m.optString("role")) {
+                "user" -> pushItem(ChatItem.UserMsg(m.optString("content")))
+                "assistant", "agent" -> {
+                    val extra = m.optJSONObject("extra")
+                    var shown = 0
+                    extra?.optJSONArray("steps")?.let { steps ->
+                        for (j in 0 until steps.length()) {
+                            val st = steps.optJSONObject(j) ?: continue
+                            if (st.optString("type") != "tool_call") continue
+                            val (ok, err) = parseToolResult(st.optString("result"))
+                            ChatMapper.item("step", mapOf<String, Any?>(
+                                "tool" to st.optString("name").ifEmpty { "?" },
+                                "ok" to ok, "error" to err,
+                                "step" to (shown + 1)))?.let { pushItem(it); shown++ }
+                        }
+                    }
+                    val content = m.optString("content").trim()
+                    if (content.isNotEmpty()) pushItem(ChatItem.AssistantMsg(content))
+                    // 终态面板：仅任务轮（有工具步骤）出，与现场一致；meta 供成败
+                    extra?.optJSONObject("meta")?.let { meta ->
+                        if (shown > 0) {
+                            val ok = if (meta.has("success")) meta.optBoolean("success") else true
+                            if (ok) {
+                                ChatMapper.item("finish", mapOf<String, Any?>(
+                                    "status" to "done", "summary" to content,
+                                    "steps" to meta.optInt("steps", shown),
+                                ))?.let { pushItem(it) }
+                            } else {
+                                ChatMapper.item("finish", mapOf<String, Any?>(
+                                    "status" to "failed",
+                                    "summary" to content.ifEmpty { "内核未回报原因" },
+                                    "steps" to meta.optInt("steps", shown),
+                                ))?.let { pushItem(it) }
+                            }
                         }
                     }
                 }
             }
         }
-        /** 窗口内最后一条 assistant 文案（旧 run 无 summary 时的兜底；不消费游标）。 */
-        fun peekLastAssistant(ts: String): String? {
-            var last: String? = null
-            for (k in mi until msgs.length()) {
-                val m = msgs.getJSONObject(k)
-                if (ts.isNotBlank() && m.optString("ts") > ts) break
-                if (m.optString("role") == "assistant") last = m.optString("content")
-            }
-            return last?.trim()?.takeIf { it.isNotEmpty() }
-        }
-        val runs = trace?.optJSONArray("runs")
-        if (runs == null || runs.length() == 0) { flushBefore(""); return }
-        for (i in 0 until runs.length()) {
-            val r = runs.getJSONObject(i)
-            val run = r.optJSONObject("run")
-            flushBefore(run?.optString("start_ts") ?: "")
-            // 轨迹行 → step 事件：卡片由 ChatMapper 产出、pushItem 入列（折叠与现场同源）
-            var shown = 0
-            val lines = r.optJSONArray("lines")
-            if (lines != null) {
-                for (j in 0 until lines.length()) {
-                    val ln = lines.getJSONObject(j)
-                    val tool = ln.optJSONObject("action")?.optString("tool") ?: continue
-                    if (tool.isBlank()) continue
-                    val res = ln.optJSONObject("result")
-                    val card = ChatMapper.item("step", mapOf<String, Any?>(
-                        "tool" to tool,
-                        "ok" to (if (res == null || !res.has("ok")) null else res.optBoolean("ok")),
-                        "error" to res?.optString("error")?.takeIf { it.isNotBlank() },
-                        "step" to (if (ln.has("step")) ln.optInt("step") else null)
-                    )) ?: continue
-                    pushItem(card)
-                    shown++
-                }
-            }
-            if (run == null) continue
-            // 本轮窗口内的消息（用户消息可能晚于 start_ts 落盘）排在终态之前
-            val endTs = run.optString("end_ts")
-            val summary = run.optString("summary").takeIf { it.isNotBlank() }
-                ?: peekLastAssistant(endTs)
-                ?: run.optString("reason").takeIf { it.isNotBlank() }
-                ?: ""
-            flushBefore(endTs, summary)
-            // 终态：还原成 finish 事件走 ChatMapper —— status 由 run 落盘（旧数据按
-            // success 推导：有步骤=done，纯闲聊=chat），闲聊轮不出面板（与现场一致）
-            val finish = mapOf<String, Any?>(
-                "status" to (run.optString("status").takeIf { it.isNotBlank() }
-                    ?: if (run.optBoolean("success")) (if (shown > 0) "done" else "chat")
-                    else "failed"),
-                "summary" to summary,
-                "steps" to run.optInt("steps", shown),
-                "wall_clock_s" to wallClockS(run)
-            )
-            ChatMapper.finishBubble("finish", finish)?.let { pushItem(it) }
-            ChatMapper.item("finish", finish)?.let { pushItem(it) }
-        }
-        flushBefore("")
     }
-
-    /** run 起止 ISO → 耗时秒（解析失败返回 null，面板自动省略耗时）。 */
-    private fun wallClockS(run: JSONObject): Double? = try {
-        val s = java.time.OffsetDateTime.parse(run.optString("start_ts"))
-        val e = java.time.OffsetDateTime.parse(run.optString("end_ts"))
-        java.time.Duration.between(s, e).toMillis() / 1000.0
-    } catch (_: Exception) { null }
 
     companion object {
         private const val PREFS_NAME = "hachimi_ui"
         /** Phase 1 环回 omni 内核（omni_host.py 固定端口；仅 127.0.0.1，无鉴权面）。 */
-        private const val OMNI_HOST_BASE = "http://127.0.0.1:18471"
+        const val OMNI_HOST_BASE = "http://127.0.0.1:18471"
     }
 
     // ---------------- Adapter（消息流多类型渲染） ----------------
@@ -1220,6 +1608,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
             is ChatItem.FailPanel -> 4
             ChatItem.Thinking -> 5
             is ChatItem.KnowledgeHint -> 6
+            is ChatItem.ThinkingCard -> 7
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, type: Int): RecyclerView.ViewHolder {
@@ -1243,6 +1632,7 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 is ChatItem.FailPanel -> failRow(it)
                 ChatItem.Thinking -> thinkingRow()
                 is ChatItem.KnowledgeHint -> knowledgeRow(it)
+                is ChatItem.ThinkingCard -> thinkingCardRow(it, pos)
             })
         }
 
@@ -1287,6 +1677,11 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                 setPadding(p + Ds.dp(act, 4), p / 2 + Ds.dp(act, 2), p + Ds.dp(act, 4), p / 2 + Ds.dp(act, 2))
                 maxWidth = Ds.dp(act, 300)
                 setTextIsSelectable(true)   // 长按选择/复制（现场与回放气泡同型同权）
+                // 点一下 = 让它闭嘴。对讲下线后，这是没有平台回声消除的机器上唯一的
+                // 播报打断入口（那种设备播期间不收音，插话声听不到）。
+                setOnClickListener {
+                    if (AudioPlayer.isPlaying()) { speakGen++; AudioPlayer.stop() }
+                }
             }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 leftMargin = Ds.dp(act, 8); topMargin = Ds.dp(act, 2)
@@ -1518,6 +1913,69 @@ class ChatPage(private val act: Activity) : NarrativePanel.Listener {
                     leftMargin = Ds.dp(act, 8); topMargin = Ds.dp(act, 2)
                 }
             })
+        }
+
+        /** 深度思考卡（task 取向；PC `ThinkBlock` 同构）：灰底可折叠，流式期间自动展开、
+         *  阶段/轮次收尾自动收起。长文限高内滚动，短文本高度自适应。 */
+        private fun thinkingCardRow(t: ChatItem.ThinkingCard, pos: Int): View {
+            val opened = t.open ?: t.streaming
+            val card = LinearLayout(act).apply {
+                orientation = LinearLayout.VERTICAL
+                background = Ds.round(act, 12, Ds.GRAY_BG)
+                val p = Ds.dp(act, 10)
+                setPadding(p, p / 2 + Ds.dp(act, 2), p, p / 2)
+                // 左缩进对齐对话气泡（头像 28dp + margin 8dp），与 tool 卡同一条竖线
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    leftMargin = Ds.dp(act, 36); rightMargin = Ds.dp(act, 8); topMargin = Ds.dp(act, 4)
+                }
+            }
+            val head = LinearLayout(act).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setOnClickListener {
+                    // 手动开合覆盖"跟随流式"的自动态（open=null 才自动）
+                    val cur = items.getOrNull(pos) as? ChatItem.ThinkingCard ?: return@setOnClickListener
+                    items[pos] = cur.copy(open = !(cur.open ?: cur.streaming))
+                    refresh()
+                }
+            }
+            // 💭 而不是 🧠：后者是 Unicode 11，旧 ROM 的 emoji 字库没有，机上实测是豆腐块
+            head.addView(TextView(act).apply { text = "💭"; textSize = 12f })
+            head.addView(TextView(act).apply {
+                text = if (t.streaming) "深度思考中…" else "深度思考"
+                textSize = 11f; setTextColor(Ds.TEXT_3)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setPadding(Ds.dp(act, 6), 0, 0, 0)
+            })
+            if (t.model.isNotBlank()) head.addView(TextView(act).apply {
+                text = t.model.split("/").lastOrNull()?.take(14) ?: t.model
+                textSize = 10f; setTextColor(Ds.TEXT_3)
+                background = Ds.round(act, 7, Color.WHITE, 1, Ds.CARD_BORDER)
+                val q = Ds.dp(act, 6)
+                setPadding(q, 0, q, 0)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    leftMargin = Ds.dp(act, 6)
+                }
+            })
+            head.addView(TextView(act).apply {
+                text = if (opened) "︿" else "﹀"
+                textSize = 11f; setTextColor(Ds.TEXT_3); gravity = Gravity.END
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            card.addView(head)
+            if (opened) card.addView(android.widget.ScrollView(act).apply {
+                addView(TextView(act).apply {
+                    text = t.text; textSize = 12f; setTextColor(Ds.TEXT_2)
+                    setLineSpacing(Ds.dp(act, 2).toFloat(), 1f)
+                    setTextIsSelectable(true)
+                }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                if (t.text.length > 120) Ds.dp(act, 130) else ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = Ds.dp(act, 6) })
+            return card
         }
 
         /** 知识注入提示行（P2 DoD2）：小字灰卡，注明本次注入的记忆/技能；空块出弱提示。 */

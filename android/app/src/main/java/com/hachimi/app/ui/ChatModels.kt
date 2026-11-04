@@ -12,7 +12,8 @@ package com.hachimi.app.ui
  * - step     → tool 卡片（tool_call）
  * - finish   → 终态面板：status=done → 完成面板（summary）；否则失败面板
  * - error    → 失败面板（kernel 异常）
- * thinking 不存在（手机端无深度思考，K3a）。
+ * thinking 自 2026-11-04 起手机端也有（task 取向 = 与 PC 同款深度思考卡）；
+ * 只有远程轨（Tier 1/2）喂得进这个通道，本地 mini 轨仍无深度思考。
  */
 sealed class ChatItem {
 
@@ -21,6 +22,17 @@ sealed class ChatItem {
 
     /** 大肥鱼口播/答案（左气泡；P1 用于 finish 前的最终答复，P2 扩展穿插口播）。 */
     data class AssistantMsg(val text: String) : ChatItem()
+
+    /** 深度思考卡（task 取向；与 PC `ThinkBlock` 同构）。
+     *  [streaming] = 本轮还在推理：卡自动展开、标题是「深度思考中…」；
+     *  收尾后自动收起（点开可回看），对话流不被长思考撑爆。
+     *  [open] = 用户手动展开/收起的选择（null = 跟随流式自动态）。 */
+    data class ThinkingCard(
+        val text: String,
+        val model: String = "",
+        val streaming: Boolean = false,
+        val open: Boolean? = null
+    ) : ChatItem()
 
     /** tool 执行卡片：icon 色按 [ok] 三态（null=进行中）。count>1 = 连续同类调用折叠
      *  （P1.5 UI：连续 observe 折叠成「查看屏幕 ×N」，降噪）。 */
@@ -76,6 +88,8 @@ object ChatMapper {
     fun item(type: String, e: Map<String, Any?>): ChatItem? = when (type) {
         "message" -> (e["content"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
             ?.let { ChatItem.AssistantMsg(it) }
+        "thinking" -> (e["content"] as? String)?.takeIf { it.isNotBlank() }
+            ?.let { ChatItem.ThinkingCard(it, (e["model"] as? String).orEmpty()) }
         "step" -> ChatItem.ToolCard(
             step = (e["step"] as? Number)?.toInt(),
             tool = (e["tool"] as? String) ?: "?",
@@ -166,7 +180,52 @@ object ChatMapper {
     fun replacesThinking(item: ChatItem?): Boolean =
         item is ChatItem.ToolCard || item is ChatItem.AssistantMsg
             || item is ChatItem.DonePanel || item is ChatItem.FailPanel
-            || item is ChatItem.KnowledgeHint
+            || item is ChatItem.KnowledgeHint || item is ChatItem.ThinkingCard
+
+    /**
+     * think-tag 取向的口播块文本拆分（流式中间态专用；纯函数可测）。
+     *
+     * 上游 `emitter._delta` 把模型原文（含成对/半截的思考标签段）原封不动 upsert 进
+     * message 块，只在**回合终态**才用 `_strip_after_think` 换成纯正文。客户端若按块
+     * 内容直显，就会看到"结果气泡里一段思考，收尾整块被替换"（2026-11-04 手机端实录）。
+     * 这里同口径拆：返回 (全部思考段, 去掉这些段的正文)；未拼完的开标签尾巴
+     * （`<t`、`<thi`…）既不进正文也不进思考，等下一段全文补全再收。
+     * 无标签文本原样返回（native 取向的口播块走这条路，零影响）。
+     */
+    fun splitThinkTag(raw: String): Pair<String, String> {
+        if (!raw.contains("<th")) return "" to raw
+        val segs = StringBuilder()
+        val out = StringBuilder()
+        var i = 0
+        while (i < raw.length) {
+            val s = raw.indexOf("<think>", i)
+            if (s < 0) {
+                out.append(raw, i, raw.length - danglingOpen(raw))
+                break
+            }
+            out.append(raw, i, s)
+            val e = raw.indexOf("</think>", s + 7)
+            if (e < 0) {
+                segs.append(raw.substring(s + 7, raw.length - danglingOpen(raw)).trim()).append("\n")
+                break
+            }
+            segs.append(raw.substring(s + 7, e).trim()).append("\n")
+            i = e + 8
+        }
+        return segs.toString().trim() to out.toString().trim()
+    }
+
+    /** 尾部有多少字符是「写了一半的开标签」（`<` `<t` … `<think`）——1..6。
+     *  流式全文在标签拼完前不能把它当正文显示，也不能当思考段收走。 */
+    private fun danglingOpen(raw: String): Int {
+        for (len in 6 downTo 1) {
+            if (raw.endsWith("<think".substring(0, len))) return len
+        }
+        return 0
+    }
+
+    /** 只取 think-tag 拆分的正文部分（chat 取向 / 无思考卡场景的气泡文案）。 */
+    fun stripThinkTag(raw: String): String = splitThinkTag(raw).second.trim()
 
     /** tool 名 → 图标语义分组（渲染用，纯函数可测）。 */
     fun toolGlyph(tool: String): String = when {

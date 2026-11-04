@@ -73,6 +73,10 @@ chaquopy {
             install("uvicorn")
             install("httpx")
             install("PyYAML")
+            // 客体插件面 web/plugins/web/plugin.py 的模块级依赖（filesystem 纯标准库）。
+            //  requests 及其 4 个依赖全为 py3-none-any 纯 wheel（PyPI 核实 2026-11-04），
+            // 无 ABI 门槛；插件默认关（R5），装它只为「知识→工具」里一开就能用。
+            install("requests")
             install("psutil")             // chat_runtime 兼容 shim 链（diagnostics）需要
             install("numpy==1.26.2")      // utils/json_utils 模块级依赖（官方仓 cp312 android 构建）
             // 社区 Android 构建（Eutalix，maturin/NDK r25b；WHEEL 内部标签

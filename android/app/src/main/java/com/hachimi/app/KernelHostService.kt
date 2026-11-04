@@ -111,11 +111,8 @@ class KernelHostService : Service() {
             // 任务与知识页读取），执行脑在完整内核（omni_host）——原语注入与叙事
             // sink 随工具面/本地运行一起摘除；工具面 = hachimi_kernel.phone_tools。
             val bridgeMod = py.getModule("hachimi_kernel.bridge")
-            // P2：知识开关持久化值随 attach 同步 kernel（进程重启后 kernel 默认开，
-            // 用户此前关过的选择会丢——设置页只在切换时推送，冷启动必须这里回放）
-            bridgeMod.callAttr("set_knowledge_enabled",
-                getSharedPreferences("hachimi_ui", MODE_PRIVATE)
-                    .getBoolean("knowledge_enabled", true))
+            // 知识层开关真源 = 内核 /api/settings（2026-11-04 起；原 bridge
+            // set_knowledge_enabled 随 mini_loop 死门退役，冷启动无需回放）
             pyBridgeModule = bridgeMod
             // 本机应用索引预热（后台线程）：首次 launch_app 按应用名跳转零建索引成本
             AppIndex.warmup(this)
@@ -152,9 +149,14 @@ class KernelHostService : Service() {
         Thread({
             try {
                 // 序列：prepare（HOME/CWD，零依赖）→ phone_tools bind（import 即注册，
-                // 依赖 prepare 先行）→ omni_host.start（config/导入序/uvicorn）
+                // 依赖 prepare 先行）→ 插件面落盘（assets → filesDir）→
+                // omni_host.start（config/导入序/uvicorn；plugin_dirs 指向上一步的目录）
                 py.getModule("hachimi_kernel.omni_host").callAttr("prepare")
                 py.getModule("hachimi_kernel.phone_tools").callAttr("bind", PrimitiveDispatcher())
+                // 插件面：assets/plugins/** → filesDir/plugins/**（上游 loader 要真实
+                // 目录）；失败只降级——plugin_dir 传空 = 内核不播种 plugin_dirs
+                val plugins = PluginAssets.materialize(this)
+                com.hachimi.app.Rlog.log("plugin assets: ${plugins.summary}")
                 val cfg = BrainConfigStore.load(this)
                 val payload = org.json.JSONObject().apply {
                     put("base_url", cfg?.baseUrl ?: "")
@@ -163,6 +165,7 @@ class KernelHostService : Service() {
                     put("vision_base_url", cfg?.visionBaseUrl ?: "")
                     put("vision_api_key", cfg?.visionApiKey ?: "")
                     put("vision_model", cfg?.visionModel ?: "")
+                    put("plugin_dir", plugins.dir?.absolutePath ?: "")
                 }
                 val r = py.getModule("hachimi_kernel.omni_host")
                     .callAttr("start", payload.toString())

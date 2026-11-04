@@ -44,3 +44,6 @@ harness/experiments/kb_snapshots/
 
 # 构建期产物：上游同步戳记（含本机路径，sync_upstream.py 生成）
 android/app/src/main/python/.upstream_synced
+# 构建期产物：上游客体插件面（sync_upstream.py 从 OmniAgent/plugins 拷入，
+# 真源在上游仓，入库会造成 R6 双份漂移）
+android/app/src/main/assets/plugins/

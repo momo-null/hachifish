@@ -13,31 +13,33 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.hachimi.app.ui.ChatPage
 import com.hachimi.app.ui.Ds
 import com.hachimi.app.ui.SettingsPage
-import com.hachimi.app.ui.TasksPage
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 任务详情页（2026-09-30 用户需求③终态）：点开详情 = 完整执行轨迹（每轮 run 一节，
- * ✓绿/✗红/→蓝 染色时间线）+ 继续对话——同 task 追加一轮 run（bridge.start_task
- * body.task_id 语义），内核自动携带上一轮轨迹尾部作背景，跨轮不失忆；
- * 而不是一次操作即终局。数据面 = bridge.task_trace_json / status_json。
+ * 任务详情页（2026-11-04 全内核化）：数据面 = 环回内核 GET /api/runtime/tasks/{id}/
+ * history（Web 同源；mini_loop 旧库 task_trace_json 随执行脑退役，完整内核任务在
+ * 旧库无数据——此前点历史会话"没反应"的根因）。渲染 = 按消息序还原：用户消息卡 +
+ * 工具步骤时间线（✓绿/✗红/→蓝）+ 每轮回复；继续对话 = 同 task 内核 chat 追加一轮
+ * （POST /api/runtime/chat body.task_id），轮询任务状态到终态后刷新历史。
  */
 class TaskDetailActivity : Activity() {
 
     private val main = Handler(Looper.getMainLooper())
     private var taskId = ""
     @Volatile private var following = false
+    /** 续话 SSE 代际（停止读流/重连循环用）。 */
+    @Volatile private var followGen = 0
 
     private lateinit var traceHost: LinearLayout
     private lateinit var continueInput: EditText
     private lateinit var sendBtn: TextView
     private lateinit var liveHost: LinearLayout
     private lateinit var liveStatus: TextView
-    private lateinit var liveLog: TextView
-    private var traceRetries = 0
+    private lateinit var summaryHost: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,20 +51,32 @@ class TaskDetailActivity : Activity() {
             setPadding(pad, Ds.dp(this@TaskDetailActivity, 12), pad, Ds.dp(this@TaskDetailActivity, 24))
         }
         box.addView(Ds.appBar(this, "任务详情", listOf()))
-        box.addView(Ds.small(this, "执行轨迹 · 每轮 run 一节；可继续对话（同任务追加一轮）").apply {
+        box.addView(Ds.small(this, "执行历史 · 消息与工具步骤全量回放；可继续对话（同任务追加一轮）").apply {
             setPadding(0, 0, 0, Ds.dp(this@TaskDetailActivity, 10))
         })
 
-        box.addView(summaryCard())
+        box.addView(summaryHost)
+        renderSummary(null)
+        if (taskId.isNotEmpty()) {
+            // 「查看完整轨迹」入口只带 task_id（无 objective/state extras）——补拉内核 meta
+            Thread {
+                val meta = runCatching {
+                    OmniAgentRemote.getJson(ChatPage.OMNI_HOST_BASE, "",
+                        "/api/runtime/tasks/" + java.net.URLEncoder.encode(taskId, "UTF-8"), 10000)
+                        .optJSONObject("task")
+                }.getOrNull()
+                if (meta != null) main.post { renderSummary(meta) }
+            }.start()
+        }
 
         // 续话实时进度卡（发送后可见）
         liveHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
         box.addView(liveHost)
 
-        // 轨迹区
+        // 历史区
         traceHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         box.addView(traceHost)
-        loadTrace()
+        loadHistory()
 
         // 继续对话卡
         box.addView(continueCard(), Ds.vp(top = Ds.dp(this, 14)))
@@ -80,26 +94,33 @@ class TaskDetailActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (!following) loadTrace()
+        if (!following) loadHistory()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         following = false
+        followGen++
     }
 
     // ---------------- 概要 ----------------
 
-    private fun summaryCard(): View {
+    /**
+     * 概要卡：meta=null 时按 intent extras 渲染（任务列表入口）；meta 到手后整卡
+     * 重渲染（查看完整轨迹入口只带 task_id，kernel meta 补齐 objective/state/步数）。
+     */
+    private fun renderSummary(meta: JSONObject?) {
+        summaryHost.removeAllViews()
         val card = Ds.card(this)
         card.addView(TextView(this).apply {
-            text = (intent.getStringExtra("objective") ?: "").ifEmpty { "(空目标)" }
+            text = (meta?.optString("objective")
+                ?: intent.getStringExtra("objective")).orEmpty().ifEmpty { "(空目标)" }
             textSize = 15f; setTextColor(Ds.TEXT); typeface = Typeface.DEFAULT_BOLD
         })
-        val state = intent.getStringExtra("state") ?: ""
-        val ok = intent.getBooleanExtra("success", false)
-        val steps = intent.getIntExtra("steps", -1)
-        val wall = intent.getDoubleExtra("wall_s", -1.0)
+        val state = meta?.optString("state") ?: intent.getStringExtra("state") ?: ""
+        val ok = meta?.optBoolean("success") ?: intent.getBooleanExtra("success", false)
+        val steps = meta?.optInt("steps", -1) ?: intent.getIntExtra("steps", -1)
+        val wall = meta?.optDouble("wall_s", -1.0) ?: intent.getDoubleExtra("wall_s", -1.0)
         val tags = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = Ds.vp(top = Ds.dp(this@TaskDetailActivity, 8), w = LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -107,143 +128,161 @@ class TaskDetailActivity : Activity() {
         fun addTag(t: String, fg: Int) = tags.addView(Ds.tag(this, t, fg, Ds.GRAY_BG),
             Ds.vp(right = Ds.dp(this, 6), w = LinearLayout.LayoutParams.WRAP_CONTENT))
         when {
+            state == "running" -> addTag("▶ 运行中", Ds.ORANGE_TXT)
             ok -> addTag("✓ 成功", Ds.GREEN_TXT)
             state == "failed" || state == "error" -> addTag("✗ 未完成", Ds.RED_TXT)
-            state == "running" -> addTag("▶ 运行中", Ds.ORANGE_TXT)
             state == "stopped" -> addTag("⏹ 已停止", Ds.TEXT_2)
             else -> addTag("· " + state.ifEmpty { "pending" }, Ds.TEXT_2)
         }
         if (steps >= 0) addTag("$steps 步", Ds.PRIMARY)
         if (wall >= 0) addTag("${wall.toInt()}s", Ds.PURPLE_TXT)
         card.addView(tags)
-        val doneWhen = intent.getStringExtra("done_when").orEmpty()
+        val doneWhen = (meta?.optString("done_when") ?: intent.getStringExtra("done_when")).orEmpty()
         card.addView(Ds.small(this, "完成判据：" + doneWhen.ifEmpty { "（未填 · 由模型自行判断）" }).apply {
             setPadding(0, Ds.dp(this@TaskDetailActivity, 8), 0, 0)
         })
         card.addView(Ds.small(this,
-            (intent.getStringExtra("created_at") ?: "").take(16).replace("T", " ") +
-                    " · " + taskId).apply { setPadding(0, Ds.dp(this@TaskDetailActivity, 2), 0, 0) })
-        return card
+            (meta?.optString("created_at") ?: intent.getStringExtra("created_at")
+                ?: "").take(16).replace("T", " ") + " · " + taskId)
+            .apply { setPadding(0, Ds.dp(this@TaskDetailActivity, 2), 0, 0) })
+        summaryHost.addView(card)
     }
 
-    // ---------------- 执行轨迹 ----------------
+    // ---------------- 执行历史（内核 /history） ----------------
 
-    private fun loadTrace() {
+    private fun loadHistory() {
         if (taskId.isEmpty()) {
             traceHost.removeAllViews()
-            traceHost.addView(Ds.emptyState(this, "▤", "没有 task_id", "该记录缺少可回放的轨迹标识"))
+            traceHost.addView(Ds.emptyState(this, "▤", "没有 task_id", "该记录缺少可回放的执行标识"))
             return
         }
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) {
-            if (traceRetries++ < 5) main.postDelayed({ loadTrace() }, 2000)
-            return
-        }
-        traceRetries = 0
+        traceHost.removeAllViews()
+        traceHost.addView(sectionTitle("执行历史"))
+        traceHost.addView(Ds.small(this, "读取中…").apply {
+            setPadding(0, Ds.dp(this@TaskDetailActivity, 8), 0, 0)
+        })
         Thread {
             try {
-                val r = JSONObject(bridge.callAttr("task_trace_json", taskId).toString())
-                main.post { renderTrace(r) }
+                val r = OmniAgentRemote.kernelTaskHistory(ChatPage.OMNI_HOST_BASE, taskId)
+                main.post { renderHistory(r) }
             } catch (e: Exception) {
-                main.post { renderTraceError("${e.javaClass.simpleName}: ${e.message}") }
+                main.post { renderHistoryError("${e.javaClass.simpleName}: ${e.message}") }
             }
         }.start()
     }
 
-    private fun renderTraceError(msg: String) {
+    private fun renderHistoryError(msg: String) {
         traceHost.removeAllViews()
-        traceHost.addView(sectionTitle("执行轨迹"))
-        traceHost.addView(Ds.small(this, "轨迹加载失败：$msg").apply {
+        traceHost.addView(sectionTitle("执行历史"))
+        traceHost.addView(Ds.small(this, "历史加载失败：$msg").apply {
             setTextColor(Ds.RED_TXT); setPadding(0, Ds.dp(this@TaskDetailActivity, 8), 0, 0)
         })
     }
 
-    private fun renderTrace(r: JSONObject) {
+    /** messages[] → 按序还原：用户卡 + （该轮工具步骤时间线）+ 回复卡。 */
+    private fun renderHistory(r: JSONObject) {
         traceHost.removeAllViews()
-        traceHost.addView(sectionTitle("执行轨迹"))
-        if (!r.optBoolean("ok")) {
+        traceHost.addView(sectionTitle("执行历史"))
+        val msgs = r.optJSONArray("messages")
+        if (msgs == null || msgs.length() == 0) {
             traceHost.addView(Ds.emptyState(this, "▤", "还没有执行记录",
-                r.optString("error").ifEmpty { "该任务还没有可回放的 run 轨迹" }))
+                "该任务还没有可回放的执行历史"))
             return
         }
-        val runs = r.optJSONArray("runs")
-        if (runs == null || runs.length() == 0) {
-            traceHost.addView(Ds.emptyState(this, "▤", "还没有执行记录", "该任务还没有可回放的 run 轨迹"))
-            return
-        }
-        for (i in 0 until runs.length()) {
-            val run = runs.optJSONObject(i) ?: continue
-            traceHost.addView(runCard(run), Ds.vp(top = Ds.dp(this@TaskDetailActivity, 10)))
-        }
-    }
-
-    private fun runCard(run: JSONObject): View {
-        val card = Ds.card(this)
-        val meta = run.optJSONObject("run")
-        val lines = run.optJSONArray("lines")
-        val success = if (meta == null || meta.isNull("success")) null else meta.optBoolean("success")
-        val reason = meta?.optString("reason").orEmpty()
-
-        // run 头：状态 + run 标识 + 指标/原因
-        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val glyph = when (success) { true -> "✓"; false -> "✗"; null -> "→" }
-        val glyphColor = when (success) { true -> Ds.GREEN_TXT; false -> Ds.RED_TXT; null -> Ds.TEXT_3 }
-        head.addView(TextView(this).apply {
-            text = glyph; textSize = 14f; setTextColor(glyphColor); typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, Ds.dp(this@TaskDetailActivity, 8), 0)
-        })
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        col.addView(TextView(this).apply {
-            text = "run " + run.optString("run_id").ifEmpty { run.optString("file") } +
-                    " · " + run.optString("file").take(10)
-            textSize = 12.5f; setTextColor(Ds.TEXT); typeface = Typeface.MONOSPACE
-        })
-        val metaLine = buildString {
-            if (meta != null) {
-                append("${meta.optInt("steps", -1).takeIf { it >= 0 } ?: (lines?.length() ?: 0)} 步")
-                append(" · LLM ${meta.optInt("brain_calls", -1)} 次")
-                if (reason.isNotEmpty()) append(" · " + reason.take(60))
-            } else {
-                append("${lines?.length() ?: 0} 条记录")
+        var hadTool = false
+        for (i in 0 until msgs.length()) {
+            val m = msgs.optJSONObject(i) ?: continue
+            when (m.optString("role")) {
+                "user" -> traceHost.addView(userCard(m.optString("content")),
+                    Ds.vp(top = Ds.dp(this@TaskDetailActivity, 10)))
+                "assistant", "agent" -> {
+                    val extra = m.optJSONObject("extra")
+                    val steps = extra?.optJSONArray("steps")
+                    // 工具步骤 → 染色时间线（thinking 跳过，与对话页现场一致）
+                    if (steps != null && steps.length() > 0) {
+                        val sb = StringBuilder()
+                        var n = 0
+                        for (j in 0 until steps.length()) {
+                            val st = steps.optJSONObject(j) ?: continue
+                            if (st.optString("type") != "tool_call") continue
+                            hadTool = true
+                            n++
+                            val res = st.optString("result")
+                            val ok = parseToolOk(res)
+                            val mark = when (ok) { true -> "✓"; false -> "✗"; null -> "→" }
+                            sb.append(mark).append(' ').append(st.optString("name").ifEmpty { "?" })
+                                .append(' ').append(st.optString("arguments").take(70))
+                            if (ok == false) sb.append("  ⚠ ").append(res.take(60))
+                            sb.append('\n')
+                        }
+                        if (n > 0) {
+                            val tl = Ds.darkLog(this, maxLines = 300)
+                            tl.text = colored(sb.toString())
+                            tl.setPadding(dp(10), dp(8), dp(10), dp(8))
+                            traceHost.addView(tl, Ds.vp(top = Ds.dp(this@TaskDetailActivity, 10)))
+                        }
+                    }
+                    val reply = m.optString("content").trim()
+                    if (reply.isNotEmpty()) traceHost.addView(replyCard(reply),
+                        Ds.vp(top = Ds.dp(this@TaskDetailActivity, 8)))
+                }
             }
         }
-        col.addView(Ds.small(this, metaLine).apply { setPadding(0, Ds.dp(this@TaskDetailActivity, 1), 0, 0) })
-        head.addView(col.apply {
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        })
-        card.addView(head)
-
-        // 步骤时间线（✓绿/✗红/→蓝 染色；无步骤时诚实占位）
-        val tl = Ds.darkLog(this, maxLines = 400)
-        tl.text = traceText(lines)
-        tl.setPadding(dp(10), dp(8), dp(10), dp(8))
-        card.addView(tl, Ds.vp(top = Ds.dp(this@TaskDetailActivity, 8)))
-        return card
-    }
-
-    /** jsonl 轨迹行 → 染色单文本（kind=think 行跳过；args/err 截断防爆屏）。 */
-    private fun traceText(lines: JSONArray?): CharSequence {
-        val sb = StringBuilder()
-        for (i in 0 until (lines?.length() ?: 0)) {
-            val ln = lines!!.optJSONObject(i) ?: continue
-            if (ln.optString("kind") == "think") continue
-            val a = ln.optJSONObject("action") ?: continue
-            val res = ln.optJSONObject("result")
-            val mark = when {
-                res == null || res.isNull("ok") -> "→"
-                res.optBoolean("ok") -> "✓"
-                else -> "✗"
-            }
-            sb.append(mark).append(' ').append(ln.optInt("step")).append(' ')
-                .append(a.optString("tool")).append(' ')
-                .append(a.optJSONObject("args")?.toString()?.take(70) ?: "")
-            if (mark == "✗") sb.append("  ⚠ ").append(res?.optString("error").orEmpty().take(60))
-            sb.append('\n')
+        // 轮次结果 tag（extra.meta：内核判定）
+        msgs.optJSONObject(msgs.length() - 1)?.optJSONObject("extra")?.optJSONObject("meta")?.let { meta ->
+            val ok = meta.optBoolean("success")
+            val line = (if (ok) "✓ 办好了" else "✗ 未办成") +
+                    " · ${meta.optInt("steps", 0)} 步"
+            traceHost.addView(Ds.small(this, line).apply {
+                setTextColor(if (ok) Ds.GREEN_TXT else Ds.RED_TXT)
+                setPadding(0, Ds.dp(this@TaskDetailActivity, 10), 0, 0)
+            })
         }
-        return colored(sb.toString().ifEmpty { "（暂无步骤）" })
+        if (!hadTool) {
+            traceHost.addView(Ds.small(this, "（纯对话轮：无工具步骤）").apply {
+                setTextColor(Ds.TEXT_3); setPadding(0, Ds.dp(this@TaskDetailActivity, 8), 0, 0)
+            })
+        }
     }
 
-    /** 逐行染色（NarrativePanel.colored 同语义）：✓ 绿 / ✗ 红 / → 蓝 / 其余暗底白。 */
+    private fun userCard(text: String): View = Ds.card(this).also { card ->
+        card.addView(Ds.small(this, "我").apply { setTextColor(Ds.PRIMARY) })
+        card.addView(TextView(this).apply {
+            this.text = text; textSize = 13.5f; setTextColor(Ds.TEXT)
+            setPadding(0, Ds.dp(this@TaskDetailActivity, 4), 0, 0)
+        })
+    }
+
+    private fun replyCard(text: String): View = Ds.card(this).also { card ->
+        card.addView(Ds.small(this, "大肥鱼").apply { setTextColor(Ds.TEXT_2) })
+        card.addView(TextView(this).apply {
+            this.text = text; textSize = 13.5f; setTextColor(Ds.TEXT)
+            setPadding(0, Ds.dp(this@TaskDetailActivity, 4), 0, 0)
+        })
+    }
+
+    /**
+     * 工具结果三态 (true/false/null)。上游工具框架统一包 {"ok":bool,"error"?}：
+     * JSON 优先；历史里 result 也可能是 str(dict)（Python repr：单引号/True 大写），
+     * 正则同吃两种形态——宽松的"含 ok 字样"启发会把观测内容误判成失败，宁可不判。
+     */
+    private fun parseToolOk(res: String): Boolean? {
+        val s = res.trim()
+        if (s.isEmpty()) return null
+        try {
+            val o = JSONObject(s)
+            if (o.has("ok")) return o.optBoolean("ok")
+            return true
+        } catch (_: Exception) { /* 非 JSON */ }
+        return when (Regex("[\"']ok[\"']\\s*:\\s*(True|False|true|false)")
+            .find(s)?.groupValues?.get(1)?.lowercase()) {
+            "false" -> false
+            "true" -> true
+            else -> null
+        }
+    }
+
+    /** 逐行染色（✓ 绿 / ✗ 红 / → 蓝 / 其余暗底白，NarrativePanel.colored 同语义）。 */
     private fun colored(text: String): CharSequence {
         val sb = SpannableString(text)
         var idx = 0
@@ -262,7 +301,7 @@ class TaskDetailActivity : Activity() {
         return sb
     }
 
-    // ---------------- 继续对话（同 task 追加 run） ----------------
+    // ---------------- 继续对话（同 task 内核 chat 追加一轮） ----------------
 
     private fun continueCard(): View {
         val card = Ds.card(this)
@@ -277,8 +316,8 @@ class TaskDetailActivity : Activity() {
         sendBtn = Ds.button(this, "▶ 发送并继续执行") { sendContinue() }
         card.addView(sendBtn, Ds.vp(top = Ds.dp(this@TaskDetailActivity, 10)))
         card.addView(Ds.small(this,
-            "同一任务追加一轮：内核带上上一轮轨迹背景，从当前屏幕状态继续，" +
-                    "而不是重新开始。").apply { setPadding(0, Ds.dp(this@TaskDetailActivity, 6), 0, 0) })
+            "同一任务追加一轮：内核带上本任务历史继续推进，而不是重新开始。")
+            .apply { setPadding(0, Ds.dp(this@TaskDetailActivity, 6), 0, 0) })
         return card
     }
 
@@ -287,44 +326,64 @@ class TaskDetailActivity : Activity() {
         if (msg.isEmpty()) { toast("先输入要继续的指令"); return }
         if (taskId.isEmpty()) { toast("该任务没有可续的 task_id"); return }
         if (following) return
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) { toast("内核启动中（首次约需 10 秒），稍后再试"); return }
-        val cfg = BrainConfigStore.load(this)
-        if (cfg == null) { toast("未配置模型端点（BYOK）：请先到 设置 → 通道（BYOK）填写并保存"); return }
         sendBtn.isEnabled = false
         following = true
+        main.post { showLiveStarting() }
         Thread {
             try {
-                // 与主界面 startTask 同一套注入（Keystore → set_brain/set_vision）
-                bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
-                if (cfg.visionEnabled) {
-                    bridge.callAttr("set_vision", cfg.visionBaseUrl, cfg.visionApiKey, cfg.visionModel)
-                } else {
-                    bridge.callAttr("set_vision", "", "", "")
-                }
-                val body = JSONObject()
-                    .put("task_id", taskId)
-                    .put("objective", msg)
-                    .put("max_steps", SettingsPage.maxSteps(this))
-                    .put("wall_clock_s", SettingsPage.wallClockS(SettingsPage.maxSteps(this)))
-                if (getSharedPreferences(TasksPage.PREFS, 0).getInt("run_mode", 0) == 1) {
-                    body.put("mode", "split")
-                }
-                main.post { showLiveStarting() }
-                val r = JSONObject(bridge.callAttr("start_task_json", body.toString()).toString())
-                if (!r.optBoolean("ok")) {
-                    main.post {
-                        liveHost.visibility = View.GONE
-                        toast(MainActivity.readableErrorStatic(r.optString("error")))
-                        sendBtn.isEnabled = true; following = false
-                    }
-                    return@Thread
-                }
+                // 同 task 续轮：chat body.task_id（内核沿用任务历史；max_steps=步数预算）
+                OmniAgentRemote.chat(ChatPage.OMNI_HOST_BASE, "", msg, taskId,
+                    false, SettingsPage.maxSteps(this))
+                startFollowStream()
                 pollFollow()
             } catch (e: Exception) {
                 main.post {
-                    toast("发送失败：${e.javaClass.simpleName}: ${e.message}")
+                    liveHost.visibility = View.GONE
+                    toast("发送失败：${MainActivity.readableErrorStatic(e.message ?: "")}")
                     sendBtn.isEnabled = true; following = false
+                }
+            }
+        }.start()
+    }
+
+    /**
+     * 续话轮 SSE 订阅（审批转发）：详情页此前不订阅流——内核 standard 档的审批卡
+     * 无人应答，AutoDeny 等满 600s（2026-11-04 实录：launch_app 卡死到超时）。
+     * 这里只把 approval 事件转给 GateActivity 应答；渲染仍走轮询 + 历史刷新。
+     */
+    private fun startFollowStream() {
+        val gen = ++followGen
+        Thread {
+            var attempts = 0
+            while (following && gen == followGen && !isDestroyed) {
+                attempts++
+                try {
+                    OmniAgentRemote.stream(ChatPage.OMNI_HOST_BASE, "", taskId, "task-detail") { ev ->
+                        if (gen != followGen || isDestroyed) return@stream false
+                        if (ev.event == "approval") {
+                            val approvalId = ev.data.optString("approval_id")
+                            if (approvalId.isNotEmpty()) {
+                                val tool = ev.data.optString("tool").ifEmpty { "?" }
+                                val args = ev.data.optJSONObject("arguments")?.toString() ?: ""
+                                com.hachimi.app.gate.GateManager.enforceRemote(
+                                    this, "kernel", tool, "风险:${ev.data.optString("risk")} $args".take(220)
+                                ) { approve, remember ->
+                                    Thread {
+                                        runCatching {
+                                            OmniAgentRemote.decideApproval(ChatPage.OMNI_HOST_BASE,
+                                                "", approvalId, approve, remember)
+                                        }.onFailure {
+                                            Rlog.log("task-detail approval decide failed: ${it.message}")
+                                        }
+                                    }.start()
+                                }
+                            }
+                        }
+                        true
+                    }
+                } catch (_: Exception) {
+                    if (gen != followGen || !following || isDestroyed) break
+                    runCatching { Thread.sleep(800L * attempts.coerceAtMost(4)) }
                 }
             }
         }.start()
@@ -333,63 +392,58 @@ class TaskDetailActivity : Activity() {
     private fun showLiveStarting() {
         liveHost.removeAllViews()
         liveStatus = TextView(this).apply {
-            text = "▶ 续话运行中 · 0 步"
+            text = "▶ 续话运行中 · 0s"
             textSize = 13f; setTextColor(Ds.PRIMARY); typeface = Typeface.DEFAULT_BOLD
         }
-        liveLog = Ds.darkLog(this, maxLines = 4).apply { text = "等待第一步…（网关偶发 30~90 秒停顿属正常）" }
         liveHost.addView(liveStatus)
-        liveHost.addView(liveLog, Ds.vp(top = Ds.dp(this@TaskDetailActivity, 6)))
+        liveHost.addView(Ds.small(this, "任务结束后自动刷新执行历史").apply {
+            setPadding(0, Ds.dp(this@TaskDetailActivity, 4), 0, 0)
+        })
         liveHost.visibility = View.VISIBLE
     }
 
-    /** 续话轮询（500ms → status_json）：phase 离开 running 即收尾并刷新轨迹。 */
+    /** 续话轮询（1s → GET /tasks/{id}）：state 离开 running/pending 即收尾并刷新历史。 */
     private fun pollFollow() {
-        val deadline = System.currentTimeMillis() + 20 * 60_000
+        val deadline = System.currentTimeMillis() + 30 * 60_000
+        val t0 = System.currentTimeMillis()
         Thread {
             while (following) {
                 if (System.currentTimeMillis() > deadline) break
-                val bridge = KernelHostService.pyBridgeModule ?: break
                 try {
-                    val s = JSONObject(bridge.callAttr("status_json").toString())
-                    val phase = s.optString("phase")
-                    main.post { renderLive(s, phase) }
-                    if (phase != "running") {
-                        main.post { finishFollow(phase) }
+                    val r = OmniAgentRemote.getJson(ChatPage.OMNI_HOST_BASE, "",
+                        "/api/runtime/tasks/" + java.net.URLEncoder.encode(taskId, "UTF-8"), 8000)
+                    val meta = r.optJSONObject("task")
+                    val st = meta?.optString("state") ?: ""
+                    val success = meta?.optBoolean("success") ?: false
+                    val running = st.isEmpty() || st == "running" || st == "pending"
+                    val el = (System.currentTimeMillis() - t0) / 1000
+                    main.post {
+                        if (::liveStatus.isInitialized) {
+                            liveStatus.text = "▶ 续话运行中 · ${el}s"
+                        }
+                    }
+                    if (!running) {
+                        main.post { finishFollow(success) }
                         break
                     }
                 } catch (_: Exception) {
-                    break
                 }
-                Thread.sleep(500)
+                Thread.sleep(1000)
             }
         }.start()
     }
 
-    private fun renderLive(s: JSONObject, phase: String) {
-        if (!::liveStatus.isInitialized) return
-        if (phase == "running") {
-            liveStatus.text = (if (s.optBoolean("paused")) "⏸ 续话已暂停" else "▶ 续话运行中") +
-                    " · ${s.optInt("steps_so_far")} 步"
-            val la = s.optJSONObject("last_action")
-            liveLog.text = if (la == null) "等待第一步…"
-            else {
-                val mark = when {
-                    !la.has("ok") || la.isNull("ok") -> "→"
-                    la.optBoolean("ok") -> "✓"
-                    else -> "✗"
-                }
-                "${mark} 步骤${la.optInt("step")} · ${la.optString("tool")} " +
-                        (la.optJSONObject("args")?.toString()?.take(70) ?: "")
-            }
-        }
-    }
-
-    private fun finishFollow(phase: String) {
+    private fun finishFollow(ok: Boolean) {
         following = false
+        followGen++
         sendBtn.isEnabled = true
         continueInput.setText("")
-        toast(if (phase == "done") "续话完成 ✓" else "续话结束（$phase）· 最新一轮轨迹见下方")
-        loadTrace()
+        liveHost.visibility = View.GONE
+        toast(if (ok) "续话完成 ✓" else "续话结束 · 执行历史已刷新")
+        // 完成弹窗与对话页/任务页同一体验（后台也能看到结果 + 一键返回）
+        com.hachimi.app.FinishPopup.show(this, ok,
+            if (ok) "续话轮已完成 · 历史已刷新" else "续话轮未完成 · 历史已刷新", 0)
+        loadHistory()
     }
 
     // ---------------- 杂项 ----------------

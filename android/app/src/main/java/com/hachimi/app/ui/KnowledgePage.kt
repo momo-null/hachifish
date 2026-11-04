@@ -1,35 +1,40 @@
 package com.hachimi.app.ui
 
 import android.app.Activity
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
-import android.text.TextUtils
-import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import com.hachimi.app.KernelHostService
+import com.hachimi.app.OmniAgentRemote
+import com.hachimi.app.Rlog
 import org.json.JSONObject
 
 /**
- * 知识 Tab（K7 接真数据，redesign_plan 原里程碑 P2 完成）：
- * - 技能：kernel skills_list_json（**人工维护**的全局 skill；自蒸馏已于 2026-10-02 下线）
- * - 记忆：memory_json（MEMORY.md 聚合视图）+ rollouts_list_json（蒸馏记录）
- * - 弱注入开关状态实时回显（设置页 ↔ 头部 tag 双向同步）
- * 世界模型段保留诚实占位（task 级资产，产品视图后置）。
- * 数据在 onResume 拉取（每次进 Tab 刷新——Curator 任务后随时过来看新货）。
+ * 知识 Tab（2026-11-04 死配置清理后定稿；同日技能/工具/MCP 移植上机后再分层）：
+ *
+ * 主体仍是「记忆」列表（环回内核 brain，Web DebugPanel 同源 /api/debug/memory）——
+ * 总览卡 + atoms 列表 + 单条物理删除；其上是一排**分节入口**（技能 / 工具 / MCP），
+ * 每个入口开一个全屏子页（无二级 Tabs，对齐仓内 RoleSettingsActivity 惯例）：
+ * - 技能 → SkillsActivity（/api/runtime/skills，回放/升全局/删除）
+ * - 工具 → ToolsActivity（/api/runtime/tools 只读清单 + 能力插件 enabled 开关）
+ * - MCP  → McpActivity（PUT /api/settings runtime.mcp，url 型可增删，stdio 只读）
+ *
+ * 头部 tag = 内核记忆层开关回显（/api/settings runtime.knowledge.memory.enabled，
+ * 设置页同一事实源）。入口副标题的量值来自一次 /api/runtime/tools 读取（失败留原文案）。
+ * 数据在 onResume 拉取（每次进 Tab 刷新）。
  */
 class KnowledgePage(private val act: Activity) {
 
     private val main = Handler(Looper.getMainLooper())
-    private var seg: Ds.Seg? = null
     private var injectTag: TextView? = null
     private lateinit var bodyHost: LinearLayout
     private lateinit var page: ScrollView
-    private var section = 0
+    private var skillsSub: TextView? = null
+    private var toolsSub: TextView? = null
+    private var mcpSub: TextView? = null
 
     val view: View
         get() {
@@ -40,14 +45,23 @@ class KnowledgePage(private val act: Activity) {
     fun onResume() {
         if (!::page.isInitialized) return
         refreshInjectTag()
-        load(section)
+        refreshEntryCounts()
+        load()
     }
 
+    /** 头部 tag = 内核记忆层开关（与设置页「记忆与技能」同一事实源，只读回显）。 */
     private fun refreshInjectTag() {
-        val on = act.getSharedPreferences(TasksPage.PREFS, 0)
-            .getBoolean("knowledge_enabled", true)
-        injectTag?.text = "弱注入：${if (on) "开" else "关"}"
-        injectTag?.setTextColor(if (on) Ds.GREEN_TXT else Ds.TEXT_3)
+        Thread {
+            val on = runCatching {
+                OmniAgentRemote.getJson(ChatPage.OMNI_HOST_BASE, "", "/api/settings", 10000)
+                    .optJSONObject("runtime")?.optJSONObject("knowledge")
+                    ?.optJSONObject("memory")?.optBoolean("enabled", true)
+            }.getOrNull() ?: true
+            main.post {
+                injectTag?.text = "记忆注入：${if (on) "开" else "关"}"
+                injectTag?.setTextColor(if (on) Ds.GREEN_TXT else Ds.TEXT_3)
+            }
+        }.start()
     }
 
     private fun build(): ScrollView {
@@ -55,49 +69,92 @@ class KnowledgePage(private val act: Activity) {
         val box = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
         box.setPadding(pad, Ds.dp(act, 12), pad, Ds.dp(act, 20))
 
-        injectTag = Ds.tag(act, "弱注入：开", Ds.GREEN_TXT, Ds.GRAY_BG)
+        injectTag = Ds.tag(act, "记忆注入：开", Ds.GREEN_TXT, Ds.GRAY_BG)
         box.addView(Ds.appBar(act, "知识", listOf(injectTag!!)))
-        box.addView(Ds.small(act, "技能库 · 全局记忆 —— 任务跑完自动蒸馏，下次任务弱注入参考").apply {
-            setPadding(0, 0, 0, Ds.dp(act, 10))
-        })
 
-        seg = Ds.seg(act, listOf("技能", "记忆", "世界模型"), 0) {
-            section = it; load(it)
-        }.also { box.addView(it.view, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)) }
+        // 分节入口：技能 / 工具 / MCP 各开一个全屏子页（记忆仍是本页主体）
+        val entries = Ds.card(act)
+        entries.addView(entryRow("技能", "任务成功后自动蒸馏的套路 · 回放 / 设为全局",
+            { skillsSub = it }) {
+            act.startActivity(android.content.Intent(act, com.hachimi.app.SkillsActivity::class.java))
+        })
+        entries.addView(Ds.divider(act))
+        entries.addView(entryRow("工具", "内核能力清单 · 能力插件开关（默认关）",
+            { toolsSub = it }) {
+            act.startActivity(android.content.Intent(act, com.hachimi.app.ToolsActivity::class.java))
+        })
+        entries.addView(Ds.divider(act))
+        entries.addView(entryRow("MCP", "外部工具服务器 · HTTP(url) 型可增删",
+            { mcpSub = it }) {
+            act.startActivity(android.content.Intent(act, com.hachimi.app.McpActivity::class.java))
+        })
+        box.addView(entries)
+
+        box.addView(Ds.h2(act, "记忆").apply {
+            setPadding(0, Ds.dp(act, 16), 0, 0)
+        })
+        box.addView(Ds.small(act, "全局记忆 —— 对话与任务结束后自动沉淀，下次按相关度检索注入").apply {
+            setPadding(0, Ds.dp(act, 4), 0, Ds.dp(act, 10))
+        })
 
         bodyHost = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
         box.addView(bodyHost, Ds.vp(top = Ds.dp(act, 10)))
         return ScrollView(act).apply { addView(box) }
     }
 
-    // ---------------- 数据拉取（K7c 数据面消费） ----------------
+    /** 分节入口行（标题 + 副标题 + ›），副标题文本可被后续异步刷新持有。 */
+    private fun entryRow(title: String, desc: String,
+                         onSub: (TextView) -> Unit, open: () -> Unit): View {
+        val row = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, Ds.dp(act, 8), 0, Ds.dp(act, 8))
+        }
+        val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(act).apply {
+            text = title; textSize = 14f; setTextColor(Ds.TEXT)
+        })
+        val sub = Ds.small(act, desc).apply { setPadding(0, Ds.dp(act, 1), 0, 0) }
+        col.addView(sub)
+        onSub(sub)
+        row.addView(col, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(TextView(act).apply {
+            text = "›"; textSize = 16f; setTextColor(Ds.TEXT_3)
+            setPadding(Ds.dp(act, 10), 0, 0, 0)
+        })
+        row.setOnClickListener { open() }
+        return row
+    }
 
-    private fun load(sec: Int) {
-        seg?.select(sec)
-        if (sec == 2) {   // 世界模型：task 级资产，产品视图后置（诚实占位）
-            renderWorldModel()
-            return
-        }
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) {
-            bodyHost.removeAllViews()
-            bodyHost.addView(Ds.emptyState(act, "⏳", "内核启动中",
-                "首次约需 10 秒；就绪后切走再切回本页即自动加载。"))
-            return
-        }
+    /** 入口副标题的真实量值（一次 /api/runtime/tools 读取；内核未就绪就留原文案）。 */
+    private fun refreshEntryCounts() {
+        Thread {
+            val r = runCatching {
+                OmniAgentRemote.getJson(ChatPage.OMNI_HOST_BASE, "",
+                    "/api/runtime/tools", 20000)
+            }.getOrNull() ?: return@Thread
+            if (r.isNull("plugins")) return@Thread
+            val plugins = r.optJSONArray("plugins")?.length() ?: 0
+            val tools = r.optJSONArray("tools")?.length() ?: 0
+            val mcp = r.optJSONObject("mcp")
+            val servers = mcp?.optJSONArray("servers")?.length() ?: 0
+            val linked = mcp?.optJSONArray("connected")?.length() ?: 0
+            main.post {
+                toolsSub?.text = "内核能力 $tools 项 · 能力插件 $plugins 个（默认关）"
+                mcpSub?.text = if (servers == 0) "HTTP(url) 型可增删 · 尚未配置"
+                else "已配 $servers 个 · 连上 $linked 个 · stdio 本机只读"
+            }
+        }.start()
+    }
+
+    private fun load() {
         bodyHost.removeAllViews()
         bodyHost.addView(Ds.small(act, "读取中…"))
         Thread {
             try {
-                val payload = if (sec == 0) {
-                    bridge.callAttr("skills_list_json").toString()
-                } else {
-                    bridge.callAttr("memory_json").toString()
-                }
-                val extra = if (sec == 1)
-                    bridge.callAttr("rollouts_list_json", 30).toString() else null
-                main.post { render(sec, payload, extra) }
+                val r = OmniAgentRemote.getJson(ChatPage.OMNI_HOST_BASE, "",
+                    "/api/debug/memory", 12000)
+                main.post { renderMemoryKernel(r) }
             } catch (e: Exception) {
                 main.post {
                     bodyHost.removeAllViews()
@@ -108,357 +165,71 @@ class KnowledgePage(private val act: Activity) {
         }.start()
     }
 
-    private fun render(sec: Int, payload: String, extra: String?) {
-        val r = JSONObject(payload)
-        if (sec == 0) renderSkills(r) else renderMemory(r, extra)
-    }
-
-    /** 技能列表：名称 + 匹配规则 + 描述；长按出管理菜单（启停/删除，P2 DoD3）。 */
-    private fun renderSkills(r: JSONObject) {
+    /** 记忆 = 环回内核 brain：总览卡 + atoms 列表（状态/kind/强度/更新时间）+ 单条物理删除。 */
+    private fun renderMemoryKernel(r: JSONObject) {
         bodyHost.removeAllViews()
-        bodyHost.addView(Ds.small(act, "长按技能卡可 停用/启用 或 删除").apply {
-            setTextColor(Ds.TEXT_3); setPadding(0, 0, 0, Ds.dp(act, 4))
+        if (!r.optBoolean("ok")) {
+            bodyHost.addView(Ds.emptyState(act, "!", "记忆库读取失败", r.optString("error")))
+            return
+        }
+        val ov = r.optJSONObject("overview")
+        val head = Ds.card(act)
+        head.addView(TextView(act).apply {
+            text = "记忆脑 · 共 ${r.optInt("count")} 条" +
+                    (ov?.let { " · 活跃 ${it.optInt("active", 0)}" } ?: "")
+            textSize = 14f; setTextColor(Ds.TEXT); typeface = Typeface.DEFAULT_BOLD
         })
-        val arr = r.optJSONArray("skills") ?: return
-        if (arr.length() == 0) {
-            bodyHost.addView(Ds.emptyState(act, "◈", "还没有技能",
-                "任务成功跑完后，大肥鱼会把操作套路蒸馏成候选技能；\n" +
-                "连续 3 次成功自动晋升为正式技能（可注入下次任务参考）。"))
+        ov?.optJSONObject("by_kind")?.let { kinds ->
+            val parts = mutableListOf<String>()
+            for (k in kinds.keys()) parts.add("$k ${kinds.optInt(k)}")
+            if (parts.isNotEmpty()) head.addView(Ds.small(act, parts.joinToString(" · "))
+                .apply { setPadding(0, Ds.dp(act, 2), 0, 0) })
+        }
+        bodyHost.addView(head)
+        val atoms = r.optJSONArray("atoms")
+        if (atoms == null || atoms.length() == 0) {
+            bodyHost.addView(Ds.emptyState(act, "◈", "记忆还是空的",
+                "跑几个任务后，记忆会自动沉淀在这里。"))
             return
         }
-        for (i in 0 until arr.length()) {
-            val s = arr.getJSONObject(i)
-            val disabled = s.optBoolean("disabled", false)
+        for (i in 0 until atoms.length()) {
+            val a = atoms.optJSONObject(i) ?: continue
             val card = Ds.card(act)
-            val head = LinearLayout(act).apply {
-                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            val headL = LinearLayout(act).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
             }
-            head.addView(TextView(act).apply {
-                text = (if (disabled) "⏸ " else "") + s.optString("name")
-                textSize = 14f; setTextColor(if (disabled) Ds.TEXT_3 else Ds.TEXT)
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            val state = a.optString("state")
+            headL.addView(Ds.tag(act, when (state) {
+                "active" -> "活跃"; "superseded" -> "已替代"; else -> state
+            }, if (state == "active") Ds.GREEN_TXT else Ds.TEXT_3, Ds.GRAY_BG))
+            headL.addView(TextView(act).apply {
+                text = a.optString("kind"); textSize = 11f; setTextColor(Ds.TEXT_3)
+                setPadding(Ds.dp(act, 6), 0, 0, 0)
             })
-            // V7 徽标：停用 > NEW > ACTIVE
-            when {
-                disabled -> head.addView(Ds.tag(act, "已停用", Ds.TEXT_3, Ds.GRAY_BG))
-                else -> {
-                    val created = s.optString("created_at")
-                    val isNew = runCatching {
-                        !created.isBlank() && System.currentTimeMillis() -
-                            java.time.OffsetDateTime.parse(created).toInstant().toEpochMilli() < 7 * 86400_000L
-                    }.getOrDefault(false)
-                    val used = s.optInt("use_count", 0) > 0
-                    head.addView(Ds.tag(act,
-                        if (isNew) "NEW" else if (used) "ACTIVE" else "技能",
-                        Ds.PRIMARY, Color.parseColor("#E8F1FA")))
-                }
-            }
-            card.addView(head)
-            s.optString("objective_pattern").takeIf { it.isNotBlank() }?.let {
-                card.addView(Ds.small(act, "匹配：$it").apply { setPadding(0, Ds.dp(act, 4), 0, 0) })
-            }
-            s.optString("description").takeIf { it.isNotBlank() }?.let {
-                card.addView(Ds.small(act, it).apply { setPadding(0, Ds.dp(act, 2), 0, 0) })
-            }
-            // V7 统计行：使用次数 + 成功率（数据缺省时跳过该行）
-            val useCount = s.optInt("use_count", 0)
-            val successCount = s.optInt("success_count", 0)
-            if (useCount > 0) {
-                val rate = if (useCount > 0) successCount * 100 / useCount else 0
-                card.addView(Ds.small(act, "已使用 $useCount 次 · 成功率 $rate%").apply {
-                    setTextColor(Ds.TEXT_3); setPadding(0, Ds.dp(act, 4), 0, 0)
-                })
-            }
-            val name = s.optString("name")
-            card.setOnLongClickListener {
-                skillManageDialog(name, disabled)
-                true
-            }
-            bodyHost.addView(card, Ds.vp(top = Ds.dp(act, 8)))
-        }
-    }
-
-    /** 技能管理菜单（DoD3）：启停（停用技能不进注入与目录）/ 删除（可再蒸馏）。 */
-    private fun skillManageDialog(name: String, disabled: Boolean) {
-        val items = if (disabled)
-            arrayOf("启用（恢复注入）", "删除")
-        else
-            arrayOf("停用（不再注入）", "删除")
-        android.app.AlertDialog.Builder(act)
-            .setTitle(name)
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> bridgeJson("skill_toggle_json", name, !disabled)
-                    1 -> android.app.AlertDialog.Builder(act)
-                        .setMessage("删除技能「$name」？\n（之后同类任务成功时大肥鱼会重新蒸馏）")
-                        .setPositiveButton("删除") { _, _ ->
-                            bridgeJson("skill_delete_json", name)
-                        }
-                        .setNegativeButton("取消", null)
-                        .show()
-                }
-            }
-            .show()
-    }
-
-    /** 管理动作统一走桥 + 刷新当前段（后台线程；失败吐司）。 */
-    private fun bridgeJson(method: String, vararg args: Any) {
-        val bridge = KernelHostService.pyBridgeModule ?: return
-        Thread {
-            try {
-                bridge.callAttr(method, *args)
-                main.post { load(section) }
-            } catch (e: Exception) {
-                main.post {
-                    android.widget.Toast.makeText(
-                        act, "${e.javaClass.simpleName}: ${e.message}",
-                        android.widget.Toast.LENGTH_SHORT).show()
-                }
-            }
-        }.start()
-    }
-
-    /** 记忆：动作行 + LTM 单脑概览卡 + 画像卡 + 旧蒸馏线遗留只读视图。 */
-    private fun renderMemory(r: JSONObject, extra: String?) {
-        bodyHost.removeAllViews()
-        // 动作行（P2 DoD3/DoD5）：导出全部知识（zip 分享）/ 一键清空
-        val actions = LinearLayout(act).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        }
-        fun actionBtn(label: String, danger: Boolean, onClick: () -> Unit) {
-            actions.addView(Ds.button(act, label, primary = !danger, danger = danger) { onClick() }.apply {
+            val del = TextView(act).apply {
+                text = "✕"; textSize = 13f; gravity = android.view.Gravity.CENTER; setTextColor(Ds.TEXT_3)
                 layoutParams = LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    if (actions.childCount > 0) marginStart = Ds.dp(act, 8)
-                }
-            })
-        }
-        actionBtn("整理知识", danger = false) { compactMemory() }
-        actionBtn("导出全部知识", danger = false) { exportKnowledge() }
-        actionBtn("清空", danger = true) { clearDialog() }
-        bodyHost.addView(actions, Ds.vp(bottom = Ds.dp(act, 10)))
-
-        // LTM 单脑概览（memory/brain.db，与 PC 同体系）：条数/状态分布 + 最近条目
-        val brain = r.optJSONObject("brain")
-        val profile = r.optString("profile")
-        val brainTotal = brain?.optInt("total", 0) ?: 0
-        if (brainTotal > 0) {
-            val card = Ds.card(act)
-            val byState = brain?.optJSONObject("by_state")
-            val active = byState?.optInt("active", 0) ?: 0
-            val dormant = byState?.optInt("dormant", 0) ?: 0
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            }
+            del.setOnClickListener {
+                val rid = a.optString("record_id")
+                Thread {
+                    runCatching {
+                        OmniAgentRemote.postJson(ChatPage.OMNI_HOST_BASE, "",
+                            "/api/debug/memory/delete", JSONObject().put("record_id", rid))
+                        main.post { load() }
+                    }.onFailure { Rlog.log("memory delete failed: ${it.message}") }
+                }.start()
+            }
+            headL.addView(del)
+            card.addView(headL)
             card.addView(TextView(act).apply {
-                text = "长期记忆 · $brainTotal 条" +
-                        (if (dormant > 0) "（活跃 $active / 休眠 $dormant）" else "")
-                textSize = 14f; setTextColor(Ds.TEXT); typeface = Typeface.DEFAULT_BOLD
+                text = a.optString("content"); textSize = 13f; setTextColor(Ds.TEXT)
+                setPadding(0, Ds.dp(act, 4), 0, 0)
             })
-            val recent = brain?.optJSONArray("recent")
-            if (recent != null && recent.length() > 0) {
-                val sb = StringBuilder()
-                for (i in 0 until minOf(recent.length(), 8)) {
-                    val line = recent.optString(i).replace('\n', ' ')
-                    if (line.isNotBlank()) sb.append("· ").append(line.take(80)).append('\n')
-                }
-                if (sb.isNotEmpty()) {
-                    card.addView(Ds.small(act, sb.toString().trimEnd())
-                        .apply { setPadding(0, Ds.dp(act, 6), 0, 0) })
-                }
-            }
-            bodyHost.addView(card, Ds.vp(bottom = Ds.dp(act, 10)))
+            card.addView(Ds.small(act, "强度 ${a.optDouble("importance", 0.0)} · " +
+                    a.optString("updated").take(16)).apply { setPadding(0, Ds.dp(act, 2), 0, 0) })
+            bodyHost.addView(card)
         }
-        if (profile.isNotBlank()) {
-            val card = Ds.card(act)
-            card.addView(TextView(act).apply {
-                text = "用户画像"
-                textSize = 14f; setTextColor(Ds.TEXT); typeface = Typeface.DEFAULT_BOLD
-            })
-            card.addView(Ds.small(act, profile.take(400) + if (profile.length > 400) "\n…" else "")
-                .apply { setPadding(0, Ds.dp(act, 6), 0, 0) })
-            bodyHost.addView(card, Ds.vp(bottom = Ds.dp(act, 10)))
-        }
-
-        // 旧蒸馏线遗留（MEMORY.md / rollouts）：只读视图，不再更新
-        val master = r.optString("master")
-        val rollouts = r.optInt("rollouts", 0)
-        if (brainTotal == 0 && profile.isBlank() && master.isBlank() && rollouts == 0) {
-            bodyHost.addView(Ds.emptyState(act, "≡", "还没有记忆",
-                "对话和任务结束后，大肥鱼会自动沉淀跨会话记忆；\n" +
-                "下次对话前按相关度检索注入。"))
-            return
-        }
-        if (master.isNotBlank()) {
-            val card = Ds.card(act)
-            card.addView(TextView(act).apply {
-                text = "全局记忆（旧版） · ${r.optInt("master_chars")} 字"
-                textSize = 14f; setTextColor(Ds.TEXT); typeface = Typeface.DEFAULT_BOLD
-            })
-            card.addView(Ds.small(act, master.take(600) + if (master.length > 600) "\n…" else "")
-                .apply { setPadding(0, Ds.dp(act, 6), 0, 0) })
-            bodyHost.addView(card, Ds.vp(bottom = Ds.dp(act, 10)))
-        }
-        if (extra != null) {
-            val er = JSONObject(extra)
-            val arr = er.optJSONArray("rollouts")
-            if (arr != null && arr.length() > 0) {
-                bodyHost.addView(Ds.h2(act, "蒸馏记录").apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                        .apply { setMargins(0, Ds.dp(act, 16), 0, Ds.dp(act, 4)) }
-                })
-                for (i in 0 until arr.length()) {
-                    val it2 = arr.getJSONObject(i)
-                    val card = Ds.card(act)
-                    val row = LinearLayout(act).apply {
-                        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                    }
-                    // 记忆行：显示实际内容摘要（preview，对齐设计稿 V7），超 2 行截断；
-                    // 点击进详情（AlertDialog 展示完整 content）。
-                    val contentFull = it2.optString("content")
-                    val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }.apply {
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                    }
-                    col.addView(TextView(act).apply {
-                        text = it2.optString("preview").takeIf { it.isNotBlank() }
-                            ?: it2.optString("task_id")
-                        textSize = 13f; setTextColor(Ds.TEXT)
-                        maxLines = 2
-                        ellipsize = TextUtils.TruncateAt.END
-                    })
-                    if (contentFull.isNotBlank()) {
-                        col.addView(Ds.small(act, "${it2.optInt("chars")} 字 · 点击查看详情").apply {
-                            setPadding(0, Ds.dp(act, 2), 0, 0)
-                        })
-                    }
-                    row.addView(col)
-                    card.setOnClickListener {
-                        android.app.AlertDialog.Builder(act)
-                            .setTitle("记忆详情")
-                            .setMessage(contentFull.ifBlank { "（无内容）" })
-                            .setPositiveButton("关闭", null)
-                            .show()
-                    }
-                    card.addView(row)
-                    bodyHost.addView(card, Ds.vp(top = Ds.dp(act, 6)))
-                }
-            }
-        }
-    }
-
-    private fun renderWorldModel() {
-        bodyHost.removeAllViews()
-        bodyHost.addView(Ds.emptyState(act, "◇", "世界模型（随任务积累）",
-            "App 布局/控件事实存在各任务资产目录（world_model.md），\n" +
-            "任务执行时由大肥鱼自维护参考；产品级汇总视图后置。"))
-    }
-
-    // ---------------- 管理动作（P2 DoD3 清空 / DoD5 导出 / P2-R 合并重复） ----------------
-
-    /** 合并重复（P2-R）：对存量事实做回溯合并。
-     *  语义去重只在「新增 vs 存量」时生效（保护人工编辑），调参前沉淀的同义
-     *  变体会一直留在库里 —— 这里给一次显式收口，并回显合并掉几条。 */
-    private fun compactMemory() {
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) {
-            android.widget.Toast.makeText(act, "内核启动中，稍后再试",
-                android.widget.Toast.LENGTH_SHORT).show()
-            return
-        }
-        Thread {
-            try {
-                val r = JSONObject(bridge.callAttr("knowledge_compact_json").toString())
-                if (!r.optBoolean("ok")) {
-                    main.post {
-                        android.widget.Toast.makeText(
-                            act, "整理失败：${r.optString("error")}",
-                            android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                    return@Thread
-                }
-                val brain = r.optJSONObject("brain")
-                val total = brain?.optInt("total", 0) ?: 0
-                val msg = "整理完成 · 共 $total 条长期记忆"
-                main.post {
-                    android.widget.Toast.makeText(
-                        act, msg, android.widget.Toast.LENGTH_SHORT).show()
-                    load(section)
-                }
-            } catch (e: Exception) {
-                main.post {
-                    android.widget.Toast.makeText(
-                        act, "合并失败：${e.message}",
-                        android.widget.Toast.LENGTH_SHORT).show()
-                }
-            }
-        }.start()
-    }
-
-    /** 一键清空（DoD3）：记忆-only 或 连技能一起；画像/角色卡是用户资产不动。 */
-    private fun clearDialog() {
-        android.app.AlertDialog.Builder(act)
-            .setTitle("清空知识")
-            .setItems(arrayOf("清空记忆（长期记忆 + 旧蒸馏记录）", "清空全部（记忆 + 技能）")) { _, which ->
-                val scope = if (which == 0) "memory" else "all"
-                android.app.AlertDialog.Builder(act)
-                    .setMessage(if (which == 0)
-                        "清空全部记忆？下次任务将无历史参考（技能保留）。"
-                    else "清空全部记忆与技能？下次任务从零开始积累。")
-                    .setPositiveButton("清空") { _, _ -> bridgeJson("knowledge_clear_json", scope) }
-                    .setNegativeButton("取消", null)
-                    .show()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    /** 导出全部知识（DoD5）：knowledge_export_json → 打 zip → 系统分享。
-     *  文件落 cacheDir/share/（FileProvider 只暴露此目录）。 */
-    private fun exportKnowledge() {
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) {
-            android.widget.Toast.makeText(act, "内核启动中，稍后再试",
-                android.widget.Toast.LENGTH_SHORT).show()
-            return
-        }
-        Thread {
-            try {
-                val r = JSONObject(bridge.callAttr("knowledge_export_json").toString())
-                if (!r.optBoolean("ok")) {
-                    main.post { android.widget.Toast.makeText(
-                        act, "导出失败：${r.optString("error")}",
-                        android.widget.Toast.LENGTH_SHORT).show() }
-                    return@Thread
-                }
-                val arr = r.optJSONArray("files") ?: org.json.JSONArray()
-                val shareDir = java.io.File(act.cacheDir, "share").apply { mkdirs() }
-                val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss",
-                    java.util.Locale.US).format(java.util.Date())
-                val out = java.io.File(shareDir, "hachimi_knowledge_$stamp.zip")
-                java.util.zip.ZipOutputStream(out.outputStream().buffered()).use { zip ->
-                    for (i in 0 until arr.length()) {
-                        val f = arr.getJSONObject(i)
-                        zip.putNextEntry(java.util.zip.ZipEntry(f.optString("path")))
-                        zip.write(f.optString("content").toByteArray(Charsets.UTF_8))
-                        zip.closeEntry()
-                    }
-                }
-                main.post {
-                    val uri = androidx.core.content.FileProvider.getUriForFile(
-                        act, "com.hachimi.app.fileprovider", out)
-                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                        type = "application/zip"
-                        putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    act.startActivity(android.content.Intent.createChooser(send, "导出知识"))
-                }
-            } catch (e: Exception) {
-                main.post { android.widget.Toast.makeText(
-                    act, "导出失败：${e.javaClass.simpleName}: ${e.message}",
-                    android.widget.Toast.LENGTH_SHORT).show() }
-            }
-        }.start()
     }
 }

@@ -168,25 +168,7 @@ def test_vision_json(base_url, api_key=None, model=None, jpeg_b64=None):
     return json.dumps(test_vision(base_url, api_key, model, jpeg_b64), ensure_ascii=False)
 
 
-# ---- K7 知识模块接线（注入 / Curator 挂钩 / 数据面） ----
-
-# 弱注入开关（Kotlin set_knowledge_enabled 注入；默认开 = 桌面 P2 定稿口径）
-_knowledge_enabled = {"on": True}
-
-
-def set_knowledge_enabled(enabled):
-    """Kotlin 设置页「弱注入」开关落 kernel（true=注入 memory/技能摘要）。
-
-    同步拨记忆层总开关：关 = L1 注入与 LTM 沉淀一起停（与桌面
-    runtime.knowledge.memory.enabled 同门语义）。
-    """
-    _knowledge_enabled["on"] = bool(enabled)
-    try:
-        from hachimi_kernel import memory_brain
-        memory_brain.set_enabled(bool(enabled))
-    except Exception:
-        pass
-    return {"ok": True, "knowledge_enabled": _knowledge_enabled["on"]}
+# ---- K7 知识模块数据面（记忆/技能聚合只读；开关真源 = /api/settings，2026-11-04 起） ----
 
 
 def memory_json():

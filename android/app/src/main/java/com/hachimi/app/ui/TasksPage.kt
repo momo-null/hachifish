@@ -13,12 +13,12 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import com.hachimi.app.BrainConfigStore
 import com.hachimi.app.DebugPanelActivity
 import com.hachimi.app.HachimiAccessibilityService
 import com.hachimi.app.KernelHostService
 import com.hachimi.app.ProjectionHolder
 import com.hachimi.app.MainActivity
+import com.hachimi.app.OmniAgentRemote
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -36,11 +36,8 @@ class TasksPage(private val act: Activity) {
     private lateinit var objInput: EditText
     private lateinit var doneInput: EditText
     private lateinit var doneToggle: TextView
-    private lateinit var segHost: LinearLayout
-    private var seg: Ds.Seg? = null
     private lateinit var chipsHost: LinearLayout
     private lateinit var envHost: LinearLayout
-    private lateinit var splitTip: TextView
     private lateinit var recentHost: LinearLayout
     private lateinit var resultHost: LinearLayout
     private lateinit var startBtn: TextView
@@ -71,16 +68,6 @@ class TasksPage(private val act: Activity) {
         // 环境未就绪引导卡（就绪时 GONE——干净 S2；P0 DoD5 状态指示保留于此）
         envHost = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
         box.addView(envHost)
-
-        // 执行模式分段（真实切换 /task body 的 mode）
-        segHost = LinearLayout(act)
-        seg = Ds.seg(act, listOf("前台引导", "分屏"), runMode) { pickMode(it) }
-            .also { segHost.addView(it.view) }
-        box.addView(segHost, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        splitTip = Ds.small(act, "").apply { setPadding(0, Ds.dp(act, 4), 0, Ds.dp(act, 10)) }
-        box.addView(splitTip)
-        renderSplitTip()
 
         // 任务输入卡（mockup：浅蓝描边白卡）
         val inputCard = LinearLayout(act).apply {
@@ -143,41 +130,19 @@ class TasksPage(private val act: Activity) {
         return ScrollView(act).apply { addView(box) }
     }
 
+    /** 本页直发任务的内核 task_id（轮询/停止寻址）。 */
+    private var currentTaskId: String? = null
+
     private fun toggleDone() {
         val show = doneInput.visibility == View.GONE
         doneInput.visibility = if (show) View.VISIBLE else View.GONE
         doneToggle.text = if (show) "完成判据（可选）▾" else "完成判据（可选）▸"
     }
 
-    private fun pickMode(i: Int) {
-        runMode = i
-        seg?.select(i)
-        SettingsPage.onRunModeChanged?.invoke(i)   // 设置页「默认模式」双向同步
-    }
-
-    /** 执行模式持久化（设置页「默认模式」与主界面分段同一份事实）。 */
-    private var runMode: Int
-        get() = act.getSharedPreferences(PREFS, 0).getInt("run_mode", 0)
-        set(v) {
-            act.getSharedPreferences(PREFS, 0).edit().putInt("run_mode", v).apply()
-            renderSplitTip()
-        }
-
-    /** 分屏模式内联引导：系统分屏需手动挂载（Android 12 无公开 API 程序化拉起），
-     *  Hachimi 分到哪一半，那一半就用「控制台视图」当 agent 面板。 */
-    private fun renderSplitTip() {
-        if (!::splitTip.isInitialized) return
-        splitTip.text = if (runMode == 1)
-            "分屏：与目标 App 上下分屏（最近任务 → 点应用图标 → 分屏），Hachifish 那一半「控制台视图」"
-        else "前台引导：悬浮叙述 + 实机操作"
-    }
-
     // ---------------- 环境与刷新 ----------------
 
     fun onResume() {
         if (!::page.isInitialized) return
-        seg?.select(runMode)
-        renderSplitTip()
         refreshChips()
         refreshEnv()
         refreshRecent()
@@ -220,29 +185,57 @@ class TasksPage(private val act: Activity) {
      */
     private fun refreshLastResult() {
         if (polling.get()) return
-        val bridge = KernelHostService.pyBridgeModule ?: return
         Thread {
             try {
-                val s = JSONObject(bridge.callAttr("status_json").toString())
+                val r = OmniAgentRemote.getJson(ChatPage.OMNI_HOST_BASE, "", "/api/runtime/tasks", 12000)
+                val t0 = r.optJSONArray("tasks")?.optJSONObject(0)
                 main.post {
-                    if (!polling.get() && s.optString("phase") != "running") result.render(s)
+                    if (polling.get()) return@post
+                    if (t0 == null) { result.render(null); return@post }
+                    val st = t0.optString("state")
+                    val success = t0.optBoolean("success")
+                    val phase = when {
+                        st == "running" -> "running"
+                        success -> "done"
+                        st == "failed" || (st == "aborted" && !success) -> "error"
+                        else -> return@post   // pending 等：维持现有结果区
+                    }
+                    result.render(JSONObject()
+                        .put("phase", phase)
+                        .put("summary", t0.optString("objective"))
+                        .put("steps_so_far", t0.optJSONArray("runs")?.length() ?: 0)
+                        .put("paused", false)
+                        .put("run_id", t0.optString("task_id")))
                 }
             } catch (_: Exception) {}
         }.start()
     }
 
+    /** 内核模型目录是否已配好主模型（refreshChips 线程刷新；refreshEnv 环境卡读）。 */
+    @Volatile private var kernelModelReady = false
+
     private fun refreshChips() {
-        chipsHost.removeAllViews()
-        val cfg = BrainConfigStore.load(act)
-        chipsHost.addView(Ds.chip(act, "规划模型", cfg != null), Ds.vp(left = Ds.dp(act, 4), w = LinearLayout.LayoutParams.WRAP_CONTENT))
-        chipsHost.addView(Ds.chip(act, "视觉模型", cfg?.visionEnabled == true), Ds.vp(left = Ds.dp(act, 4), w = LinearLayout.LayoutParams.WRAP_CONTENT))
+        // Phase 2 内核化：模型就绪 = 内核目录主模型槽位有生效端点（/api/runtime/models）
+        Thread {
+            val cur = runCatching {
+                OmniAgentRemote.getJson(ChatPage.OMNI_HOST_BASE, "", "/api/runtime/models", 12000)
+                    .optJSONObject("current")?.optJSONObject("main")
+            }.getOrNull()
+            val sel = cur?.optString("model").orEmpty()
+            kernelModelReady = cur?.optString("source") == "catalog" && sel.isNotEmpty()
+            main.post {
+                chipsHost.removeAllViews()
+                chipsHost.addView(Ds.chip(act, "主模型 " + if (kernelModelReady) sel else "未配置",
+                        kernelModelReady),
+                    Ds.vp(left = Ds.dp(act, 4), w = LinearLayout.LayoutParams.WRAP_CONTENT))
+            }
+        }.start()
     }
 
     /** 未就绪项 → 引导卡（全部就绪则整卡 GONE；形态收敛自 P0 环境卡终态）。 */
     private fun refreshEnv() {
         envHost.removeAllViews()
         val rows = mutableListOf<Triple<String, Boolean, (() -> Unit)?>>()
-        val cfg = BrainConfigStore.load(act)
         rows.add(Triple("无障碍通道", HachimiAccessibilityService.instance != null) {
             act.startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
@@ -250,12 +243,10 @@ class TasksPage(private val act: Activity) {
             act.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:${act.packageName}")))
         })
-        rows.add(Triple("模型端点(BYOK)", cfg != null) { openSettings() })
-        if (cfg?.visionEnabled == true) {
-            rows.add(Triple("屏幕观察(录屏)", ProjectionHolder.isRunning) {
-                (act as? MainActivity)?.requestProjection()
-            })
-        }
+        rows.add(Triple("模型端点", kernelModelReady) { openSettings() })
+        rows.add(Triple("屏幕观察(录屏)", ProjectionHolder.isRunning) {
+            (act as? MainActivity)?.requestProjection()
+        })
         rows.add(Triple("内核", KernelHostService.pyBridgeModule != null, null))
         val unready = rows.filter { !it.second }
         if (unready.isEmpty()) {
@@ -283,21 +274,12 @@ class TasksPage(private val act: Activity) {
         })
     }
 
-    private var recentRetries = 0
-
     private fun refreshRecent() {
-        // 内核冷启动（约 10s）期间 bridge 未挂：低频重试直到拿到首份数据
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) {
-            if (recentRetries++ < 5) main.postDelayed({ refreshRecent() }, 2000)
-            return
-        }
-        recentRetries = 0
+        // Phase 2（mini_loop 退役）：任务列表改读环回内核 /api/runtime/tasks（Web 同源）
         Thread {
             try {
-                val r = JSONObject(bridge.callAttr("list_tasks_json", 8).toString())
-                val tasks = r.optJSONArray("tasks")
-                main.post { renderRecent(tasks) }
+                val out = OmniAgentRemote.kernelTasks(ChatPage.OMNI_HOST_BASE, 12)
+                main.post { renderRecent(out) }
             } catch (_: Exception) {}
         }.start()
     }
@@ -348,6 +330,8 @@ class TasksPage(private val act: Activity) {
             val meta = mutableListOf<String>()
             if (steps >= 0) meta.add("$steps 步")
             if (wall >= 0) meta.add("${wall.toInt()}s")
+            val proj = t.optString("project")
+            if (proj.isNotEmpty() && proj != "default") meta.add("项目:$proj")
             meta.add((t.optString("created_at").take(10)))
             col.addView(Ds.small(act, meta.joinToString(" · ")).apply { setPadding(0, Ds.dp(act, 1), 0, 0) })
             row.addView(col.apply {
@@ -400,116 +384,94 @@ class TasksPage(private val act: Activity) {
                 .show()
             return
         }
-        val bridge = KernelHostService.pyBridgeModule
-        if (bridge == null) {
-            toast("内核启动中（首次约需 10 秒），稍后再试")
-            return
-        }
-        val cfg = BrainConfigStore.load(act)
-        if (cfg == null) {
-            toast("未配置模型端点（BYOK）：请先到 设置 → 通道（BYOK）填写并保存")
-            openSettings()
-            return
-        }
+        // BYOK 配置随内核 boot 注入（omni_host），此处无需 set_brain——内核未起时
+        // 下发会 404，由异常路径提示
         startBtn.isEnabled = false
         main.post { result.showStarting() }
-        beginPolling()   // start_task_json 同步阻塞至任务结束：轮询必须先于阻塞启动
         Thread {
             try {
-                // /task 路径的 Keystore → set_brain 注入段在直调路径复刻（约束一）
-                bridge.callAttr("set_brain", cfg.baseUrl, cfg.apiKey, cfg.model)
-                if (cfg.visionEnabled) {
-                    bridge.callAttr("set_vision", cfg.visionBaseUrl, cfg.visionApiKey, cfg.visionModel)
-                } else {
-                    bridge.callAttr("set_vision", "", "", "")
-                }
                 // 悬浮窗 addView 必须在主线程（面板已收起时 show 会真正重建窗口）
                 main.post { com.hachimi.app.NarrativePanel.show(act) }
-                val body = JSONObject()
-                    .put("objective", objective)
-                    .put("done_when", doneInput.text.toString().trim())
-                    // 步数上限（设置 → 通道，默认 24）：替换内核写死默认的可配置口
-                    .put("max_steps", SettingsPage.maxSteps(act))
-                    // 墙钟随步数放大，大步数任务不被内核 15 分钟默认墙钟截断
-                    .put("wall_clock_s", SettingsPage.wallClockS(SettingsPage.maxSteps(act)))
-                if (runMode == 1) body.put("mode", "split")
-                // 让位：任务已受理，Hachimi 回桌面，agent 从桌面开始找应用/开应用
-                // （2026-09-30 用户反馈：Hachimi 一直占前台，agent 无从下手）
                 main.post {
                     act.startActivity(Intent(Intent.ACTION_MAIN).apply {
                         addCategory(Intent.CATEGORY_HOME)
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     })
-                    if (runMode == 1) {
-                        toast("已开始。从最近任务把目标 App 与 Hachifish 上下分屏，" +
-                                "Hachifish 那一半点「控制台视图」")
-                    }
                 }
-                val r = JSONObject(bridge.callAttr("start_task_json", body.toString()).toString())
-                main.post {
-                    if (!r.optBoolean("ok")) {
-                        startRejected = true   // 让轮询立即退出（idle 宽限只服务真实启动）
-                        result.render(null)
-                        toast(MainActivity.readableErrorStatic(r.optString("error")))
-                        // 失败时把人带回主界面看错误与结果区
-                        act.startActivity(Intent(act, MainActivity::class.java)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
-                    startBtn.isEnabled = true
-                }
+                val tid = OmniAgentRemote.chat(ChatPage.OMNI_HOST_BASE, "", objective,
+                    null, false, SettingsPage.maxSteps(act))
+                currentTaskId = tid
+                startBtn.isEnabled = true
+                beginPolling(tid)
             } catch (e: Exception) {
                 main.post {
-                    toast("启动失败：${e.javaClass.simpleName}: ${e.message}")
+                    toast("任务下发失败：${MainActivity.readableErrorStatic(e.message ?: "")}")
                     startBtn.isEnabled = true
+                    result.render(null)
                 }
             }
         }.start()
     }
 
     private fun onControl(action: String) {
-        Thread {
-            try {
-                when (action) {
-                    "pause" -> KernelHostService.pyBridgeModule?.callAttr("request_pause")
-                    "resume" -> KernelHostService.pyBridgeModule?.callAttr("request_resume")
-                    "stop" -> KernelHostService.pyBridgeModule?.callAttr("request_stop")
+        // Phase 2：pause/resume 随 mini_loop 退役（内核运行期无暂停语义）；stop 走内核 API
+        if (action == "stop") {
+            Thread {
+                runCatching {
+                    OmniAgentRemote.stop(ChatPage.OMNI_HOST_BASE, "", currentTaskId)
                 }
-            } catch (_: Exception) {}
-        }.start()
+            }.start()
+        }
     }
 
-    /**
-     * 运行期轮询 bridge.status()：500ms → RunResultView 渲染（主界面实时状态，P0 DoD1）。
-     * phase=idle 宽限 150s：start_task 同步阻塞下，内核收到任务前 phase 仍是 idle
-     * （内核冷启动/上轮收尾），不能立刻退出轮询。
-     */
-    @Volatile private var startRejected = false
-
-    fun beginPolling() {
+    /** 运行期轮询内核任务状态（Phase 2）：700ms → RunResultView 渲染（运行中/终态）。 */
+    fun beginPolling(taskId: String) {
         if (!polling.compareAndSet(false, true)) return
-        startRejected = false
-        val idleDeadline = System.currentTimeMillis() + 150_000
         Thread {
+            var lastPhase = ""
             while (polling.get()) {
-                val bridge = KernelHostService.pyBridgeModule ?: break
                 try {
-                    val s = JSONObject(bridge.callAttr("status_json").toString())
-                    val phase = s.optString("phase")
-                    if (phase == "idle") {
-                        if (startRejected || System.currentTimeMillis() > idleDeadline) {
-                            main.post { result.render(null) }
-                            break
-                        }
-                    } else {
+                    val r = OmniAgentRemote.getJson(ChatPage.OMNI_HOST_BASE, "",
+                        "/api/runtime/tasks/" + java.net.URLEncoder.encode(taskId, "UTF-8"), 8000)
+                    val meta = r.optJSONObject("task")
+                    if (meta == null) break
+                    val st = meta.optString("state")
+                    val success = meta.optBoolean("success")
+                    val phase = when {
+                        st == "running" || st == "pending" -> "running"
+                        success -> "done"
+                        st == "failed" -> "error"
+                        st == "aborted" -> "error"
+                        else -> ""
+                    }
+                    if (phase != lastPhase && phase.isNotEmpty()) {
+                        lastPhase = phase
+                        val steps = r.optJSONObject("snapshot")?.optJSONArray("trajectory")?.length() ?: 0
+                        val s = JSONObject()
+                            .put("phase", phase)
+                            .put("steps_so_far", steps)
+                            .put("summary", meta.optString("objective"))
+                            .put("paused", false)
+                            .put("run_id", meta.optString("task_id"))
                         main.post { result.render(s) }
-                        if (phase != "running") break
+                        // 完成弹窗（主界面派单路径与对话页同一体验）
+                        if (phase == "done") main.post {
+                            com.hachimi.app.FinishPopup.show(act, true,
+                                meta.optString("objective"), steps)
+                        }
+                        if (phase == "error") main.post {
+                            com.hachimi.app.FinishPopup.show(act, false,
+                                "任务未完成：" + meta.optString("objective"), steps)
+                        }
+                        if (phase == "done" || phase == "error") break
                     }
                 } catch (_: Exception) {
                     break
                 }
-                Thread.sleep(500)
+                Thread.sleep(700)
             }
             polling.set(false)
+            main.post { refreshRecent() }
         }.start()
     }
 
