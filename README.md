@@ -12,7 +12,7 @@
 |----|------|
 | 原生壳 | Kotlin：AccessibilityService（操作通道）+ MediaProjection（观察通道）、前台服务、授权门控、BYOK 设置 UI |
 | 内核 | **完整上游 OmniAgent**（零改动）经 **Chaquopy** 嵌入 APK：环回 FastAPI/uvicorn 服务本机 agent 循环，GUI 原语以内核工具形式注册 |
-| 大脑唯一 | 发送路径单一：本机内核（Tier 1）或 PC 遥控（Tier 2，同一 wire contract），探活自动切换；内核未就绪显式等待，不降级 |
+| 大脑唯一 | 发送路径单一：本机内核（Tier 1）或 PC 遥控（Tier 2，同一 wire contract），勾选自动切换才按探活选路（默认关，走本机内核）；内核未就绪显式等待，不降级 |
 | 模型 | 任意 OpenAI 兼容端点（规划 + 视觉），用户自备 key，存 Android Keystore |
 | 视觉兜底 | 自绘/无控件 id 界面走 VLM；无障碍树可用时以树为主 |
 | 实验框架 | PC 侧 harness + `adb reverse` 回环 HTTP 驱动（产品运行本身不依赖 PC） |
